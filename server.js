@@ -22,7 +22,7 @@ let configStore = {
   inboxText: 'ร.กรุงศรี 6651198576\nชื่อภิญโญ แจ้งกระจ่าง\n\n🙏 โอนแล้วแจ้งสลิป พร้อมชื่อที่อยู่ ได้เลยคะ🥰\n✨ (ส่งฟรี) ส่งฟรี EMS ✨',
   enableInbox: true,
   enableCommentReply: true,
-  enableAutoLike: true, // เพิ่มค่าตั้งค่าเปิด/ปิดกดไลก์คอมเมนต์
+  enableAutoLike: true,
   
   enableSlipVerify: true,
   merchantBank: 'BAY', 
@@ -64,7 +64,7 @@ async function verifySlipWithEasySlip(imageUrl) {
 }
 
 // -------------------------------------------------------------
-// 1. หน้า Dashboard HTML UI + เพิ่ม UI กดไลก์คอมเมนต์
+// 1. หน้า Dashboard HTML UI + เพิ่มปุ่มผูก Webhook อัตโนมัติ
 // -------------------------------------------------------------
 app.get('/', (req, res) => {
   res.send(`<!DOCTYPE html>
@@ -114,7 +114,6 @@ app.get('/', (req, res) => {
                         </div>
                     </div>
 
-                    <!-- เพิ่ม Checkbox เปิด/ปิด กดไลก์คอมเมนต์ -->
                     <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-4">
                         <label class="flex items-center gap-2 cursor-pointer">
                             <input type="checkbox" id="enable-auto-like" class="w-4 h-4 text-blue-600 rounded">
@@ -281,14 +280,22 @@ app.get('/', (req, res) => {
                             </button>
                         </div>
 
-                        <!-- UI ส่วนเลือกเพจ -->
-                        <div id="page-select-box" class="bg-slate-50 p-4 rounded-xl border border-slate-200 mt-4 space-y-2">
+                        <!-- UI ส่วนเลือกเพจ + ปุ่มผูก Webhook ตรงนี้ -->
+                        <div id="page-select-box" class="bg-slate-50 p-4 rounded-xl border border-slate-200 mt-4 space-y-3">
                             <label class="text-xs font-semibold text-slate-700 block">🏪 เลือกเพจที่ต้องการใช้งานบอต:</label>
                             <div class="flex gap-2">
                                 <select id="page-select-dropdown" onchange="onPageDropdownSelected()" class="flex-1 p-2.5 text-sm bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-blue-500">
                                     <option value="">-- ยังไม่ได้เลือกเพจ (กดปุ่มเข้าสู่ระบบด้านบนก่อน) --</option>
                                 </select>
                                 <button type="button" onclick="fetchMyPagesManually()" class="px-4 py-2 bg-slate-800 text-white text-xs font-medium rounded-lg hover:bg-slate-700">รีเฟรชรายชื่อเพจ</button>
+                            </div>
+
+                            <!-- 🌟 ปุ่มผูก Webhook ให้อัตโนมัติ (subscribed_apps) -->
+                            <div class="pt-2 border-t border-slate-200 flex items-center justify-between">
+                                <span class="text-xs text-slate-500">กดปุ่มนี้เพื่อให้เพจส่งข้อมูลคอมเมนต์/แชทมาที่บอต (แทนการใช้ Graph API Explorer)</span>
+                                <button type="button" onclick="subscribeWebhookDirectly()" class="px-4 py-2 bg-indigo-600 text-white text-xs font-medium rounded-lg hover:bg-indigo-700 shadow-sm flex items-center gap-1.5 shrink-0">
+                                    ⚡ ผูก Webhook ให้เพจนี้ทันที
+                                </button>
                             </div>
                         </div>
                     </div>
@@ -430,6 +437,31 @@ app.get('/', (req, res) => {
                 currentConfig.pageAccessToken = selected.access_token;
                 currentConfig.pageId = selected.id;
                 saveConfig();
+            }
+        }
+
+        // 🌟 ฟังก์ชันส่งคำสั่งผูก Webhook (subscribed_apps) อัตโนมัติจากหน้าเว็บ
+        async function subscribeWebhookDirectly() {
+            const pageToken = document.getElementById('conf-page-token').value;
+            if(!pageToken) {
+                alert('⚠️ กรุณาเลือกเพจจากเมนูด้านบนก่อนครับ!');
+                return;
+            }
+
+            try {
+                const res = await fetch('/api/subscribe-webhook', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pageAccessToken: pageToken })
+                });
+                const data = await res.json();
+                if(data.success) {
+                    alert('🎉 ผูก Webhook (feed) ให้เพจสำเร็จเรียบร้อยแล้ว!');
+                } else {
+                    alert('❌ ผูก Webhook ไม่สำเร็จ: ' + (data.error || 'Unknown error'));
+                }
+            } catch(e) {
+                alert('❌ เกิดข้อผิดพลาดในการเชื่อมต่อเซิร์ฟเวอร์');
             }
         }
 
@@ -587,7 +619,7 @@ app.get('/auth/facebook/callback', (req, res) => {
 });
 
 // -------------------------------------------------------------
-// 3. API Config & Fetch Pages
+// 3. API Config, Fetch Pages & Subscribe Webhook
 // -------------------------------------------------------------
 app.get('/api/config', (req, res) => res.json({ success: true, config: configStore, subscriberCount: subscribers.size }));
 
@@ -605,6 +637,24 @@ app.post('/api/fetch-pages', async (req, res) => {
       params: { access_token: userAccessToken }
     });
     res.json({ success: true, pages: response.data.data });
+  } catch (err) {
+    res.json({ success: false, error: err.response?.data?.error?.message || err.message });
+  }
+});
+
+// 🌟 API สำหรับยิงคำสั่ง subscribed_apps ให้เพจอัตโนมัติ
+app.post('/api/subscribe-webhook', async (req, res) => {
+  const { pageAccessToken } = req.body;
+  if (!pageAccessToken) return res.json({ success: false, error: 'ไม่พบ Page Access Token' });
+
+  try {
+    const response = await axios.post('https://graph.facebook.com/v19.0/me/subscribed_apps', {}, {
+      params: {
+        subscribed_fields: 'feed',
+        access_token: pageAccessToken
+      }
+    });
+    res.json({ success: true, data: response.data });
   } catch (err) {
     res.json({ success: false, error: err.response?.data?.error?.message || err.message });
   }
@@ -665,7 +715,7 @@ app.post('/api/broadcast/stop', (req, res) => {
 app.get('/api/broadcast/status', (req, res) => res.json(broadcastStatus));
 
 // -------------------------------------------------------------
-// 5. Webhook Endpoints (เพิ่มฟังก์ชันกดไลก์คอมเมนต์อัตโนมัติ)
+// 5. Webhook Endpoints (รองรับ Auto-like และ Comment Reply)
 // -------------------------------------------------------------
 app.get('/webhook', (req, res) => {
   if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === configStore.verifyToken) {
@@ -750,7 +800,6 @@ app.post('/webhook', async (req, res) => {
               configStore.keywords.some(function(kw) { return commentText.toLowerCase().includes(kw.toLowerCase()); });
 
             if (isMatched && configStore.pageAccessToken) {
-              // 1. กดไลก์คอมเมนต์ (ถ้าเปิดใช้งาน)
               if (configStore.enableAutoLike) {
                 try {
                   await axios.post('https://graph.facebook.com/v19.0/' + comment.comment_id + '/likes', {}, {
@@ -761,14 +810,12 @@ app.post('/webhook', async (req, res) => {
                 }
               }
 
-              // 2. ตอบกลับใต้คอมเมนต์
               if (configStore.enableCommentReply) {
                 await axios.post('https://graph.facebook.com/v19.0/' + comment.comment_id + '/comments', {
                   message: configStore.replyCommentText
                 }, { params: { access_token: configStore.pageAccessToken } });
               }
 
-              // 3. ส่งข้อความเข้าแชทส่วนตัว (Inbox)
               if (configStore.enableInbox) {
                 await axios.post('https://graph.facebook.com/v19.0/me/messages', {
                   recipient: { comment_id: comment.comment_id },
