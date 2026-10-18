@@ -1,6 +1,7 @@
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
+const crypto = require('crypto');
 
 const app = express();
 app.use(cors());
@@ -8,10 +9,11 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // -------------------------------------------------------------
-// ฐานข้อมูลจำลอง (1 User สามารถมีเพจได้สูงสุด 5 เพจ)
+// ฐานข้อมูลจำลอง และ Index Map สำหรับความเร็วระดับ O(1)
 // -------------------------------------------------------------
-const usersDB = {}; 
-let sessions = {};  
+const usersDB = {};       // { username: { password, pages: { pageId: pageData } } }
+const pageIndexMap = {};  // { pageId: { username, pageData } }
+let sessions = {};        // { token: username }
 
 const defaultPageConfig = {
   appId: '1611337127153323',
@@ -40,12 +42,21 @@ const defaultPageConfig = {
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+// ป้องกัน XSS เบื้องต้นสำหรับข้อมูลข้อความ
+function escapeHtml(str) {
+  if (typeof str !== 'string') return str;
+  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+}
+
 async function verifySlipWithEasySlip(imageUrl) {
   const EASYSLIP_API_KEY = '47f197e2-8c05-42bb-b9ad-9186f84faa82';
   try {
     const response = await axios.post('https://chatbot.easyslip.com/v1/public/verify', 
       { url: imageUrl },
-      { headers: { 'Authorization': 'Bearer ' + EASYSLIP_API_KEY } }
+      { 
+        headers: { 'Authorization': 'Bearer ' + EASYSLIP_API_KEY },
+        timeout: 10000 // Timeout 10 วินาที ป้องกันเซิร์ฟเวอร์ค้าง
+      }
     );
     return response.data;
   } catch (err) {
@@ -65,7 +76,7 @@ function checkAuth(req, res, next) {
 }
 
 // -------------------------------------------------------------
-// 1. หน้า Dashboard HTML UI (เพิ่มปุ่มลบเพจปัจจุบัน)
+// 1. หน้า Dashboard HTML UI
 // -------------------------------------------------------------
 app.get('/', (req, res) => {
   res.send(`<!DOCTYPE html>
@@ -73,7 +84,7 @@ app.get('/', (req, res) => {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ระบบจัดการ 5 เพจ พร้อมบอตตอบคอมเมนต์</title>
+    <title>ระบบจัดการ Multi-Page Bot ตอบคอมเมนต์อัตโนมัติ</title>
     <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
     <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style> body { font-family: 'Sarabun', sans-serif; } </style>
@@ -85,7 +96,7 @@ app.get('/', (req, res) => {
         <div class="bg-white rounded-3xl shadow-xl w-full max-w-md p-8 space-y-6">
             <div class="text-center">
                 <h2 class="text-2xl font-bold text-slate-800">FB Bot Manager</h2>
-                <p class="text-xs text-slate-500 mt-1">เข้าสู่ระบบเพื่อจัดการเพจของคุณ (สูงสุด 5 เพจ)</p>
+                <p class="text-xs text-slate-500 mt-1">เข้าสู่ระบบเพื่อจัดการเพจของคุณ (ทำงานพร้อมกันได้สูงสุด 5 เพจ)</p>
             </div>
             <div class="flex bg-slate-100 p-1 rounded-xl">
                 <button type="button" onclick="switchAuthMode('login')" id="tab-login" class="flex-1 py-2 text-xs font-bold rounded-lg bg-white shadow-sm text-blue-600 transition-all">เข้าสู่ระบบ</button>
@@ -113,9 +124,8 @@ app.get('/', (req, res) => {
                 <button type="button" onclick="logout()" class="text-xs text-rose-500 hover:underline font-semibold">ออกจากระบบ</button>
             </div>
             
-            <!-- ส่วนเลือกเพจสลับทำงาน + ปุ่มลบเพจ -->
             <div class="p-4 border-b border-slate-100 bg-slate-50 space-y-2">
-                <label class="text-xs font-bold text-slate-600 block">🏪 เลือกเพจที่กำลังจัดการ:</label>
+                <label class="text-xs font-bold text-slate-600 block">🏪 เลือกเพจที่กำลังจัดการตั้งค่า:</label>
                 <select id="active-page-selector" onchange="switchActivePage(this.value)" class="w-full p-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-blue-500">
                     <option value="">-- ยังไม่มีเพจในระบบ --</option>
                 </select>
@@ -463,7 +473,6 @@ app.get('/', (req, res) => {
             loadConfigForActivePage();
         }
 
-        // 🌟 ฟังก์ชันลบเพจที่กำลังเลือกอยู่ออกจากระบบ
         async function deleteCurrentPage() {
             if(!currentActivePageId) return alert('⚠️ ไม่มีเพจให้ลบครับ');
             if(!confirm('⚠️ ยืนยันการลบเพจนี้ออกจากระบบ? บอตและข้อมูลตั้งค่าของเพจนี้จะถูกลบออก')) return;
@@ -510,12 +519,17 @@ app.get('/', (req, res) => {
             }
         }
 
+        function escapeHtml(str) {
+            return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
         function renderUI() {
             if(!currentConfig.keywords) currentConfig.keywords = [];
             const kwContainer = document.getElementById('keywords-container');
             kwContainer.innerHTML = '';
             currentConfig.keywords.forEach((kw, i) => {
-                kwContainer.innerHTML += '<span class="inline-flex items-center gap-1.5 px-3 py-1 bg-blue-600 text-white text-xs font-medium rounded-lg">' + kw + ' <button type="button" onclick="removeKeyword(' + i + ')" class="hover:text-red-200 font-bold ml-1">×</button></span>';
+                const safeKw = escapeHtml(kw);
+                kwContainer.innerHTML += '<span class="inline-flex items-center gap-1.5 px-3 py-1 bg-blue-600 text-white text-xs font-medium rounded-lg">' + safeKw + ' <button type="button" onclick="removeKeyword(' + i + ')" class="hover:text-red-200 font-bold ml-1">×</button></span>';
             });
 
             document.getElementById('reply-comment-input').value = currentConfig.replyCommentText || '';
@@ -576,7 +590,7 @@ app.get('/', (req, res) => {
                     const dropdown = document.getElementById('page-select-dropdown');
                     dropdown.innerHTML = '<option value="">-- เลือกเพจ --</option>';
                     data.pages.forEach((p, idx) => {
-                        dropdown.innerHTML += '<option value="' + idx + '">' + p.name + ' (ID: ' + p.id + ')</option>';
+                        dropdown.innerHTML += '<option value="' + idx + '">' + escapeHtml(p.name) + ' (ID: ' + escapeHtml(p.id) + ')</option>';
                     });
                     if(showAlert) alert('✅ ดึงข้อมูลสำเร็จ พบ ' + data.pages.length + ' เพจ');
                 } else {
@@ -748,7 +762,7 @@ app.get('/', (req, res) => {
 });
 
 // -------------------------------------------------------------
-// 2. Endpoint ระบบ Authentication (Sign up / Login)
+// 2. Endpoint ระบบ Authentication (Secure Tokens)
 // -------------------------------------------------------------
 app.post('/api/signup', (req, res) => {
   const { username, password } = req.body;
@@ -760,7 +774,7 @@ app.post('/api/signup', (req, res) => {
     pages: {} 
   };
 
-  const token = 'token_' + Date.now() + '_' + Math.random().toString(36).substring(2);
+  const token = 'token_' + crypto.randomBytes(32).toString('hex');
   sessions[token] = username;
   res.json({ success: true, token });
 });
@@ -771,7 +785,7 @@ app.post('/api/login', (req, res) => {
     return res.json({ success: false, error: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' });
   }
 
-  const token = 'token_' + Date.now() + '_' + Math.random().toString(36).substring(2);
+  const token = 'token_' + crypto.randomBytes(32).toString('hex');
   sessions[token] = username;
   res.json({ success: true, token });
 });
@@ -786,7 +800,7 @@ app.get('/api/verify-session', (req, res) => {
 });
 
 // -------------------------------------------------------------
-// 3. Facebook OAuth Callback สำหรับดึงรายชื่อเพจ
+// 3. Facebook OAuth Callback
 // -------------------------------------------------------------
 app.get('/auth/facebook/callback', (req, res) => {
   res.send(`<!DOCTYPE html>
@@ -812,7 +826,7 @@ app.get('/auth/facebook/callback', (req, res) => {
 });
 
 // -------------------------------------------------------------
-// 4. API จัดการเพจและตั้งค่า (เพิ่ม Endpoint สำหรับลบเพจ)
+// 4. API จัดการเพจและตั้งค่า (Index Mapping O(1))
 // -------------------------------------------------------------
 app.get('/api/user/pages', checkAuth, (req, res) => {
   res.json({ success: true, pages: usersDB[req.userId].pages });
@@ -821,21 +835,27 @@ app.get('/api/user/pages', checkAuth, (req, res) => {
 app.post('/api/user/add-page', checkAuth, (req, res) => {
   const username = req.userId;
   const { pageId, pageName, pageAccessToken } = req.body;
+  
+  if (!pageId || !pageAccessToken) return res.json({ success: false, error: 'ข้อมูลเพจไม่ครบถ้วน' });
+
   const userPages = usersDB[username].pages;
 
   if (userPages[pageId]) return res.json({ success: false, error: 'เพจนี้ถูกเพิ่มในระบบแล้ว' });
   if (Object.keys(userPages).length >= 5) return res.json({ success: false, error: 'จำกัดการเพิ่มสูงสุดไม่เกิน 5 เพจต่อ User ครับ' });
 
-  userPages[pageId] = {
+  const newPageData = {
     config: { ...defaultPageConfig, pageId, pageName, pageAccessToken },
     subscribers: new Set(),
     usedSlips: new Set(),
     broadcastStatus: { isBroadcasting: false, total: 0, current: 0, success: 0, failed: 0, statusMessage: 'พร้อมใช้งาน', shouldStop: false }
   };
+
+  userPages[pageId] = newPageData;
+  pageIndexMap[pageId] = { username, pageData: newPageData }; // บันทึกเข้า Index Map เพื่อความเร็วสูงสุด
+
   res.json({ success: true });
 });
 
-// 🌟 เพิ่ม API สำหรับลบเพจที่กำลังรันอยู่
 app.post('/api/user/delete-page', checkAuth, (req, res) => {
   const username = req.userId;
   const { pageId } = req.body;
@@ -843,6 +863,7 @@ app.post('/api/user/delete-page', checkAuth, (req, res) => {
 
   if (userPages[pageId]) {
     delete userPages[pageId];
+    delete pageIndexMap[pageId]; // ลบออกจาก Index Map ด้วย
     res.json({ success: true });
   } else {
     res.json({ success: false, error: 'ไม่พบเพจนี้ในระบบ' });
@@ -880,7 +901,8 @@ app.post('/api/fetch-pages', async (req, res) => {
 
   try {
     const response = await axios.get('https://graph.facebook.com/v19.0/me/accounts', {
-      params: { access_token: userAccessToken }
+      params: { access_token: userAccessToken },
+      timeout: 10000
     });
     res.json({ success: true, pages: response.data.data });
   } catch (err) {
@@ -897,7 +919,8 @@ app.post('/api/subscribe-webhook', async (req, res) => {
       params: {
         subscribed_fields: 'feed',
         access_token: pageAccessToken
-      }
+      },
+      timeout: 10000
     });
     res.json({ success: true, data: response.data });
   } catch (err) {
@@ -906,7 +929,7 @@ app.post('/api/subscribe-webhook', async (req, res) => {
 });
 
 // -------------------------------------------------------------
-// 5. API บรอดแคส (แยกตาม User & Page)
+// 5. API บรอดแคส
 // -------------------------------------------------------------
 app.post('/api/broadcast/start', checkAuth, async (req, res) => {
   const username = req.userId;
@@ -935,7 +958,10 @@ app.post('/api/broadcast/start', checkAuth, async (req, res) => {
         await axios.post('https://graph.facebook.com/v19.0/me/messages', {
           recipient: { id: recipientId },
           message: { text: message }
-        }, { params: { access_token: pageData.config.pageAccessToken } });
+        }, { 
+          params: { access_token: pageData.config.pageAccessToken },
+          timeout: 10000 
+        });
         pageData.broadcastStatus.success++;
       } catch (err) {
         pageData.broadcastStatus.failed++;
@@ -978,22 +1004,20 @@ app.get('/api/broadcast/status', checkAuth, (req, res) => {
 });
 
 // -------------------------------------------------------------
-// 6. Webhook Endpoints
+// 6. Webhook Endpoints (High Performance O(1) Routing)
 // -------------------------------------------------------------
 app.get('/webhook', (req, res) => {
   const verifyToken = req.query['hub.verify_token'];
-  let matchedConfig = null;
-  for (const uname in usersDB) {
-    for (const pid in usersDB[uname].pages) {
-      if (usersDB[uname].pages[pid].config.verifyToken === verifyToken) {
-        matchedConfig = usersDB[uname].pages[pid].config;
-        break;
-      }
+  let isMatched = false;
+  
+  for (const pid in pageIndexMap) {
+    if (pageIndexMap[pid].pageData.config.verifyToken === verifyToken) {
+      isMatched = true;
+      break;
     }
-    if (matchedConfig) break;
   }
 
-  if (req.query['hub.mode'] === 'subscribe' && matchedConfig) {
+  if (req.query['hub.mode'] === 'subscribe' && (isMatched || verifyToken === defaultPageConfig.verifyToken)) {
     res.status(200).send(req.query['hub.challenge']);
   } else {
     res.sendStatus(403);
@@ -1008,20 +1032,15 @@ app.post('/webhook', async (req, res) => {
     for (const entry of body.entry || []) {
       const pageId = entry.id;
 
-      let targetPageData = null;
-      for (const uname in usersDB) {
-        if (usersDB[uname].pages[pageId]) {
-          targetPageData = usersDB[uname].pages[pageId];
-          break;
-        }
-      }
+      // 🌟 ค้นหาข้อมูลเพจทันทีด้วย O(1) Index Map ทำให้ทุกเพจทำงานพร้อมกันได้อย่างแม่นยำ 100%
+      const targetRecord = pageIndexMap[pageId];
+      if (!targetRecord) continue;
 
-      if (!targetPageData) continue;
+      const configStore = targetRecord.pageData.config;
+      const subscribers = targetRecord.pageData.subscribers;
+      const usedSlips = targetRecord.pageData.usedSlips;
 
-      const configStore = targetPageData.config;
-      const subscribers = targetPageData.subscribers;
-      const usedSlips = targetPageData.usedSlips;
-
+      // 1. ตรวจสอบข้อความ / สลิปใน Inbox
       if (entry.messaging) {
         for (const msgEvent of entry.messaging) {
           const senderId = msgEvent.sender?.id;
@@ -1042,7 +1061,7 @@ app.post('/webhook', async (req, res) => {
                       await axios.post('https://graph.facebook.com/v19.0/me/messages', {
                         recipient: { id: senderId },
                         message: { text: configStore.msgSlipDuplicate }
-                      }, { params: { access_token: configStore.pageAccessToken } });
+                      }, { params: { access_token: configStore.pageAccessToken }, timeout: 10000 });
                     }
                     continue;
                   }
@@ -1061,14 +1080,14 @@ app.post('/webhook', async (req, res) => {
                       await axios.post('https://graph.facebook.com/v19.0/me/messages', {
                         recipient: { id: senderId },
                         message: { text: replyText }
-                      }, { params: { access_token: configStore.pageAccessToken } });
+                      }, { params: { access_token: configStore.pageAccessToken }, timeout: 10000 });
                     }
                   } else {
                     if (configStore.pageAccessToken) {
                       await axios.post('https://graph.facebook.com/v19.0/me/messages', {
                         recipient: { id: senderId },
                         message: { text: configStore.msgSlipInvalid }
-                      }, { params: { access_token: configStore.pageAccessToken } });
+                      }, { params: { access_token: configStore.pageAccessToken }, timeout: 10000 });
                     }
                   }
                 }
@@ -1078,6 +1097,7 @@ app.post('/webhook', async (req, res) => {
         }
       }
 
+      // 2. ระบบบอตตอบคอมเมนต์อัตโนมัติ
       if (entry.changes) {
         for (const change of entry.changes) {
           if (change.field === 'feed' && change.value.item === 'comment' && change.value.verb === 'add') {
@@ -1095,22 +1115,37 @@ app.post('/webhook', async (req, res) => {
               if (configStore.enableAutoLike) {
                 try {
                   await axios.post('https://graph.facebook.com/v19.0/' + comment.comment_id + '/likes', {}, {
-                    params: { access_token: configStore.pageAccessToken }
+                    params: { access_token: configStore.pageAccessToken },
+                    timeout: 10000
                   });
                 } catch (likeErr) {}
               }
 
               if (configStore.enableCommentReply) {
-                await axios.post('https://graph.facebook.com/v19.0/' + comment.comment_id + '/comments', {
-                  message: configStore.replyCommentText
-                }, { params: { access_token: configStore.pageAccessToken } });
+                try {
+                  await axios.post('https://graph.facebook.com/v19.0/' + comment.comment_id + '/comments', {
+                    message: configStore.replyCommentText
+                  }, { 
+                    params: { access_token: configStore.pageAccessToken },
+                    timeout: 10000 
+                  });
+                } catch (repErr) {
+                  console.error('❌ [Comment Reply Error]', repErr.response?.data || repErr.message);
+                }
               }
 
               if (configStore.enableInbox) {
-                await axios.post('https://graph.facebook.com/v19.0/me/messages', {
-                  recipient: { comment_id: comment.comment_id },
-                  message: { text: configStore.inboxText }
-                }, { params: { access_token: configStore.pageAccessToken } });
+                try {
+                  await axios.post('https://graph.facebook.com/v19.0/me/messages', {
+                    recipient: { comment_id: comment.comment_id },
+                    message: { text: configStore.inboxText }
+                  }, { 
+                    params: { access_token: configStore.pageAccessToken },
+                    timeout: 10000 
+                  });
+                } catch (inbErr) {
+                  console.error('❌ [Inbox Error]', inbErr.response?.data || inbErr.message);
+                }
               }
             }
           }
@@ -1129,6 +1164,6 @@ const serverUrl = process.env.RENDER_EXTERNAL_URL || ('http://localhost:' + PORT
 app.listen(PORT, () => {
   console.log('Server is running on port ' + PORT);
   setInterval(async () => {
-    try { await axios.get(serverUrl); } catch (e) {}
+    try { await axios.get(serverUrl, { timeout: 5000 }); } catch (e) {}
   }, 10 * 60 * 1000);
 });
