@@ -18,6 +18,7 @@ const defaultPageConfig = {
   pageAccessToken: '',
   pageId: '',
   pageName: '',
+  easySlipApiKey: '47f197e2-8c05-42bb-b9ad-9186f84faa82', // EasySlip API Key
   
   matchType: 'contains',
   keywords: ['1', '11', '111', '11111', '111111', 'สนใจ', 'cf'],
@@ -44,22 +45,31 @@ function escapeHtml(str) {
   return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
 }
 
-async function verifySlipWithEasySlip(imageUrl) {
-  const EASYSLIP_API_KEY = '47f197e2-8c05-42bb-b9ad-9186f84faa82';
+// 🛠️ ฟังก์ชันสำหรับเรียกใช้งาน EasySlip API (จากไฟล์ server_3.js)
+async function verifySlipByImageUrl(imageUrl, apiKey) {
+  const keyToUse = apiKey || defaultPageConfig.easySlipApiKey;
+  if (!keyToUse) {
+    console.log('⚠️ ยังไม่ได้ตั้งค่า EasySlip API Key');
+    return { success: false, message: 'API Key missing' };
+  }
+
   try {
     console.log('🔍 [EasySlip] กำลังส่งรูปไปตรวจ:', imageUrl);
-    const response = await axios.post('https://chatbot.easyslip.com/v1/public/verify', 
-      { url: imageUrl },
-      { 
-        headers: { 'Authorization': 'Bearer ' + EASYSLIP_API_KEY },
-        timeout: 10000 
-      }
-    );
+    const response = await axios.post('https://api.easyslip.com/v2/verify/bank', {
+      url: imageUrl
+    }, {
+      headers: {
+        'Authorization': `Bearer ${keyToUse}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 15000
+    });
+
     console.log('✅ [EasySlip] ผลการตรวจสอบ Raw Data:', JSON.stringify(response.data, null, 2));
-    return response.data;
+    return { success: true, data: response.data };
   } catch (err) {
-    console.error('❌ [EasySlip] ตรวจสอบล้มเหลว:', err.response?.data || err.message);
-    return null;
+    console.error('❌ ตรวจสอบสลิปผ่าน EasySlip ไม่สำเร็จ:', err.response?.data || err.message);
+    return { success: false, error: err.response?.data || err.message };
   }
 }
 
@@ -197,6 +207,11 @@ app.get('/', (req, res) => {
                                 <div class="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-500 relative"></div>
                                 <span class="ml-3 text-sm font-semibold text-slate-700">เปิดใช้งานตรวจสอบ</span>
                             </label>
+                        </div>
+
+                        <div>
+                            <label class="text-xs font-semibold text-slate-600 block mb-1">EasySlip API Key:</label>
+                            <input type="text" id="easyslip-api-key" class="w-full p-2.5 text-sm bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-rose-400" placeholder="กรอก API Key จาก EasySlip...">
                         </div>
 
                         <div class="bg-rose-50/50 border border-rose-200 rounded-2xl p-5 space-y-4">
@@ -534,6 +549,7 @@ app.get('/', (req, res) => {
             document.getElementById('webhook-url-display').value = window.location.origin + '/webhook';
             
             document.getElementById('enable-slip-verify').checked = !!currentConfig.enableSlipVerify;
+            document.getElementById('easyslip-api-key').value = currentConfig.easySlipApiKey || '';
             document.getElementById('merchant-bank').value = currentConfig.merchantBank || 'BAY';
             document.getElementById('merchant-account').value = currentConfig.merchantAccount || '';
             document.getElementById('merchant-name').value = currentConfig.merchantName || '';
@@ -674,6 +690,7 @@ app.get('/', (req, res) => {
             currentConfig.pageId = document.getElementById('conf-page-id').value.trim();
 
             currentConfig.enableSlipVerify = document.getElementById('enable-slip-verify').checked;
+            currentConfig.easySlipApiKey = document.getElementById('easyslip-api-key').value.trim();
             currentConfig.merchantBank = document.getElementById('merchant-bank').value;
             currentConfig.merchantAccount = document.getElementById('merchant-account').value;
             currentConfig.merchantName = document.getElementById('merchant-name').value;
@@ -1010,7 +1027,7 @@ app.get('/api/broadcast/status', checkAuth, (req, res) => {
 });
 
 // -------------------------------------------------------------
-// 6. Webhook Endpoints พร้อมระบบแกะโครงสร้างสลิป EasySlip ขั้นสูง
+// 6. Webhook Endpoints พร้อมระบบตรวจสอบสลิป EasySlip
 // -------------------------------------------------------------
 app.get('/webhook', (req, res) => {
   const verifyToken = req.query['hub.verify_token'];
@@ -1077,12 +1094,12 @@ app.post('/webhook', async (req, res) => {
                 if (!imageUrl) continue;
 
                 console.log(`🧾 [Page: ${pageId}] พบรูปภาพจากลูกค้า ID: ${senderId} กำลังตรวจสอบสลิป...`);
-                const slipResult = await verifySlipWithEasySlip(imageUrl);
+                // เรียกใช้ฟังก์ชัน verifySlipByImageUrl
+                const slipResult = await verifySlipByImageUrl(imageUrl, configStore.easySlipApiKey);
 
-                if (slipResult) {
-                  // ดึง object ข้อมูลด้านในออกมาไม่ว่าจะอยู่ชั้นไหนของ JSON
-                  const slipData = slipResult.data || slipResult.result || slipResult;
-                  const slipTransRef = slipData.transRef || slipData.id || slipData.transNumber || slipData.ref1;
+                if (slipResult && slipResult.success && slipResult.data) {
+                  const slipData = slipResult.data.data || slipResult.data;
+                  const slipTransRef = slipData.transRef || slipData.id || slipData.transNumber;
 
                   if (!slipTransRef) {
                     console.log(`⚠️ [Page: ${pageId}] ไม่พบเลขที่อ้างอิงสลิป (transRef)`);
@@ -1106,20 +1123,15 @@ app.post('/webhook', async (req, res) => {
                     continue;
                   }
 
-                  // ดึงเลขบัญชีผู้รับจากทุกโครงสร้างที่เป็นไปได้ของ EasySlip
                   const recvAcc = 
                     slipData.receiver?.account?.bank?.account || 
                     slipData.receiver?.account?.proxy?.account || 
-                    slipData.receiver?.account || 
-                    slipData.receiver?.number || 
-                    slipData.receiverAccount || '';
+                    slipData.receiver?.account?.name?.th || 
+                    slipData.receiver?.account || '';
 
                   const cleanMerchantAcc = (configStore.merchantAccount || '').replace(/[^0-9]/g, '');
                   const cleanRecvAcc = String(recvAcc).replace(/[^0-9]/g, '');
 
-                  console.log(`🔎 [Slip Check] บัญชีร้านค้าที่ตั้งไว้: "${cleanMerchantAcc}" | บัญชีในสลิปที่อ่านได้: "${cleanRecvAcc}"`);
-
-                  // ถ้าไม่ได้ตั้งค่าเลขบัญชีไว้ หรือเลขบัญชีตรงกัน ให้ถือว่าผ่าน
                   if (!cleanMerchantAcc || cleanRecvAcc.includes(cleanMerchantAcc) || cleanMerchantAcc.includes(cleanRecvAcc) || cleanMerchantAcc === '') {
                     usedSlips.add(slipTransRef);
                     const amountVal = slipData.amount?.amount || slipData.amount || 0;
