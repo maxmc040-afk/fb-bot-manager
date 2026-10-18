@@ -559,7 +559,7 @@ app.get('/', (req, res) => {
             if(hash.includes('access_token')) {
                 const token = new URLSearchParams(hash.substring(1)).get('access_token');
                 localStorage.setItem('fb_user_token', token);
-                window.location.href = '/?tab=webhook';
+                window.location.href = '/?tab=webhook&connected=true';
             }
             const savedFbToken = localStorage.getItem('fb_user_token');
             if(savedFbToken) fetchPagesWithToken(savedFbToken, false);
@@ -1010,7 +1010,7 @@ app.get('/api/broadcast/status', checkAuth, (req, res) => {
 });
 
 // -------------------------------------------------------------
-// 6. Webhook Endpoints พร้อมระบบตรวจสอบสลิปและแกะโครงสร้าง EasySlip
+// 6. Webhook Endpoints พร้อมระบบแกะโครงสร้างสลิป EasySlip ขั้นสูง
 // -------------------------------------------------------------
 app.get('/webhook', (req, res) => {
   const verifyToken = req.query['hub.verify_token'];
@@ -1079,10 +1079,10 @@ app.post('/webhook', async (req, res) => {
                 console.log(`🧾 [Page: ${pageId}] พบรูปภาพจากลูกค้า ID: ${senderId} กำลังตรวจสอบสลิป...`);
                 const slipResult = await verifySlipWithEasySlip(imageUrl);
 
-                // รองรับโครงสร้างผลลัพธ์ของ EasySlip ทุกรูปแบบ (response.status === 200 หรือ response.code === 200 หรือมี data object)
-                if (slipResult && (slipResult.status === 200 || slipResult.code === 200 || slipResult.data)) {
-                  const slipData = slipResult.data || slipResult;
-                  const slipTransRef = slipData.transRef || slipData.id || slipData.transNumber;
+                if (slipResult) {
+                  // ดึง object ข้อมูลด้านในออกมาไม่ว่าจะอยู่ชั้นไหนของ JSON
+                  const slipData = slipResult.data || slipResult.result || slipResult;
+                  const slipTransRef = slipData.transRef || slipData.id || slipData.transNumber || slipData.ref1;
 
                   if (!slipTransRef) {
                     console.log(`⚠️ [Page: ${pageId}] ไม่พบเลขที่อ้างอิงสลิป (transRef)`);
@@ -1106,16 +1106,28 @@ app.post('/webhook', async (req, res) => {
                     continue;
                   }
 
-                  const recvAcc = slipData.receiver?.account?.bank?.account || slipData.receiver?.account?.proxy?.account || slipData.receiver?.account || '';
+                  // ดึงเลขบัญชีผู้รับจากทุกโครงสร้างที่เป็นไปได้ของ EasySlip
+                  const recvAcc = 
+                    slipData.receiver?.account?.bank?.account || 
+                    slipData.receiver?.account?.proxy?.account || 
+                    slipData.receiver?.account || 
+                    slipData.receiver?.number || 
+                    slipData.receiverAccount || '';
+
                   const cleanMerchantAcc = (configStore.merchantAccount || '').replace(/[^0-9]/g, '');
                   const cleanRecvAcc = String(recvAcc).replace(/[^0-9]/g, '');
 
-                  // เช็คเลขบัญชีผู้รับ หรือถ้าไม่ได้ตั้งค่าบัญชีไว้ ให้ผ่านไปตรวจสอบยอดเงินได้เลย
-                  if (!cleanMerchantAcc || cleanRecvAcc.includes(cleanMerchantAcc) || cleanMerchantAcc.includes(cleanRecvAcc)) {
+                  console.log(`🔎 [Slip Check] บัญชีร้านค้าที่ตั้งไว้: "${cleanMerchantAcc}" | บัญชีในสลิปที่อ่านได้: "${cleanRecvAcc}"`);
+
+                  // ถ้าไม่ได้ตั้งค่าเลขบัญชีไว้ หรือเลขบัญชีตรงกัน ให้ถือว่าผ่าน
+                  if (!cleanMerchantAcc || cleanRecvAcc.includes(cleanMerchantAcc) || cleanMerchantAcc.includes(cleanRecvAcc) || cleanMerchantAcc === '') {
                     usedSlips.add(slipTransRef);
+                    const amountVal = slipData.amount?.amount || slipData.amount || 0;
+                    const dateVal = slipData.transDate || slipData.date || '';
+
                     let replyText = configStore.msgSlipSuccess
-                      .replace('{amount}', slipData.amount?.amount || slipData.amount || 0)
-                      .replace('{date}', slipData.transDate || '');
+                      .replace('{amount}', amountVal)
+                      .replace('{date}', dateVal);
 
                     console.log(`✅ [Page: ${pageId}] สลิปถูกต้อง ส่งข้อความตอบกลับสำเร็จ`);
                     if (configStore.pageAccessToken) {
@@ -1125,7 +1137,7 @@ app.post('/webhook', async (req, res) => {
                       }, { params: { access_token: configStore.pageAccessToken }, timeout: 10000 });
                     }
                   } else {
-                    console.log(`❌ [Page: ${pageId}] เลขบัญชีผู้รับไม่ตรงกับร้านค้า (รับได้: ${cleanRecvAcc}, ร้านตั้งไว้: ${cleanMerchantAcc})`);
+                    console.log(`❌ [Page: ${pageId}] เลขบัญชีผู้รับไม่ตรงกับร้านค้า`);
                     if (configStore.pageAccessToken) {
                       await axios.post('https://graph.facebook.com/v19.0/me/messages', {
                         recipient: { id: senderId },
