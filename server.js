@@ -564,4 +564,19 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-app.listen(3000, () => console.log('Server is running on http://localhost:3000'));
+// เริ่มต้นรันเซิร์ฟเวอร์ พร้อมระบบ Anti-Sleep (Self-Ping ทุก 10 นาที)
+const PORT = process.env.PORT || 3000;
+const serverUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+
+app.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
+
+  setInterval(async () => {
+    try {
+      await axios.get(serverUrl);
+      console.log('🔄 Anti-Sleep Ping สำเร็จ: เซิร์ฟเวอร์ตื่นอยู่เสมอ');
+    } catch (err) {
+      console.error('❌ Anti-Sleep Ping ล้มเหลว:', err.message);
+    }
+  }, 10 * 60 * 1000); // ทุก 10 นาที
+});
