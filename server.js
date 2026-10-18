@@ -10,7 +10,7 @@ app.use(express.json());
 // ค่าคอนฟิกเริ่มต้นของระบบ
 // -------------------------------------------------------------
 let configStore = {
-  appId: 'YOUR_FACEBOOK_APP_ID', // นำ App ID จากหน้า Meta for Developers มาใส่ตรงนี้ได้ (ถ้ามี)
+  appId: '1611337127153323', // App ID ของคุณ
   verifyToken: '14556456',
   pageAccessToken: '',
   pageId: '122097146930008538',
@@ -70,7 +70,7 @@ async function verifySlipWithEasySlip(imageUrl) {
 }
 
 // -------------------------------------------------------------
-// 1. หน้า Dashboard HTML UI + Facebook Login SDK
+// 1. หน้า Dashboard HTML UI
 // -------------------------------------------------------------
 app.get('/', (req, res) => {
   res.send(`<!DOCTYPE html>
@@ -268,13 +268,13 @@ app.get('/', (req, res) => {
 
                 <!-- TAB 4: WEBHOOK & FACEBOOK LOGIN OAUTH -->
                 <div id="tab-webhook" class="space-y-6 hidden">
-                    <!-- ปุ่มกดเชื่อมต่อเพจด้วย FACEBOOK LOGIN -->
+                    <!-- ปุ่มกดเชื่อมต่อเพจด้วย FACEBOOK LOGIN DIRECT OAUTH -->
                     <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
                         <h3 class="text-base font-bold text-slate-700">🌐 เชื่อมต่อกับ Facebook เพจแบบอัตโนมัติ</h3>
                         <p class="text-xs text-slate-500">คลิกปุ่มด้านล่างเพื่อเข้าสู่ระบบ Facebook และเลือกร้านค้าของคุณ ระบบจะดึง Token และจัดการเชื่อมต่อให้อัตโนมัติโดยไม่ต้องคัดลอกค่าใดๆ</p>
                         
                         <div class="flex items-center gap-4 pt-2">
-                            <button onclick="loginWithFacebook()" class="px-6 py-3 bg-blue-600 text-white font-medium text-sm rounded-xl hover:bg-blue-700 shadow-md flex items-center gap-2">
+                            <button type="button" onclick="loginWithFacebook()" class="px-6 py-3 bg-blue-600 text-white font-medium text-sm rounded-xl hover:bg-blue-700 shadow-md flex items-center gap-2 cursor-pointer">
                                 <svg class="w-5 h-5 fill-current" viewBox="0 0 24 24"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg>
                                 <span>เข้าสู่ระบบด้วย Facebook เพื่อเลือกเพจ</span>
                             </button>
@@ -316,21 +316,23 @@ app.get('/', (req, res) => {
         </div>
     </div>
 
-    <!-- Facebook SDK Script -->
+    <!-- Script ควบคุมหน้าเว็บ -->
     <script>
         let currentConfig = {};
         let statusInterval = null;
         let fetchedPagesList = [];
 
-        // โหลด Facebook JS SDK
-        window.fbAsyncInit = function() {
-            FB.init({
-                appId      : currentConfig.appId || '',
-                cookie     : true,
-                xfbml      : true,
-                version    : 'v19.0'
-            });
-        };
+        // ฟังก์ชันสั่ง Redirect ไปหน้า Facebook OAuth โดยตรง 100%
+        function loginWithFacebook() {
+            const appId = '1611337127153323';
+            const redirectUri = encodeURIComponent(window.location.origin + '/auth/facebook/callback');
+            const scope = encodeURIComponent('pages_show_list,pages_messaging,pages_read_engagement,pages_manage_posts');
+            
+            const authUrl = \`https://www.facebook.com/v19.0/dialog/oauth?client_id=\${appId}&redirect_uri=\${redirectUri}&scope=\${scope}&response_type=token\`;
+            
+            console.log('Redirecting to Facebook OAuth:', authUrl);
+            window.location.href = authUrl;
+        }
 
         async function loadConfig() {
             const res = await fetch('/api/config');
@@ -367,45 +369,6 @@ app.get('/', (req, res) => {
             const isExact = currentConfig.matchType === 'exact';
             document.getElementById('btn-exact').className = isExact ? "px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-600 text-white" : "px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-100 text-slate-600";
             document.getElementById('btn-contains').className = !isExact ? "px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-600 text-white" : "px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-100 text-slate-600";
-        }
-
-        // ฟังก์ชันระบบล็อกอิน Facebook OAuth
-        function loginWithFacebook() {
-            if (typeof FB === 'undefined') {
-                alert('กำลังโหลด Facebook SDK... กรุณาลองใหม่อีกครั้งในอีกสักครู่');
-                return;
-            }
-
-            FB.login(function(response) {
-                if (response.authResponse) {
-                    const userAccessToken = response.authResponse.accessToken;
-                    fetchPagesWithToken(userAccessToken);
-                } else {
-                    alert('คุณได้ยกเลิกการเชื่อมต่อ หรือยังไม่ได้ให้สิทธิ์เข้าถึงเพจ');
-                }
-            }, { scope: 'pages_show_list,pages_messaging,pages_read_engagement,pages_manage_posts' });
-        }
-
-        async function fetchPagesWithToken(token) {
-            const res = await fetch('/api/fetch-pages', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ userAccessToken: token })
-            });
-            const data = await res.json();
-
-            if (data.success && data.pages) {
-                fetchedPagesList = data.pages;
-                const dropdown = document.getElementById('page-select-dropdown');
-                dropdown.innerHTML = '<option value="">-- เลือกเพจที่ต้องการใช้งาน --</option>';
-                data.pages.forEach((p, idx) => {
-                    dropdown.innerHTML += \`<option value="\${idx}">\${p.name} (ID: \${p.id})</option>\`;
-                });
-                document.getElementById('page-select-box').classList.remove('hidden');
-                alert(\`✅ ดึงข้อมูลสำเร็จ พบ \${data.pages.length} เพจ กรุณาเลือกเพจจากรายการด้านล่าง\`);
-            } else {
-                alert('❌ ไม่สามารถดึงรายชื่อเพจได้: ' + (data.error || 'Token ไม่ถูกต้อง'));
-            }
         }
 
         function onPageDropdownSelected() {
@@ -525,13 +488,55 @@ app.get('/', (req, res) => {
 
         loadConfig();
     </script>
-    <script async defer crossorigin="anonymous" src="https://connect.facebook.net/th_TH/sdk.js"></script>
 </body>
 </html>`);
 });
 
 // -------------------------------------------------------------
-// 2. API Config Routes & Fetch Pages
+// 2. Endpoint สำหรับรับ Callback จาก Facebook OAuth Redirect
+// -------------------------------------------------------------
+app.get('/auth/facebook/callback', (req, res) => {
+  res.send(`<!DOCTYPE html>
+<html>
+<head><title>กำลังเชื่อมต่อ Facebook...</title></head>
+<body style="font-family: sans-serif; text-align: center; padding-top: 50px;">
+    <h2>⏳ กำลังดึงข้อมูลเพจของคุณ กรุณารอสักครู่...</h2>
+    <script>
+        const hash = window.location.hash.substring(1);
+        const params = new URLSearchParams(hash);
+        const accessToken = params.get('access_token');
+
+        if (accessToken) {
+            fetch('/api/fetch-pages', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ userAccessToken: accessToken })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success && data.pages && data.pages.length > 0) {
+                    alert('✅ เชื่อมต่อ Facebook สำเร็จ! พบ ' + data.pages.length + ' เพจ');
+                    window.location.href = '/?connected=true';
+                } else {
+                    alert('❌ ไม่พบเพจ หรือเกิดข้อผิดพลาด: ' + (data.error || ''));
+                    window.location.href = '/';
+                }
+            })
+            .catch(err => {
+                alert('❌ เกิดข้อผิดพลาดในการเชื่อมต่อเซิร์ฟเวอร์');
+                window.location.href = '/';
+            });
+        } else {
+            alert('❌ การเข้าสู่ระบบยกเลิก หรือไม่ได้รับ Access Token');
+            window.location.href = '/';
+        }
+    </script>
+</body>
+</html>`);
+});
+
+// -------------------------------------------------------------
+// 3. API Config Routes & Fetch Pages
 // -------------------------------------------------------------
 app.get('/api/config', (req, res) => res.json({ success: true, config: configStore, subscriberCount: subscribers.size }));
 
@@ -549,14 +554,26 @@ app.post('/api/fetch-pages', async (req, res) => {
     const response = await axios.get(`https://graph.facebook.com/v19.0/me/accounts`, {
       params: { access_token: userAccessToken }
     });
-    res.json({ success: true, pages: response.data.data });
+    
+    const pages = response.data.data;
+    if (pages && pages.length > 0) {
+      // ตั้งค่าเพจแรกให้อัตโนมัติทันที
+      const firstPage = pages[0];
+      configStore.pageAccessToken = firstPage.access_token;
+      configStore.pageId = firstPage.id;
+      configStore.pageName = firstPage.name;
+      console.log(`✅ [FB OAuth] เชื่อมต่อสำเร็จกับเพจ: ${firstPage.name} (ID: ${firstPage.id})`);
+    }
+
+    res.json({ success: true, pages: pages });
   } catch (err) {
+    console.error('❌ Fetch Pages Error:', err.response?.data || err.message);
     res.json({ success: false, error: err.response?.data?.error?.message || err.message });
   }
 });
 
 // -------------------------------------------------------------
-// 3. API บรอดแคส
+// 4. API บรอดแคส
 // -------------------------------------------------------------
 app.post('/api/broadcast/start', async (req, res) => {
   const { message, delaySec, batchSize, pauseMin } = req.body;
@@ -640,7 +657,7 @@ app.get('/api/broadcast/status', (req, res) => {
 });
 
 // -------------------------------------------------------------
-// 4. Webhook Endpoints สำหรับ Facebook
+// 5. Webhook Endpoints สำหรับ Facebook
 // -------------------------------------------------------------
 app.get('/webhook', (req, res) => {
   if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === configStore.verifyToken) {
@@ -656,7 +673,7 @@ app.post('/webhook', async (req, res) => {
 
   if (body.object === 'page') {
     for (const entry of body.entry || []) {
-      // 4.1 ตรวจจับข้อความแชท และสลิปโอนเงิน
+      // 5.1 ตรวจจับข้อความแชท และสลิปโอนเงิน
       if (entry.messaging) {
         for (const msgEvent of entry.messaging) {
           const senderId = msgEvent.sender?.id;
@@ -732,7 +749,7 @@ app.post('/webhook', async (req, res) => {
         }
       }
 
-      // 4.2 ตรวจจับคอมเมนต์เพื่อดึงเข้าแชทและตอบกลับใต้โพสต์
+      // 5.2 ตรวจจับคอมเมนต์เพื่อดึงเข้าแชทและตอบกลับใต้โพสต์
       if (entry.changes) {
         for (const change of entry.changes) {
           if (change.field === 'feed' && change.value.item === 'comment' && change.value.verb === 'add') {
@@ -782,7 +799,7 @@ app.post('/webhook', async (req, res) => {
 });
 
 // -------------------------------------------------------------
-// 5. เริ่มต้นเซิร์ฟเวอร์ + Anti-Sleep Ping
+// 6. เริ่มต้นเซิร์ฟเวอร์ + Anti-Sleep Ping
 // -------------------------------------------------------------
 const PORT = process.env.PORT || 3000;
 const serverUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
