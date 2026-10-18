@@ -6,23 +6,38 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// หน่วยความจำเก็บค่าคอนฟิก
+// -------------------------------------------------------------
+// ค่าคอนฟิกเริ่มต้นของระบบ
+// -------------------------------------------------------------
 let configStore = {
+  appId: 'YOUR_FACEBOOK_APP_ID', // นำ App ID จากหน้า Meta for Developers มาใส่ตรงนี้ได้ (ถ้ามี)
   verifyToken: '14556456',
   pageAccessToken: '',
-  pageId: '',
+  pageId: '122097146930008538',
+  pageName: '',
+  
+  // ตั้งค่าตอบกลับคอมเมนต์
   matchType: 'contains',
   keywords: ['1', '11', '111', '11111', '111111', 'สนใจ', 'cf'],
   replyCommentText: 'แอดมินส่งรายละเอียดให้ในอินบ็อกซ์เรียบร้อยแล้วนะคะ 🙏',
   inboxText: `ร.กรุงศรี 6651198576\nชื่อภิญโญ แจ้งกระจ่าง\n\n🙏 โอนแล้วแจ้งสลิป พร้อมชื่อที่อยู่ ได้เลยคะ🥰\n✨ (ส่งฟรี) ส่งฟรี EMS ✨`,
   enableInbox: true,
-  enableCommentReply: true
+  enableCommentReply: true,
+  
+  // ตั้งค่าระบบตรวจสลิป EasySlip
+  enableSlipVerify: true,
+  merchantBank: 'BAY', 
+  merchantAccount: '6651198576',
+  merchantName: 'ภิญโญ แจ้งกระจ่าง',
+  msgSlipSuccess: 'สถานะ: ตรวจสอบถูกต้อง ✅\nยอดเงิน: {amount} บาท\nวันที่: {date}\n\nรับยอดค่ะพี่ ขอบคุณมากค่ะ 🙏 แจ้งชื่อที่อยู่เบอร์โทร ได้เลยค่ะ🥰',
+  msgSlipInvalid: '❌ สลิปไม่ถูกต้อง หรือเลขบัญชีผู้รับไม่ตรงกับของทางร้าน กรุณาตรวจสอบอีกครั้งนะคะ',
+  msgSlipUnreadable: '⚠️ ไม่สามารถอ่านข้อมูลจากสลิปนี้ได้ กรุณาส่งรูปสลิปที่ชัดเจนอีกครั้งนะคะ',
+  msgSlipDuplicate: '🔄 สลิปนี้ถูกใช้งานไปแล้ว ไม่สามารถส่งซ้ำได้ค่ะ'
 };
 
-// หน่วยความจำเก็บรายชื่อผู้รับบรอดแคส (PSID) แบบไม่ซ้ำ
 let subscribers = new Set();
+let usedSlips = new Set();
 
-// สถานะการทำงานของ บรอดแคส
 let broadcastStatus = {
   isBroadcasting: false,
   total: 0,
@@ -35,14 +50,35 @@ let broadcastStatus = {
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// 1. หน้า UI แดชบอร์ด
+// -------------------------------------------------------------
+// ฟังก์ชันยิงเช็คสลิปกับ EasySlip API
+// -------------------------------------------------------------
+async function verifySlipWithEasySlip(imageUrl) {
+  const EASYSLIP_API_KEY = '47f197e2-8c05-42bb-b9ad-9186f84faa82';
+  try {
+    console.log('🚀 [EasySlip] กำลังยิง Request ไปตรวจสอบ:', imageUrl);
+    const response = await axios.post('https://chatbot.easyslip.com/v1/public/verify', 
+      { url: imageUrl },
+      { headers: { 'Authorization': `Bearer ${EASYSLIP_API_KEY}` } }
+    );
+    console.log('🎉 [EasySlip] ได้รับผลลัพธ์สำเร็จ:', response.data);
+    return response.data;
+  } catch (err) {
+    console.error('❌ [EasySlip] ตรวจสอบล้มเหลว:', err.response?.data || err.message);
+    return null;
+  }
+}
+
+// -------------------------------------------------------------
+// 1. หน้า Dashboard HTML UI + Facebook Login SDK
+// -------------------------------------------------------------
 app.get('/', (req, res) => {
   res.send(`<!DOCTYPE html>
 <html lang="th">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ระบบตอบกลับคอมเมนต์และบรอดแคส Facebook</title>
+    <title>ระบบจัดการเพจ ตรวจสลิป และบรอดแคส</title>
     <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
     <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style> body { font-family: 'Sarabun', sans-serif; } </style>
@@ -56,19 +92,20 @@ app.get('/', (req, res) => {
             <div class="flex-1 overflow-y-auto py-4 px-3 space-y-1">
                 <div class="text-xs font-semibold text-slate-400 px-3 mb-2">เมนูหลัก</div>
                 <a href="#" onclick="switchTab('dashboard')" id="nav-dashboard" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium bg-blue-50 text-blue-600">💬 ตอบกลับคอมเมนต์</a>
+                <a href="#" onclick="switchTab('slip')" id="nav-slip" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-50">💐 ตรวจสลิปอัตโนมัติ</a>
                 <a href="#" onclick="switchTab('broadcast')" id="nav-broadcast" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-50">🚀 บรอดแคสควบคุมเวลา</a>
-                <a href="#" onclick="switchTab('webhook')" id="nav-webhook" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-50">⚙️ ตั้งค่า Webhook & Dev</a>
+                <a href="#" onclick="switchTab('webhook')" id="nav-webhook" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-50">⚙️ เชื่อมต่อเพจ & Webhook</a>
             </div>
         </aside>
 
         <div class="flex-1 flex flex-col min-w-0 overflow-hidden">
             <header class="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-6 z-10">
-                <h1 id="page-title" class="text-lg font-bold text-slate-700">ตอบกลับคอมเมนต์ • เพจของคุณ</h1>
+                <h1 id="page-title" class="text-lg font-bold text-slate-700">เพจที่เชื่อมต่อ: <span id="header-page-name" class="text-blue-600">ยังไม่ได้เชื่อมต่อ</span></h1>
                 <span class="text-xs bg-emerald-100 text-emerald-700 px-2.5 py-1 rounded-full font-semibold">● ระบบออนไลน์</span>
             </header>
 
             <main class="flex-1 overflow-y-auto p-6">
-                <!-- TAB 1 -->
+                <!-- TAB 1: ตอบกลับคอมเมนต์ -->
                 <div id="tab-dashboard" class="space-y-6">
                     <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
                         <label class="text-sm font-semibold text-slate-700 block mb-2">คำดัก: หากคอมเมนต์ของลูกเพจ :</label>
@@ -104,16 +141,88 @@ app.get('/', (req, res) => {
                     </div>
                 </div>
 
-                <!-- TAB 2: บรอดแคสควบคุมเวลา -->
+                <!-- TAB 2: SLIP VERIFY -->
+                <div id="tab-slip" class="space-y-6 hidden">
+                    <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-6">
+                        <div class="flex items-center justify-between border-b border-slate-100 pb-4">
+                            <div>
+                                <h3 class="text-base font-bold text-slate-800">🧾 ตั้งค่าตรวจสลิปอัตโนมัติ (EasySlip API)</h3>
+                                <p class="text-xs text-slate-500 mt-1">เมื่อลูกค้าส่งรูปสลิปเข้ามาในแชท ระบบจะตรวจยอดเงิน เลขบัญชีผู้รับ และเช็คสลิปซ้ำให้อัตโนมัติ</p>
+                            </div>
+                            <label class="flex items-center cursor-pointer">
+                                <input type="checkbox" id="enable-slip-verify" class="sr-only peer">
+                                <div class="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-500 relative"></div>
+                                <span class="ml-3 text-sm font-semibold text-slate-700">เปิดใช้งานบทสนทนา</span>
+                            </label>
+                        </div>
+
+                        <div class="bg-rose-50/50 border border-rose-200 rounded-2xl p-5 space-y-4">
+                            <h4 class="text-xs font-bold text-rose-700 uppercase tracking-wider">บัญชีผู้รับเงินที่ต้องตรวจสอบ</h4>
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                <div>
+                                    <label class="text-xs font-semibold text-slate-600 block mb-1">ธนาคารผู้รับ:</label>
+                                    <select id="merchant-bank" class="w-full p-2.5 text-sm bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-rose-400">
+                                        <option value="BAY">ธนาคารกรุงศรีอยุธยา (BAY)</option>
+                                        <option value="KBANK">ธนาคารกสิกรไทย (KBANK)</option>
+                                        <option value="SCB">ธนาคารไทยพาณิชย์ (SCB)</option>
+                                        <option value="BBL">ธนาคารกรุงเทพ (BBL)</option>
+                                        <option value="KTB">ธนาคารกรุงไทย (KTB)</option>
+                                        <option value="TTB">ธนาคารทหารไทยธนชาต (TTB)</option>
+                                        <option value="GSB">ธนาคารออมสิน (GSB)</option>
+                                        <option value="PROMPTPAY">พร้อมเพย์ (PromptPay)</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="text-xs font-semibold text-slate-600 block mb-1">เลขที่บัญชี / เบอร์พร้อมเพย์:</label>
+                                    <input type="text" id="merchant-account" class="w-full p-2.5 text-sm bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-rose-400">
+                                </div>
+                                <div>
+                                    <label class="text-xs font-semibold text-slate-600 block mb-1">ชื่อบัญชีผู้รับเงิน:</label>
+                                    <input type="text" id="merchant-name" class="w-full p-2.5 text-sm bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-rose-400">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="space-y-4">
+                            <h4 class="text-sm font-bold text-slate-700">คำตอบของแชทบอต</h4>
+                            <div class="flex border-b border-slate-200 gap-2">
+                                <button onclick="switchSlipTab('success')" id="tab-btn-success" class="pb-2.5 px-4 text-xs font-bold text-rose-600 border-b-2 border-rose-600">สลิปถูกต้อง</button>
+                                <button onclick="switchSlipTab('invalid')" id="tab-btn-invalid" class="pb-2.5 px-4 text-xs font-medium text-slate-500 hover:text-slate-700">สลิปไม่ถูกต้อง</button>
+                                <button onclick="switchSlipTab('unreadable')" id="tab-btn-unreadable" class="pb-2.5 px-4 text-xs font-medium text-slate-500 hover:text-slate-700">สลิปตรวจสอบไม่ได้</button>
+                                <button onclick="switchSlipTab('duplicate')" id="tab-btn-duplicate" class="pb-2.5 px-4 text-xs font-medium text-slate-500 hover:text-slate-700">สลิปซ้ำ</button>
+                            </div>
+
+                            <div class="bg-slate-50 rounded-2xl p-4 border border-slate-200">
+                                <div id="slip-msg-success" class="space-y-2">
+                                    <textarea id="msg-slip-success" rows="4" class="w-full p-3 text-sm border border-slate-200 rounded-xl focus:outline-none focus:border-rose-400 bg-white"></textarea>
+                                </div>
+                                <div id="slip-msg-invalid" class="space-y-2 hidden">
+                                    <textarea id="msg-slip-invalid" rows="4" class="w-full p-3 text-sm border border-slate-200 rounded-xl focus:outline-none focus:border-rose-400 bg-white"></textarea>
+                                </div>
+                                <div id="slip-msg-unreadable" class="space-y-2 hidden">
+                                    <textarea id="msg-slip-unreadable" rows="4" class="w-full p-3 text-sm border border-slate-200 rounded-xl focus:outline-none focus:border-rose-400 bg-white"></textarea>
+                                </div>
+                                <div id="slip-msg-duplicate" class="space-y-2 hidden">
+                                    <textarea id="msg-slip-duplicate" rows="4" class="w-full p-3 text-sm border border-slate-200 rounded-xl focus:outline-none focus:border-rose-400 bg-white"></textarea>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="flex justify-end pt-2">
+                            <button onclick="saveConfig()" class="px-6 py-2.5 bg-emerald-600 text-white font-medium rounded-xl hover:bg-emerald-700 shadow-sm">บันทึกการตั้งค่าสลิป</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- TAB 3: BROADCAST -->
                 <div id="tab-broadcast" class="space-y-6 hidden">
                     <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
                         <div class="flex items-center justify-between mb-4 border-b border-slate-100 pb-4">
                             <div>
                                 <h3 class="text-base font-bold text-slate-700">🚀 บรอดแคสข้อความปลอดภัย (Safety Broadcast)</h3>
-                                <p class="text-xs text-slate-500 mt-1">ตั้งค่าหน่วงเวลาและรอบพัก เพื่อป้องกันเพจถูกบล็อกจากการส่งข้อความถี่เกินไป</p>
                             </div>
                             <div class="text-right">
-                                <span class="text-xs text-slate-400 block">ผู้รับที่สะสมในระบบ</span>
+                                <span class="text-xs text-slate-400 block">ผู้รับในระบบ</span>
                                 <span id="subscriber-count" class="text-lg font-bold text-blue-600">0 คน</span>
                             </div>
                         </div>
@@ -121,7 +230,7 @@ app.get('/', (req, res) => {
                         <div class="space-y-4">
                             <div>
                                 <label class="text-xs font-semibold text-slate-600 block mb-1">ข้อความบรอดแคส:</label>
-                                <textarea id="bc-message" rows="4" class="w-full p-3 text-sm border border-slate-200 rounded-xl focus:outline-none focus:border-blue-500" placeholder="พิมพ์ข้อความที่ต้องการส่งหาลูกค้าทุกคน..."></textarea>
+                                <textarea id="bc-message" rows="4" class="w-full p-3 text-sm border border-slate-200 rounded-xl focus:outline-none focus:border-blue-500" placeholder="พิมพ์ข้อความ..."></textarea>
                             </div>
 
                             <div class="grid grid-cols-1 md:grid-cols-3 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-200">
@@ -157,31 +266,33 @@ app.get('/', (req, res) => {
                     </div>
                 </div>
 
-                <!-- TAB 3: WEBHOOK & AUTO SELECT PAGE -->
+                <!-- TAB 4: WEBHOOK & FACEBOOK LOGIN OAUTH -->
                 <div id="tab-webhook" class="space-y-6 hidden">
+                    <!-- ปุ่มกดเชื่อมต่อเพจด้วย FACEBOOK LOGIN -->
                     <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
-                        <h3 class="text-base font-bold text-slate-700">⚙️ ตั้งค่าเชื่อมต่อ Meta for Developers (เลือกเพจแบบออโต้)</h3>
+                        <h3 class="text-base font-bold text-slate-700">🌐 เชื่อมต่อกับ Facebook เพจแบบอัตโนมัติ</h3>
+                        <p class="text-xs text-slate-500">คลิกปุ่มด้านล่างเพื่อเข้าสู่ระบบ Facebook และเลือกร้านค้าของคุณ ระบบจะดึง Token และจัดการเชื่อมต่อให้อัตโนมัติโดยไม่ต้องคัดลอกค่าใดๆ</p>
                         
-                        <!-- ปุ่มกดดึงเพจผ่าน Token -->
-                        <div class="bg-blue-50 p-4 rounded-xl border border-blue-200 space-y-3">
-                            <label class="text-xs font-semibold text-blue-800 block">✨ ตัวช่วยดึงรายชื่อเพจอัตโนมัติ:</label>
-                            <p class="text-xs text-slate-600">คลิกปุ่มด้านล่างเพื่อวาง User Access Token แล้วระบบจะดึงรายชื่อเพจของคุณมาให้เลือกทันที</p>
-                            
-                            <button onclick="promptForTokenAndFetch()" class="px-5 py-2.5 bg-blue-600 text-white text-sm font-medium rounded-xl hover:bg-blue-700 shadow-sm flex items-center gap-2">
-                                <span>🔑 วาง Token เพื่อดึงรายชื่อเพจ</span>
+                        <div class="flex items-center gap-4 pt-2">
+                            <button onclick="loginWithFacebook()" class="px-6 py-3 bg-blue-600 text-white font-medium text-sm rounded-xl hover:bg-blue-700 shadow-md flex items-center gap-2">
+                                <svg class="w-5 h-5 fill-current" viewBox="0 0 24 24"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg>
+                                <span>เข้าสู่ระบบด้วย Facebook เพื่อเลือกเพจ</span>
                             </button>
-                            
-                            <!-- กล่องแสดงรายการเพจหลังจากดึงสำเร็จ -->
-                            <div id="page-select-container" class="hidden pt-2">
-                                <label class="text-xs font-semibold text-slate-700 block mb-1">เลือกเพจที่ต้องการใช้งาน:</label>
-                                <select id="page-select" onchange="onPageSelected()" class="w-full p-2.5 text-sm bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-blue-500">
-                                    <option value="">-- กรุณาเลือกเพจ --</option>
-                                </select>
-                            </div>
                         </div>
 
+                        <!-- แสดงรายชื่อเพจที่เลือกไว้ -->
+                        <div id="page-select-box" class="hidden bg-slate-50 p-4 rounded-xl border border-slate-200 mt-4 space-y-2">
+                            <label class="text-xs font-semibold text-slate-700 block">เลือกเพจที่ต้องการใช้รันแชทบอต:</label>
+                            <select id="page-select-dropdown" onchange="onPageDropdownSelected()" class="w-full p-2.5 text-sm bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-blue-500">
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- ค่าตั้งค่า Webhook -->
+                    <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
+                        <h3 class="text-base font-bold text-slate-700">⚙️ ตั้งค่า Webhook สำหรับ Meta for Developers</h3>
                         <div>
-                            <label class="text-xs font-semibold text-slate-500 block mb-1">Callback URL (Webhook URL):</label>
+                            <label class="text-xs font-semibold text-slate-500 block mb-1">Callback URL (นำค่านี้ไปใส่ใน Meta Developers):</label>
                             <input type="text" id="webhook-url-display" readonly class="w-full p-2.5 text-sm bg-slate-50 border border-slate-200 rounded-lg text-slate-600">
                         </div>
                         <div>
@@ -189,15 +300,15 @@ app.get('/', (req, res) => {
                             <input type="text" id="conf-verify-token" class="w-full p-2.5 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-500">
                         </div>
                         <div>
-                            <label class="text-xs font-semibold text-slate-500 block mb-1">Page Access Token:</label>
-                            <input type="text" id="conf-page-token" class="w-full p-2.5 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-500" placeholder="EAAG...">
+                            <label class="text-xs font-semibold text-slate-500 block mb-1">Page Access Token (เชื่อมต่อแล้ว):</label>
+                            <input type="text" id="conf-page-token" readonly class="w-full p-2.5 text-sm bg-slate-50 border border-slate-200 rounded-lg text-slate-500" placeholder="จะขึ้นอัตโนมัติเมื่อกดเข้าสู่ระบบ Facebook">
                         </div>
                         <div>
                             <label class="text-xs font-semibold text-slate-500 block mb-1">Facebook Page ID:</label>
-                            <input type="text" id="conf-page-id" class="w-full p-2.5 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-500" placeholder="122097146930008538">
+                            <input type="text" id="conf-page-id" class="w-full p-2.5 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-500">
                         </div>
                         <div class="pt-4 flex justify-end">
-                            <button onclick="saveConfig()" class="px-6 py-2.5 bg-emerald-600 text-white font-medium rounded-xl hover:bg-emerald-700 shadow-sm">บันทึกค่า Webhook</button>
+                            <button onclick="saveConfig()" class="px-6 py-2.5 bg-emerald-600 text-white font-medium rounded-xl hover:bg-emerald-700 shadow-sm">บันทึกตั้งค่า Webhook</button>
                         </div>
                     </div>
                 </div>
@@ -205,9 +316,21 @@ app.get('/', (req, res) => {
         </div>
     </div>
 
+    <!-- Facebook SDK Script -->
     <script>
         let currentConfig = {};
         let statusInterval = null;
+        let fetchedPagesList = [];
+
+        // โหลด Facebook JS SDK
+        window.fbAsyncInit = function() {
+            FB.init({
+                appId      : currentConfig.appId || '',
+                cookie     : true,
+                xfbml      : true,
+                version    : 'v19.0'
+            });
+        };
 
         async function loadConfig() {
             const res = await fetch('/api/config');
@@ -218,6 +341,7 @@ app.get('/', (req, res) => {
         }
 
         function renderUI() {
+            document.getElementById('header-page-name').innerText = currentConfig.pageName || (currentConfig.pageId ? 'ID: ' + currentConfig.pageId : 'ยังไม่ได้เชื่อมต่อ');
             document.getElementById('keywords-container').innerHTML = currentConfig.keywords.map((kw, i) => \`
                 <span class="inline-flex items-center gap-1.5 px-3 py-1 bg-blue-600 text-white text-xs font-medium rounded-lg">
                     \${kw} <button onclick="removeKeyword(\${i})" class="hover:text-red-200 font-bold ml-1">×</button>
@@ -231,15 +355,82 @@ app.get('/', (req, res) => {
             document.getElementById('conf-page-id').value = currentConfig.pageId || '';
             document.getElementById('webhook-url-display').value = window.location.origin + '/webhook';
             
+            document.getElementById('enable-slip-verify').checked = !!currentConfig.enableSlipVerify;
+            document.getElementById('merchant-bank').value = currentConfig.merchantBank || 'BAY';
+            document.getElementById('merchant-account').value = currentConfig.merchantAccount || '';
+            document.getElementById('merchant-name').value = currentConfig.merchantName || '';
+            document.getElementById('msg-slip-success').value = currentConfig.msgSlipSuccess || '';
+            document.getElementById('msg-slip-invalid').value = currentConfig.msgSlipInvalid || '';
+            document.getElementById('msg-slip-unreadable').value = currentConfig.msgSlipUnreadable || '';
+            document.getElementById('msg-slip-duplicate').value = currentConfig.msgSlipDuplicate || '';
+
             const isExact = currentConfig.matchType === 'exact';
             document.getElementById('btn-exact').className = isExact ? "px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-600 text-white" : "px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-100 text-slate-600";
             document.getElementById('btn-contains').className = !isExact ? "px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-600 text-white" : "px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-100 text-slate-600";
         }
 
-        function setMatchType(type) {
-            currentConfig.matchType = type;
-            renderUI();
+        // ฟังก์ชันระบบล็อกอิน Facebook OAuth
+        function loginWithFacebook() {
+            if (typeof FB === 'undefined') {
+                alert('กำลังโหลด Facebook SDK... กรุณาลองใหม่อีกครั้งในอีกสักครู่');
+                return;
+            }
+
+            FB.login(function(response) {
+                if (response.authResponse) {
+                    const userAccessToken = response.authResponse.accessToken;
+                    fetchPagesWithToken(userAccessToken);
+                } else {
+                    alert('คุณได้ยกเลิกการเชื่อมต่อ หรือยังไม่ได้ให้สิทธิ์เข้าถึงเพจ');
+                }
+            }, { scope: 'pages_show_list,pages_messaging,pages_read_engagement,pages_manage_posts' });
         }
+
+        async function fetchPagesWithToken(token) {
+            const res = await fetch('/api/fetch-pages', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ userAccessToken: token })
+            });
+            const data = await res.json();
+
+            if (data.success && data.pages) {
+                fetchedPagesList = data.pages;
+                const dropdown = document.getElementById('page-select-dropdown');
+                dropdown.innerHTML = '<option value="">-- เลือกเพจที่ต้องการใช้งาน --</option>';
+                data.pages.forEach((p, idx) => {
+                    dropdown.innerHTML += \`<option value="\${idx}">\${p.name} (ID: \${p.id})</option>\`;
+                });
+                document.getElementById('page-select-box').classList.remove('hidden');
+                alert(\`✅ ดึงข้อมูลสำเร็จ พบ \${data.pages.length} เพจ กรุณาเลือกเพจจากรายการด้านล่าง\`);
+            } else {
+                alert('❌ ไม่สามารถดึงรายชื่อเพจได้: ' + (data.error || 'Token ไม่ถูกต้อง'));
+            }
+        }
+
+        function onPageDropdownSelected() {
+            const idx = document.getElementById('page-select-dropdown').value;
+            if (idx !== "") {
+                const selected = fetchedPagesList[idx];
+                document.getElementById('conf-page-token').value = selected.access_token;
+                document.getElementById('conf-page-id').value = selected.id;
+                currentConfig.pageName = selected.name;
+                currentConfig.pageAccessToken = selected.access_token;
+                currentConfig.pageId = selected.id;
+                saveConfig();
+            }
+        }
+
+        function switchSlipTab(tabKey) {
+            ['success', 'invalid', 'unreadable', 'duplicate'].forEach(key => {
+                document.getElementById('slip-msg-' + key).classList.add('hidden');
+                document.getElementById('tab-btn-' + key).className = "pb-2.5 px-4 text-xs font-medium text-slate-500 hover:text-slate-700";
+            });
+            document.getElementById('slip-msg-' + tabKey).classList.remove('hidden');
+            document.getElementById('tab-btn-' + tabKey).className = "pb-2.5 px-4 text-xs font-bold text-rose-600 border-b-2 border-rose-600";
+        }
+
+        function setMatchType(type) { currentConfig.matchType = type; renderUI(); }
 
         function addKeyword() {
             const val = document.getElementById('new-keyword-input').value.trim();
@@ -260,51 +451,28 @@ app.get('/', (req, res) => {
             currentConfig.verifyToken = document.getElementById('conf-verify-token').value;
             currentConfig.pageAccessToken = document.getElementById('conf-page-token').value;
             currentConfig.pageId = document.getElementById('conf-page-id').value;
+
+            currentConfig.enableSlipVerify = document.getElementById('enable-slip-verify').checked;
+            currentConfig.merchantBank = document.getElementById('merchant-bank').value;
+            currentConfig.merchantAccount = document.getElementById('merchant-account').value;
+            currentConfig.merchantName = document.getElementById('merchant-name').value;
+            currentConfig.msgSlipSuccess = document.getElementById('msg-slip-success').value;
+            currentConfig.msgSlipInvalid = document.getElementById('msg-slip-invalid').value;
+            currentConfig.msgSlipUnreadable = document.getElementById('msg-slip-unreadable').value;
+            currentConfig.msgSlipDuplicate = document.getElementById('msg-slip-duplicate').value;
+
             await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(currentConfig) });
-            alert('✅ บันทึกการตั้งค่าสำเร็จ!');
+            alert('✅ บันทึกการตั้งค่าระบบเรียบร้อยแล้ว!');
+            renderUI();
         }
 
         function switchTab(tabId) {
-            ['dashboard', 'broadcast', 'webhook'].forEach(id => {
+            ['dashboard', 'slip', 'broadcast', 'webhook'].forEach(id => {
                 document.getElementById('tab-' + id).classList.add('hidden');
                 document.getElementById('nav-' + id).className = "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-50";
             });
             document.getElementById('tab-' + tabId).classList.remove('hidden');
             document.getElementById('nav-' + tabId).className = "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium bg-blue-50 text-blue-600";
-        }
-
-        // ฟังก์ชันรับ Token ผ่าน Prompt แล้วดึงรายชื่อเพจมาแสดงใน Dropdown
-        async function promptForTokenAndFetch() {
-            const token = prompt("กรุณาวาง User Access Token ของคุณ (จาก Graph API Explorer):");
-            if (!token) return;
-
-            const res = await fetch('/api/fetch-pages', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ userAccessToken: token })
-            });
-            const data = await res.json();
-
-            if(data.success && data.pages) {
-                const select = document.getElementById('page-select');
-                select.innerHTML = '<option value="">-- กรุณาเลือกเพจ --</option>';
-                data.pages.forEach(p => {
-                    select.innerHTML += \`<option value="\${p.access_token}" data-id="\${p.id}">\${p.name} (ID: \${p.id})</option>\`;
-                });
-                document.getElementById('page-select-container').classList.remove('hidden');
-                alert(\`✅ ดึงข้อมูลสำเร็จ พบ \${data.pages.length} เพจ\`);
-            } else {
-                alert('❌ ดึงข้อมูลเพจไม่สำเร็จ: ' + (data.error || 'Token ไม่ถูกต้อง'));
-            }
-        }
-
-        function onPageSelected() {
-            const select = document.getElementById('page-select');
-            const selectedOption = select.options[select.selectedIndex];
-            if(selectedOption.value) {
-                document.getElementById('conf-page-token').value = selectedOption.value;
-                document.getElementById('conf-page-id').value = selectedOption.getAttribute('data-id');
-            }
         }
 
         async function startBroadcast() {
@@ -357,22 +525,25 @@ app.get('/', (req, res) => {
 
         loadConfig();
     </script>
+    <script async defer crossorigin="anonymous" src="https://connect.facebook.net/th_TH/sdk.js"></script>
 </body>
 </html>`);
 });
 
-// 2. API Config Routes
+// -------------------------------------------------------------
+// 2. API Config Routes & Fetch Pages
+// -------------------------------------------------------------
 app.get('/api/config', (req, res) => res.json({ success: true, config: configStore, subscriberCount: subscribers.size }));
+
 app.post('/api/config', (req, res) => {
   configStore = { ...configStore, ...req.body };
   res.json({ success: true });
 });
 
-// API สำหรับดึงรายชื่อเพจด้วย User Access Token
 app.post('/api/fetch-pages', async (req, res) => {
   const { userAccessToken } = req.body;
   if (!userAccessToken) {
-    return res.json({ success: false, error: 'กรุณากรอก User Access Token ก่อนครับ' });
+    return res.json({ success: false, error: 'ไม่พบ Access Token' });
   }
   try {
     const response = await axios.get(`https://graph.facebook.com/v19.0/me/accounts`, {
@@ -384,7 +555,9 @@ app.post('/api/fetch-pages', async (req, res) => {
   }
 });
 
-// 3. API ควบคุม บรอดแคส
+// -------------------------------------------------------------
+// 3. API บรอดแคส
+// -------------------------------------------------------------
 app.post('/api/broadcast/start', async (req, res) => {
   const { message, delaySec, batchSize, pauseMin } = req.body;
 
@@ -393,7 +566,7 @@ app.post('/api/broadcast/start', async (req, res) => {
   }
 
   if (subscribers.size === 0) {
-    return res.json({ success: false, error: 'ยังไม่มีรายชื่อผู้รับในระบบ (ต้องมีคนทักแชทหรือคอมเมนต์เข้ามาก่อน)' });
+    return res.json({ success: false, error: 'ยังไม่มีผู้รับในระบบ (ต้องมีคนทักแชทหรือคอมเมนต์เข้ามาก่อน)' });
   }
 
   const subList = Array.from(subscribers);
@@ -415,7 +588,7 @@ app.post('/api/broadcast/start', async (req, res) => {
 
     for (let i = 0; i < subList.length; i++) {
       if (broadcastStatus.shouldStop) {
-        broadcastStatus.statusMessage = 'หยุดการส่งตามคำสั่งผู้ใช้';
+        broadcastStatus.statusMessage = 'หยุดการส่งตามคำสั่ง';
         break;
       }
 
@@ -440,10 +613,9 @@ app.post('/api/broadcast/start', async (req, res) => {
 
       if (currentBatchCount >= batchSize && (i + 1) < subList.length) {
         currentBatchCount = 0;
-        
         for (let m = pauseMin; m > 0; m--) {
           if (broadcastStatus.shouldStop) break;
-          broadcastStatus.statusMessage = `⏳ ส่งครบ ${batchSize} คนแล้ว ระบบกำลังพัก ${m} นาที เพื่อความปลอดภัย...`;
+          broadcastStatus.statusMessage = `⏳ ส่งครบ ${batchSize} คนแล้ว ระบบกำลังพัก ${m} นาที...`;
           await sleep(60 * 1000);
         }
       } else {
@@ -467,7 +639,9 @@ app.get('/api/broadcast/status', (req, res) => {
   res.json(broadcastStatus);
 });
 
+// -------------------------------------------------------------
 // 4. Webhook Endpoints สำหรับ Facebook
+// -------------------------------------------------------------
 app.get('/webhook', (req, res) => {
   if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === configStore.verifyToken) {
     res.status(200).send(req.query['hub.challenge']);
@@ -478,93 +652,138 @@ app.get('/webhook', (req, res) => {
 
 app.post('/webhook', async (req, res) => {
   const body = req.body;
-  
+  res.status(200).send('EVENT_RECEIVED');
+
   if (body.object === 'page') {
-    res.status(200).send('EVENT_RECEIVED');
-    
     for (const entry of body.entry || []) {
-      
+      // 4.1 ตรวจจับข้อความแชท และสลิปโอนเงิน
       if (entry.messaging) {
         for (const msgEvent of entry.messaging) {
-          if (msgEvent.sender?.id && msgEvent.sender.id !== configStore.pageId) {
-            subscribers.add(msgEvent.sender.id);
-            console.log(`📌 เพิ่มรายชื่อบรอดแคสจาก Messenger ID: ${msgEvent.sender.id} (รวมสะสม: ${subscribers.size} คน)`);
+          const senderId = msgEvent.sender?.id;
+          if (senderId) subscribers.add(senderId);
+
+          if (msgEvent.message && msgEvent.message.attachments) {
+            for (const att of msgEvent.message.attachments) {
+              if (att.type === 'image') {
+                const imageUrl = att.payload?.url;
+                console.log(`📸 ได้รับรูปภาพสลิปจากแชท: ${imageUrl}`);
+
+                if (configStore.enableSlipVerify && imageUrl) {
+                  const slipResult = await verifySlipWithEasySlip(imageUrl);
+
+                  if (slipResult && slipResult.status === 200) {
+                    const data = slipResult.data;
+                    const slipTransRef = data.transRef || data.id;
+
+                    // เช็คสลิปซ้ำ
+                    if (usedSlips.has(slipTransRef)) {
+                      console.log('⚠️ สลิปนี้ถูกใช้งานไปแล้ว');
+                      if (configStore.pageAccessToken) {
+                        await axios.post(`https://graph.facebook.com/v19.0/me/messages`, {
+                          recipient: { id: senderId },
+                          message: { text: configStore.msgSlipDuplicate }
+                        }, { params: { access_token: configStore.pageAccessToken } });
+                      }
+                      continue;
+                    }
+
+                    // เช็คเลขบัญชีผู้รับเงิน
+                    const recvAcc = data.receiver?.account?.bank?.account || data.receiver?.account?.proxy?.account || '';
+                    const cleanMerchantAcc = (configStore.merchantAccount || '').replace(/[^0-9]/g, '');
+                    const cleanRecvAcc = recvAcc.replace(/[^0-9]/g, '');
+
+                    if (!cleanMerchantAcc || cleanRecvAcc.includes(cleanMerchantAcc) || cleanMerchantAcc.includes(cleanRecvAcc)) {
+                      usedSlips.add(slipTransRef);
+
+                      let replyText = configStore.msgSlipSuccess
+                        .replace('{amount}', data.amount?.amount || 0)
+                        .replace('{date}', data.transDate || '');
+
+                      if (configStore.pageAccessToken) {
+                        await axios.post(`https://graph.facebook.com/v19.0/me/messages`, {
+                          recipient: { id: senderId },
+                          message: { text: replyText }
+                        }, { params: { access_token: configStore.pageAccessToken } });
+                      }
+                      console.log('✅ ส่งข้อความยืนยันสลิปถูกต้องแล้ว!');
+
+                    } else {
+                      console.log('❌ เลขบัญชีผู้รับเงินไม่ตรงกัน');
+                      if (configStore.pageAccessToken) {
+                        await axios.post(`https://graph.facebook.com/v19.0/me/messages`, {
+                          recipient: { id: senderId },
+                          message: { text: configStore.msgSlipInvalid }
+                        }, { params: { access_token: configStore.pageAccessToken } });
+                      }
+                    }
+                  } else {
+                    console.log('⚠️ อ่านข้อมูลสลิปไม่ได้');
+                    if (configStore.pageAccessToken) {
+                      await axios.post(`https://graph.facebook.com/v19.0/me/messages`, {
+                        recipient: { id: senderId },
+                        message: { text: configStore.msgSlipUnreadable }
+                      }, { params: { access_token: configStore.pageAccessToken } });
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       }
 
-      for (const change of entry.changes || []) {
-        if (change.field === 'feed' && change.value?.item === 'comment' && change.value?.verb === 'add') {
-          
-          const commentId = change.value.comment_id;
-          const text = change.value.message || '';
-          const senderId = change.value.from?.id;
+      // 4.2 ตรวจจับคอมเมนต์เพื่อดึงเข้าแชทและตอบกลับใต้โพสต์
+      if (entry.changes) {
+        for (const change of entry.changes) {
+          if (change.field === 'feed' && change.value.item === 'comment' && change.value.verb === 'add') {
+            const comment = change.value;
+            const commentId = comment.comment_id;
+            const commentText = comment.message || '';
+            const senderId = comment.from?.id;
 
-          if (senderId && senderId !== configStore.pageId) {
-            subscribers.add(senderId);
-          }
+            if (senderId) subscribers.add(senderId);
 
-          console.log(`💬 พบคอมเมนต์ใหม่ [ID: ${senderId}]: "${text}" (Comment ID: ${commentId})`);
-
-          if (configStore.pageId && senderId === configStore.pageId) {
-            console.log('⚠️ ข้าม: เป็นคอมเมนต์ของแอดมินเพจเอง');
-            continue;
-          }
-
-          const cleanText = text.trim();
-          let matched = false;
-
-          if (configStore.matchType === 'exact') {
-            const words = cleanText.split(/\s+/);
-            matched = configStore.keywords.some(kw => {
-              return cleanText.toLowerCase() === kw.toLowerCase() || words.some(w => w.toLowerCase() === kw.toLowerCase());
-            });
-          } else {
-            matched = configStore.keywords.some(kw => text.toLowerCase().includes(kw.toLowerCase()));
-          }
-          
-          if (matched) {
-            console.log('✨ ตรงกับ Keyword! กำลังดำเนินการตอบกลับ...');
-
-            if (configStore.enableCommentReply && configStore.replyCommentText && configStore.pageAccessToken) {
-              try {
-                await axios.post(`https://graph.facebook.com/v19.0/${commentId}/comments`, {
-                  message: configStore.replyCommentText
-                }, {
-                  params: { access_token: configStore.pageAccessToken }
-                });
-                console.log('✅ ตอบกลับใต้คอมเมนต์สำเร็จ!');
-              } catch (err) {
-                console.error('❌ ตอบกลับคอมเมนต์ไม่สำเร็จ:', err.response?.data?.error?.message || err.message);
-              }
+            let isMatched = false;
+            if (configStore.matchType === 'exact') {
+              isMatched = configStore.keywords.some(kw => commentText.trim().toLowerCase() === kw.toLowerCase());
+            } else {
+              isMatched = configStore.keywords.some(kw => commentText.toLowerCase().includes(kw.toLowerCase()));
             }
 
-            if (configStore.enableInbox && configStore.inboxText && configStore.pageAccessToken) {
-              try {
-                await axios.post(`https://graph.facebook.com/v19.0/me/messages`, {
-                  recipient: { comment_id: commentId },
-                  message: { text: configStore.inboxText }
-                }, {
-                  params: { access_token: configStore.pageAccessToken }
-                });
-                console.log('✅ ส่งข้อความเข้า Inbox สำเร็จ!');
-              } catch (err) {
-                console.error('❌ ส่ง Inbox ไม่สำเร็จ Error Detail:', JSON.stringify(err.response?.data || err.message));
+            if (isMatched && configStore.pageAccessToken) {
+              if (configStore.enableCommentReply) {
+                try {
+                  await axios.post(`https://graph.facebook.com/v19.0/${commentId}/comments`, {
+                    message: configStore.replyCommentText
+                  }, { params: { access_token: configStore.pageAccessToken } });
+                  console.log('✅ ตอบกลับคอมเมนต์สำเร็จ');
+                } catch (err) {
+                  console.error('❌ ตอบกลับคอมเมนต์ล้มเหลว:', err.response?.data || err.message);
+                }
+              }
+
+              if (configStore.enableInbox) {
+                try {
+                  await axios.post(`https://graph.facebook.com/v19.0/me/messages`, {
+                    recipient: { comment_id: commentId },
+                    message: { text: configStore.inboxText }
+                  }, { params: { access_token: configStore.pageAccessToken } });
+                  console.log('✅ ส่งข้อความดึงเข้าแชทส่วนตัวสำเร็จ');
+                } catch (err) {
+                  console.error('❌ ส่งเข้าแชทส่วนตัวล้มเหลว:', err.response?.data || err.message);
+                }
               }
             }
-
-          } else {
-            console.log('ℹ️ คอมเมนต์นี้ไม่ตรงกับ Keyword ที่ตั้งไว้');
           }
         }
       }
     }
-  } else {
-    res.sendStatus(404);
   }
 });
 
-// เริ่มต้นรันเซิร์ฟเวอร์ พร้อมระบบ Anti-Sleep (Self-Ping ทุก 10 นาที)
+// -------------------------------------------------------------
+// 5. เริ่มต้นเซิร์ฟเวอร์ + Anti-Sleep Ping
+// -------------------------------------------------------------
 const PORT = process.env.PORT || 3000;
 const serverUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 
@@ -578,5 +797,5 @@ app.listen(PORT, () => {
     } catch (err) {
       console.error('❌ Anti-Sleep Ping ล้มเหลว:', err.message);
     }
-  }, 10 * 60 * 1000); // ทุก 10 นาที
+  }, 10 * 60 * 1000);
 });
