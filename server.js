@@ -8,12 +8,9 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// -------------------------------------------------------------
-// ฐานข้อมูลจำลอง และ Index Map สำหรับความเร็วระดับ O(1)
-// -------------------------------------------------------------
-const usersDB = {};       // { username: { password, pages: { pageId: pageData } } }
-const pageIndexMap = {};  // { pageId: { username, pageData } }
-let sessions = {};        // { token: username }
+const usersDB = {};       
+const pageIndexMap = {};  
+let sessions = {};        
 
 const defaultPageConfig = {
   appId: '1611337127153323',
@@ -42,7 +39,6 @@ const defaultPageConfig = {
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// ป้องกัน XSS เบื้องต้นสำหรับข้อมูลข้อความ
 function escapeHtml(str) {
   if (typeof str !== 'string') return str;
   return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
@@ -51,13 +47,15 @@ function escapeHtml(str) {
 async function verifySlipWithEasySlip(imageUrl) {
   const EASYSLIP_API_KEY = '47f197e2-8c05-42bb-b9ad-9186f84faa82';
   try {
+    console.log('🔍 [EasySlip] กำลังส่งรูปไปตรวจ:', imageUrl);
     const response = await axios.post('https://chatbot.easyslip.com/v1/public/verify', 
       { url: imageUrl },
       { 
         headers: { 'Authorization': 'Bearer ' + EASYSLIP_API_KEY },
-        timeout: 10000 // Timeout 10 วินาที ป้องกันเซิร์ฟเวอร์ค้าง
+        timeout: 10000 
       }
     );
+    console.log('✅ [EasySlip] ผลการตรวจสอบ:', response.data);
     return response.data;
   } catch (err) {
     console.error('❌ [EasySlip] ตรวจสอบล้มเหลว:', err.response?.data || err.message);
@@ -90,8 +88,6 @@ app.get('/', (req, res) => {
     <style> body { font-family: 'Sarabun', sans-serif; } </style>
 </head>
 <body class="bg-slate-100 text-slate-800 antialiased">
-
-    <!-- AUTH MODAL -->
     <div id="auth-container" class="fixed inset-0 bg-slate-900/60 flex items-center justify-center z-50 p-4">
         <div class="bg-white rounded-3xl shadow-xl w-full max-w-md p-8 space-y-6">
             <div class="text-center">
@@ -116,7 +112,6 @@ app.get('/', (req, res) => {
         </div>
     </div>
 
-    <!-- MAIN APP -->
     <div id="app-container" class="flex h-screen overflow-hidden hidden">
         <aside class="w-64 bg-white border-r border-slate-200 flex flex-col z-20">
             <div class="h-16 flex items-center justify-between px-6 border-b border-slate-100">
@@ -148,7 +143,6 @@ app.get('/', (req, res) => {
             </header>
 
             <main class="flex-1 overflow-y-auto p-6">
-                <!-- TAB 1: ตอบกลับคอมเมนต์ -->
                 <div id="tab-dashboard" class="space-y-6">
                     <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
                         <label class="text-sm font-semibold text-slate-700 block mb-2">คำดัก: หากคอมเมนต์ของลูกเพจ :</label>
@@ -191,7 +185,6 @@ app.get('/', (req, res) => {
                     </div>
                 </div>
 
-                <!-- TAB 2: SLIP VERIFY -->
                 <div id="tab-slip" class="space-y-6 hidden">
                     <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-6">
                         <div class="flex items-center justify-between border-b border-slate-100 pb-4">
@@ -264,7 +257,6 @@ app.get('/', (req, res) => {
                     </div>
                 </div>
 
-                <!-- TAB 3: BROADCAST -->
                 <div id="tab-broadcast" class="space-y-6 hidden">
                     <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
                         <div class="flex items-center justify-between mb-4 border-b border-slate-100 pb-4">
@@ -316,7 +308,6 @@ app.get('/', (req, res) => {
                     </div>
                 </div>
 
-                <!-- TAB 4: WEBHOOK & FACEBOOK LOGIN OAUTH -->
                 <div id="tab-webhook" class="space-y-6 hidden">
                     <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
                         <h3 class="text-base font-bold text-slate-700">🌐 เพิ่มเพจเข้าระบบอัตโนมัติ (สูงสุด 5 เพจ)</h3>
@@ -359,7 +350,7 @@ app.get('/', (req, res) => {
                         </div>
                         <div>
                             <label class="text-xs font-semibold text-slate-500 block mb-1">Page Access Token:</label>
-                            <input type="text" id="conf-page-token" readonly class="w-full p-2.5 text-sm bg-slate-50 border border-slate-200 rounded-lg text-slate-500">
+                            <input type="text" id="conf-page-token" class="w-full p-2.5 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-500">
                         </div>
                         <div>
                             <label class="text-xs font-semibold text-slate-500 block mb-1">Facebook Page ID:</label>
@@ -374,7 +365,6 @@ app.get('/', (req, res) => {
         </div>
     </div>
 
-    <!-- Script จัดการระบบหน้าบ้าน -->
     <script>
         let currentConfig = { keywords: [] };
         let statusInterval = null;
@@ -635,7 +625,7 @@ app.get('/', (req, res) => {
                 });
                 const data = await res.json();
                 if(data.success) {
-                    alert('🎉 ผูก Webhook (feed) ให้เพจสำเร็จเรียบร้อยแล้ว!');
+                    alert('🎉 ผูก Webhook (messages, feed, messaging_postbacks) ให้เพจสำเร็จเรียบร้อยแล้ว!');
                 } else {
                     alert('❌ ผูก Webhook ไม่สำเร็จ: ' + (data.error || 'Unknown error'));
                 }
@@ -678,9 +668,10 @@ app.get('/', (req, res) => {
             currentConfig.enableCommentReply = document.getElementById('enable-comment-reply').checked;
             currentConfig.enableInbox = document.getElementById('enable-inbox').checked;
             currentConfig.enableAutoLike = document.getElementById('enable-auto-like').checked;
-            currentConfig.verifyToken = document.getElementById('conf-verify-token').value;
-            currentConfig.pageAccessToken = document.getElementById('conf-page-token').value;
-            currentConfig.pageId = document.getElementById('conf-page-id').value;
+            
+            currentConfig.verifyToken = document.getElementById('conf-verify-token').value.trim();
+            currentConfig.pageAccessToken = document.getElementById('conf-page-token').value.trim();
+            currentConfig.pageId = document.getElementById('conf-page-id').value.trim();
 
             currentConfig.enableSlipVerify = document.getElementById('enable-slip-verify').checked;
             currentConfig.merchantBank = document.getElementById('merchant-bank').value;
@@ -691,13 +682,18 @@ app.get('/', (req, res) => {
             currentConfig.msgSlipUnreadable = document.getElementById('msg-slip-unreadable').value;
             currentConfig.msgSlipDuplicate = document.getElementById('msg-slip-duplicate').value;
 
-            await fetch('/api/config?token=' + authToken + '&pageId=' + currentActivePageId, { 
+            const res = await fetch('/api/config?token=' + authToken + '&pageId=' + currentActivePageId, { 
                 method: 'POST', 
                 headers: { 'Content-Type': 'application/json' }, 
                 body: JSON.stringify(currentConfig) 
             });
-            alert('✅ บันทึกการตั้งค่าเพจนี้เรียบร้อยแล้ว!');
-            renderUI();
+            const data = await res.json();
+            if(data.success) {
+                alert('✅ บันทึกการตั้งค่า Webhook และเพจเรียบร้อยแล้ว!');
+                loadUserPages();
+            } else {
+                alert('❌ บันทึกไม่สำเร็จ: ' + data.error);
+            }
         }
 
         function switchTab(tabId) {
@@ -762,7 +758,7 @@ app.get('/', (req, res) => {
 });
 
 // -------------------------------------------------------------
-// 2. Endpoint ระบบ Authentication (Secure Tokens)
+// 2. Endpoint ระบบ Authentication 
 // -------------------------------------------------------------
 app.post('/api/signup', (req, res) => {
   const { username, password } = req.body;
@@ -826,7 +822,7 @@ app.get('/auth/facebook/callback', (req, res) => {
 });
 
 // -------------------------------------------------------------
-// 4. API จัดการเพจและตั้งค่า (Index Mapping O(1))
+// 4. API จัดการเพจและตั้งค่า
 // -------------------------------------------------------------
 app.get('/api/user/pages', checkAuth, (req, res) => {
   res.json({ success: true, pages: usersDB[req.userId].pages });
@@ -851,7 +847,7 @@ app.post('/api/user/add-page', checkAuth, (req, res) => {
   };
 
   userPages[pageId] = newPageData;
-  pageIndexMap[pageId] = { username, pageData: newPageData }; // บันทึกเข้า Index Map เพื่อความเร็วสูงสุด
+  pageIndexMap[pageId] = { username, pageData: newPageData };
 
   res.json({ success: true });
 });
@@ -863,7 +859,7 @@ app.post('/api/user/delete-page', checkAuth, (req, res) => {
 
   if (userPages[pageId]) {
     delete userPages[pageId];
-    delete pageIndexMap[pageId]; // ลบออกจาก Index Map ด้วย
+    delete pageIndexMap[pageId];
     res.json({ success: true });
   } else {
     res.json({ success: false, error: 'ไม่พบเพจนี้ในระบบ' });
@@ -891,7 +887,17 @@ app.post('/api/config', checkAuth, (req, res) => {
 
   if (!pageData) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
 
+  const oldPageId = pageData.config.pageId;
   pageData.config = { ...pageData.config, ...req.body };
+  
+  if (oldPageId && pageIndexMap[oldPageId]) {
+    delete pageIndexMap[oldPageId];
+  }
+  if (pageData.config.pageId) {
+    pageIndexMap[pageData.config.pageId] = { username, pageData };
+  }
+  pageIndexMap[pageId] = { username, pageData };
+
   res.json({ success: true });
 });
 
@@ -917,7 +923,7 @@ app.post('/api/subscribe-webhook', async (req, res) => {
   try {
     const response = await axios.post('https://graph.facebook.com/v19.0/me/subscribed_apps', {}, {
       params: {
-        subscribed_fields: 'feed',
+        subscribed_fields: 'messages,feed,messaging_postbacks',
         access_token: pageAccessToken
       },
       timeout: 10000
@@ -1004,7 +1010,7 @@ app.get('/api/broadcast/status', checkAuth, (req, res) => {
 });
 
 // -------------------------------------------------------------
-// 6. Webhook Endpoints (High Performance O(1) Routing)
+// 6. Webhook Endpoints พร้อมระบบพิมพ์ Debug Log ใน Render ทันที
 // -------------------------------------------------------------
 app.get('/webhook', (req, res) => {
   const verifyToken = req.query['hub.verify_token'];
@@ -1018,8 +1024,10 @@ app.get('/webhook', (req, res) => {
   }
 
   if (req.query['hub.mode'] === 'subscribe' && (isMatched || verifyToken === defaultPageConfig.verifyToken)) {
+    console.log('✅ [Webhook Verify] ยืนยันตัวตนสำเร็จผ่าน Verify Token:', verifyToken);
     res.status(200).send(req.query['hub.challenge']);
   } else {
+    console.log('❌ [Webhook Verify] ยืนยันตัวตนไม่สำเร็จ Verify Token ไม่ตรงกัน:', verifyToken);
     res.sendStatus(403);
   }
 });
@@ -1031,10 +1039,26 @@ app.post('/webhook', async (req, res) => {
   if (body.object === 'page') {
     for (const entry of body.entry || []) {
       const pageId = entry.id;
+      console.log(`📥 [Webhook Received] ได้รับ Event จาก Page ID: ${pageId}`);
 
-      // 🌟 ค้นหาข้อมูลเพจทันทีด้วย O(1) Index Map ทำให้ทุกเพจทำงานพร้อมกันได้อย่างแม่นยำ 100%
-      const targetRecord = pageIndexMap[pageId];
-      if (!targetRecord) continue;
+      let targetRecord = pageIndexMap[pageId];
+      if (!targetRecord) {
+        for (const uid in usersDB) {
+          for (const pid in usersDB[uid].pages) {
+            if (pid === pageId || usersDB[uid].pages[pid].config.pageId === pageId) {
+              targetRecord = { username: uid, pageData: usersDB[uid].pages[pid] };
+              pageIndexMap[pageId] = targetRecord;
+              break;
+            }
+          }
+          if (targetRecord) break;
+        }
+      }
+
+      if (!targetRecord) {
+        console.log(`⚠️ [Webhook Warning] ไม่พบ Page ID "${pageId}" ในระบบฐานข้อมูล`);
+        continue;
+      }
 
       const configStore = targetRecord.pageData.config;
       const subscribers = targetRecord.pageData.subscribers;
@@ -1050,6 +1074,9 @@ app.post('/webhook', async (req, res) => {
             for (const att of msgEvent.message.attachments) {
               if (att.type === 'image' && configStore.enableSlipVerify) {
                 const imageUrl = att.payload?.url;
+                if (!imageUrl) continue;
+
+                console.log(`🧾 [Page: ${pageId}] พบรูปภาพจากลูกค้า ID: ${senderId} กำลังตรวจสอบสลิป...`);
                 const slipResult = await verifySlipWithEasySlip(imageUrl);
 
                 if (slipResult && slipResult.status === 200) {
@@ -1057,6 +1084,7 @@ app.post('/webhook', async (req, res) => {
                   const slipTransRef = data.transRef || data.id;
 
                   if (usedSlips.has(slipTransRef)) {
+                    console.log(`🔄 [Page: ${pageId}] สลิปซ้ำ ถูกใช้งานไปแล้ว`);
                     if (configStore.pageAccessToken) {
                       await axios.post('https://graph.facebook.com/v19.0/me/messages', {
                         recipient: { id: senderId },
@@ -1076,6 +1104,7 @@ app.post('/webhook', async (req, res) => {
                       .replace('{amount}', data.amount?.amount || 0)
                       .replace('{date}', data.transDate || '');
 
+                    console.log(`✅ [Page: ${pageId}] สลิปถูกต้อง ส่งข้อความตอบกลับสำเร็จ`);
                     if (configStore.pageAccessToken) {
                       await axios.post('https://graph.facebook.com/v19.0/me/messages', {
                         recipient: { id: senderId },
@@ -1083,12 +1112,21 @@ app.post('/webhook', async (req, res) => {
                       }, { params: { access_token: configStore.pageAccessToken }, timeout: 10000 });
                     }
                   } else {
+                    console.log(`❌ [Page: ${pageId}] เลขบัญชีผู้รับไม่ตรงกับร้านค้า`);
                     if (configStore.pageAccessToken) {
                       await axios.post('https://graph.facebook.com/v19.0/me/messages', {
                         recipient: { id: senderId },
                         message: { text: configStore.msgSlipInvalid }
                       }, { params: { access_token: configStore.pageAccessToken }, timeout: 10000 });
                     }
+                  }
+                } else {
+                  console.log(`⚠️ [Page: ${pageId}] อ่านข้อมูลสลิปไม่สำเร็จ`);
+                  if (configStore.pageAccessToken) {
+                    await axios.post('https://graph.facebook.com/v19.0/me/messages', {
+                      recipient: { id: senderId },
+                      message: { text: configStore.msgSlipUnreadable }
+                    }, { params: { access_token: configStore.pageAccessToken }, timeout: 10000 });
                   }
                 }
               }
