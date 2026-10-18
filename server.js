@@ -8,15 +8,11 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // -------------------------------------------------------------
-// ฐานข้อมูลจำลองในหน่วยความจำ (รองรับหลาย User และหลายเพจ)
+// ฐานข้อมูลจำลอง (1 User สามารถมีเพจได้สูงสุด 5 เพจ)
 // -------------------------------------------------------------
-// usersDB: เก็บข้อมูลผู้ใช้แต่ละคน { userId: { username, password, pages: { pageId: { config, subscribers, usedSlips } } } }
-const usersDB = {};
-let sessions = {}; // เก็บสถานะการล็อกอิน token -> userId
+const usersDB = {}; 
+let sessions = {};  
 
-// -------------------------------------------------------------
-// ค่าคอนฟิกเริ่มต้นสำหรับเพจใหม่
-// -------------------------------------------------------------
 const defaultPageConfig = {
   appId: '1611337127153323',
   verifyToken: '14556456',
@@ -42,8 +38,6 @@ const defaultPageConfig = {
   msgSlipDuplicate: '🔄 สลิปนี้ถูกใช้งานไปแล้ว ไม่สามารถส่งซ้ำได้ค่ะ'
 };
 
-const broadcastTasks = {}; // เก็บสถานะบรอดแคสแยกตาม User / Page
-
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function verifySlipWithEasySlip(imageUrl) {
@@ -60,9 +54,6 @@ async function verifySlipWithEasySlip(imageUrl) {
   }
 }
 
-// -------------------------------------------------------------
-// Middleware ตรวจสอบ Session ผู้ใช้
-// -------------------------------------------------------------
 function checkAuth(req, res, next) {
   const token = req.headers['authorization'] || req.query.token;
   if (token && sessions[token]) {
@@ -74,7 +65,7 @@ function checkAuth(req, res, next) {
 }
 
 // -------------------------------------------------------------
-// 1. หน้า Dashboard HTML UI (รองรับ Login, Signup, และจัดการหลายเพจ)
+// 1. หน้า Dashboard HTML UI
 // -------------------------------------------------------------
 app.get('/', (req, res) => {
   res.send(`<!DOCTYPE html>
@@ -82,26 +73,24 @@ app.get('/', (req, res) => {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ระบบจัดการเพจ ตรวจสลิป และบรอดแคส (Multi-User)</title>
+    <title>ระบบจัดการ 5 เพจ พร้อมบอตตอบคอมเมนต์</title>
     <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
     <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style> body { font-family: 'Sarabun', sans-serif; } </style>
 </head>
 <body class="bg-slate-100 text-slate-800 antialiased">
 
-    <!-- AUTH MODAL / CONTAINER -->
+    <!-- AUTH MODAL -->
     <div id="auth-container" class="fixed inset-0 bg-slate-900/60 flex items-center justify-center z-50 p-4">
         <div class="bg-white rounded-3xl shadow-xl w-full max-w-md p-8 space-y-6">
             <div class="text-center">
                 <h2 class="text-2xl font-bold text-slate-800">FB Bot Manager</h2>
-                <p class="text-xs text-slate-500 mt-1">เข้าสู่ระบบหรือสมัครสมาชิกเพื่อเริ่มจัดการเพจของคุณ</p>
+                <p class="text-xs text-slate-500 mt-1">เข้าสู่ระบบเพื่อจัดการเพจของคุณ (สูงสุด 5 เพจ)</p>
             </div>
-            
             <div class="flex bg-slate-100 p-1 rounded-xl">
                 <button onclick="switchAuthMode('login')" id="tab-login" class="flex-1 py-2 text-xs font-bold rounded-lg bg-white shadow-sm text-blue-600 transition-all">เข้าสู่ระบบ</button>
                 <button onclick="switchAuthMode('signup')" id="tab-signup" class="flex-1 py-2 text-xs font-medium rounded-lg text-slate-500 transition-all">สมัครสมาชิก</button>
             </div>
-
             <div class="space-y-4">
                 <div>
                     <label class="text-xs font-semibold text-slate-600 block mb-1">ชื่อผู้ใช้งาน (Username):</label>
@@ -116,26 +105,34 @@ app.get('/', (req, res) => {
         </div>
     </div>
 
-    <!-- MAIN APP CONTAINER -->
+    <!-- MAIN APP -->
     <div id="app-container" class="flex h-screen overflow-hidden hidden">
         <aside class="w-64 bg-white border-r border-slate-200 flex flex-col z-20">
             <div class="h-16 flex items-center justify-between px-6 border-b border-slate-100">
                 <span class="font-bold text-lg text-blue-600">FB Bot Manager</span>
                 <button onclick="logout()" class="text-xs text-rose-500 hover:underline font-semibold">ออกจากระบบ</button>
             </div>
+            
+            <div class="p-4 border-b border-slate-100 bg-slate-50">
+                <label class="text-xs font-bold text-slate-600 block mb-1">🏪 เลือกเพจที่กำลังจัดการ:</label>
+                <select id="active-page-selector" onchange="switchActivePage(this.value)" class="w-full p-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-blue-500">
+                    <option value="">-- ยังไม่มีเพจในระบบ --</option>
+                </select>
+            </div>
+
             <div class="flex-1 overflow-y-auto py-4 px-3 space-y-1">
                 <div class="text-xs font-semibold text-slate-400 px-3 mb-2">เมนูหลัก</div>
                 <a href="#" onclick="switchTab('dashboard')" id="nav-dashboard" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium bg-blue-50 text-blue-600">💬 ตอบกลับคอมเมนต์</a>
                 <a href="#" onclick="switchTab('slip')" id="nav-slip" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-50">💐 ตรวจสลิปอัตโนมัติ</a>
                 <a href="#" onclick="switchTab('broadcast')" id="nav-broadcast" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-50">🚀 บรอดแคสควบคุมเวลา</a>
-                <a href="#" onclick="switchTab('webhook')" id="nav-webhook" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-50">⚙️ เชื่อมต่อเพจ & Webhook</a>
+                <a href="#" onclick="switchTab('webhook')" id="nav-webhook" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-50">⚙️ เพิ่มเพจ & Webhook</a>
             </div>
         </aside>
 
         <div class="flex-1 flex flex-col min-w-0 overflow-hidden">
             <header class="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-6 z-10">
-                <h1 id="page-title" class="text-lg font-bold text-slate-700">เพจที่เลือก: <span id="header-page-name" class="text-blue-600">ยังไม่ได้เลือกเพจ</span></h1>
-                <span class="text-xs bg-emerald-100 text-emerald-700 px-2.5 py-1 rounded-full font-semibold">● ออนไลน์ (User: <span id="current-username"></span>)</span>
+                <h1 id="page-title" class="text-lg font-bold text-slate-700">กำลังจัดการเพจ: <span id="header-page-name" class="text-blue-600">ยังไม่ได้เลือกเพจ</span></h1>
+                <span class="text-xs bg-emerald-100 text-emerald-700 px-2.5 py-1 rounded-full font-semibold">● User: <span id="current-username"></span></span>
             </header>
 
             <main class="flex-1 overflow-y-auto p-6">
@@ -144,13 +141,13 @@ app.get('/', (req, res) => {
                     <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
                         <label class="text-sm font-semibold text-slate-700 block mb-2">คำดัก: หากคอมเมนต์ของลูกเพจ :</label>
                         <div class="flex gap-2 mb-4">
-                            <button onclick="setMatchType('exact')" id="btn-exact" class="px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-600 text-white">ตรงกับคำว่า</button>
-                            <button onclick="setMatchType('contains')" id="btn-contains" class="px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-100 text-slate-600">มีคำว่า</button>
+                            <button type="button" onclick="setMatchType('exact')" id="btn-exact" class="px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-600 text-white">ตรงกับคำว่า</button>
+                            <button type="button" onclick="setMatchType('contains')" id="btn-contains" class="px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-100 text-slate-600">มีคำว่า</button>
                         </div>
                         <div id="keywords-container" class="flex flex-wrap items-center gap-2 p-3 bg-slate-50 border border-slate-200 rounded-xl min-h-[50px]"></div>
                         <div class="mt-2 flex gap-2">
                             <input type="text" id="new-keyword-input" placeholder="พิมพ์คำดักเพิ่ม เช่น สนใจ, cf, 1" class="px-3 py-1.5 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-500">
-                            <button onclick="addKeyword()" class="px-4 py-1.5 bg-slate-800 text-white text-sm rounded-lg hover:bg-slate-700">เพิ่มคำ</button>
+                            <button type="button" onclick="addKeyword()" class="px-4 py-1.5 bg-slate-800 text-white text-sm rounded-lg hover:bg-slate-700">เพิ่มคำ</button>
                         </div>
                     </div>
 
@@ -178,7 +175,7 @@ app.get('/', (req, res) => {
                         </div>
                     </div>
                     <div class="flex justify-end">
-                        <button onclick="saveConfig()" class="px-6 py-2.5 bg-emerald-600 text-white font-medium rounded-xl hover:bg-emerald-700 shadow-sm">บันทึกการตั้งค่าระบบ</button>
+                        <button type="button" onclick="saveConfig()" class="px-6 py-2.5 bg-emerald-600 text-white font-medium rounded-xl hover:bg-emerald-700 shadow-sm">บันทึกการตั้งค่าเพจนี้</button>
                     </div>
                 </div>
 
@@ -227,10 +224,10 @@ app.get('/', (req, res) => {
                         <div class="space-y-4">
                             <h4 class="text-sm font-bold text-slate-700">คำตอบของแชทบอต</h4>
                             <div class="flex border-b border-slate-200 gap-2">
-                                <button onclick="switchSlipTab('success')" id="tab-btn-success" class="pb-2.5 px-4 text-xs font-bold text-rose-600 border-b-2 border-rose-600">สลิปถูกต้อง</button>
-                                <button onclick="switchSlipTab('invalid')" id="tab-btn-invalid" class="pb-2.5 px-4 text-xs font-medium text-slate-500 hover:text-slate-700">สลิปไม่ถูกต้อง</button>
-                                <button onclick="switchSlipTab('unreadable')" id="tab-btn-unreadable" class="pb-2.5 px-4 text-xs font-medium text-slate-500 hover:text-slate-700">สลิปตรวจสอบไม่ได้</button>
-                                <button onclick="switchSlipTab('duplicate')" id="tab-btn-duplicate" class="pb-2.5 px-4 text-xs font-medium text-slate-500 hover:text-slate-700">สลิปซ้ำ</button>
+                                <button type="button" onclick="switchSlipTab('success')" id="tab-btn-success" class="pb-2.5 px-4 text-xs font-bold text-rose-600 border-b-2 border-rose-600">สลิปถูกต้อง</button>
+                                <button type="button" onclick="switchSlipTab('invalid')" id="tab-btn-invalid" class="pb-2.5 px-4 text-xs font-medium text-slate-500 hover:text-slate-700">สลิปไม่ถูกต้อง</button>
+                                <button type="button" onclick="switchSlipTab('unreadable')" id="tab-btn-unreadable" class="pb-2.5 px-4 text-xs font-medium text-slate-500 hover:text-slate-700">สลิปตรวจสอบไม่ได้</button>
+                                <button type="button" onclick="switchSlipTab('duplicate')" id="tab-btn-duplicate" class="pb-2.5 px-4 text-xs font-medium text-slate-500 hover:text-slate-700">สลิปซ้ำ</button>
                             </div>
 
                             <div class="bg-slate-50 rounded-2xl p-4 border border-slate-200">
@@ -250,7 +247,7 @@ app.get('/', (req, res) => {
                         </div>
 
                         <div class="flex justify-end pt-2">
-                            <button onclick="saveConfig()" class="px-6 py-2.5 bg-emerald-600 text-white font-medium rounded-xl hover:bg-emerald-700 shadow-sm">บันทึกการตั้งค่าสลิป</button>
+                            <button type="button" onclick="saveConfig()" class="px-6 py-2.5 bg-emerald-600 text-white font-medium rounded-xl hover:bg-emerald-700 shadow-sm">บันทึกการตั้งค่าสลิป</button>
                         </div>
                     </div>
                 </div>
@@ -300,8 +297,8 @@ app.get('/', (req, res) => {
                             </div>
 
                             <div class="flex gap-3 pt-2">
-                                <button id="btn-start-bc" onclick="startBroadcast()" class="px-6 py-2.5 bg-blue-600 text-white font-medium rounded-xl hover:bg-blue-700 shadow-sm">เริ่มส่งบรอดแคส</button>
-                                <button id="btn-stop-bc" onclick="stopBroadcast()" class="hidden px-6 py-2.5 bg-rose-600 text-white font-medium rounded-xl hover:bg-rose-700 shadow-sm">หยุดบรอดแคส</button>
+                                <button type="button" id="btn-start-bc" onclick="startBroadcast()" class="px-6 py-2.5 bg-blue-600 text-white font-medium rounded-xl hover:bg-blue-700 shadow-sm">เริ่มส่งบรอดแคส</button>
+                                <button type="button" id="btn-stop-bc" onclick="stopBroadcast()" class="hidden px-6 py-2.5 bg-rose-600 text-white font-medium rounded-xl hover:bg-rose-700 shadow-sm">หยุดบรอดแคส</button>
                             </div>
                         </div>
                     </div>
@@ -310,8 +307,8 @@ app.get('/', (req, res) => {
                 <!-- TAB 4: WEBHOOK & FACEBOOK LOGIN OAUTH -->
                 <div id="tab-webhook" class="space-y-6 hidden">
                     <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
-                        <h3 class="text-base font-bold text-slate-700">🌐 เชื่อมต่อกับ Facebook เพจแบบอัตโนมัติ</h3>
-                        <p class="text-xs text-slate-500">คลิกปุ่มด้านล่างเพื่อเข้าสู่ระบบ Facebook เลือกร้านค้าของคุณ ระบบจะดึงรายชื่อทุกเพจที่คุณดูแลมาให้เลือกจัดการได้ทันที</p>
+                        <h3 class="text-base font-bold text-slate-700">🌐 เพิ่มเพจเข้าระบบอัตโนมัติ (สูงสุด 5 เพจ)</h3>
+                        <p class="text-xs text-slate-500">คลิกปุ่มด้านล่างเพื่อเข้าสู่ระบบ Facebook เลือกร้านค้าของคุณ ระบบจะดึงรายชื่อทุกเพจมาให้เลือกเพิ่มเข้าบัญชีของคุณ</p>
                         
                         <div class="flex items-center gap-4 pt-2">
                             <button type="button" onclick="loginWithFacebook()" class="px-6 py-3 bg-blue-600 text-white font-medium text-sm rounded-xl hover:bg-blue-700 shadow-md flex items-center gap-2 cursor-pointer">
@@ -321,16 +318,16 @@ app.get('/', (req, res) => {
                         </div>
 
                         <div id="page-select-box" class="bg-slate-50 p-4 rounded-xl border border-slate-200 mt-4 space-y-3">
-                            <label class="text-xs font-semibold text-slate-700 block">🏪 เลือกเพจที่ต้องการใช้งานบอต:</label>
+                            <label class="text-xs font-semibold text-slate-700 block">🏪 เลือกเพจเพื่อเพิ่มเข้าระบบ (สูงสุด 5 เพจ):</label>
                             <div class="flex gap-2">
-                                <select id="page-select-dropdown" onchange="onPageDropdownSelected()" class="flex-1 p-2.5 text-sm bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-blue-500">
+                                <select id="page-select-dropdown" class="flex-1 p-2.5 text-sm bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-blue-500">
                                     <option value="">-- ยังไม่ได้เลือกเพจ (กดปุ่มเข้าสู่ระบบ Facebook ด้านบนก่อน) --</option>
                                 </select>
-                                <button type="button" onclick="fetchMyPagesManually()" class="px-4 py-2 bg-slate-800 text-white text-xs font-medium rounded-lg hover:bg-slate-700">รีเฟรชรายชื่อเพจ</button>
+                                <button type="button" onclick="addSelectedPageToSystem()" class="px-4 py-2 bg-emerald-600 text-white text-xs font-medium rounded-lg hover:bg-emerald-700 shadow-sm shrink-0">➕ เพิ่มเพจนี้</button>
                             </div>
 
                             <div class="pt-2 border-t border-slate-200 flex items-center justify-between">
-                                <span class="text-xs text-slate-500">กดปุ่มนี้เพื่อให้เพจส่งข้อมูลคอมเมนต์/แชทมาที่บอต</span>
+                                <span class="text-xs text-slate-500">ผูก Webhook ให้เพจที่กำลังเลือกอยู่ปัจจุบัน</span>
                                 <button type="button" onclick="subscribeWebhookDirectly()" class="px-4 py-2 bg-indigo-600 text-white text-xs font-medium rounded-lg hover:bg-indigo-700 shadow-sm flex items-center gap-1.5 shrink-0">
                                     ⚡ ผูก Webhook ให้เพจนี้ทันที
                                 </button>
@@ -357,7 +354,7 @@ app.get('/', (req, res) => {
                             <input type="text" id="conf-page-id" class="w-full p-2.5 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-500">
                         </div>
                         <div class="pt-4 flex justify-end">
-                            <button onclick="saveConfig()" class="px-6 py-2.5 bg-emerald-600 text-white font-medium rounded-xl hover:bg-emerald-700 shadow-sm">บันทึกตั้งค่า Webhook</button>
+                            <button type="button" onclick="saveConfig()" class="px-6 py-2.5 bg-emerald-600 text-white font-medium rounded-xl hover:bg-emerald-700 shadow-sm">บันทึกตั้งค่า Webhook</button>
                         </div>
                     </div>
                 </div>
@@ -367,10 +364,11 @@ app.get('/', (req, res) => {
 
     <!-- Script จัดการระบบหน้าบ้าน -->
     <script>
-        let currentConfig = {};
+        let currentConfig = { keywords: [] };
         let statusInterval = null;
         let fetchedPagesList = [];
         let authToken = localStorage.getItem('auth_token') || '';
+        let currentActivePageId = '';
         let authMode = 'login';
 
         function switchAuthMode(mode) {
@@ -421,7 +419,7 @@ app.get('/', (req, res) => {
                     document.getElementById('auth-container').classList.add('hidden');
                     document.getElementById('app-container').classList.remove('hidden');
                     document.getElementById('current-username').innerText = data.username;
-                    loadConfig();
+                    loadUserPages();
                 } else {
                     logout();
                 }
@@ -430,19 +428,41 @@ app.get('/', (req, res) => {
             }
         }
 
-        function loginWithFacebook() {
-            const appId = '1611337127153323';
-            const redirectUri = encodeURIComponent(window.location.origin + '/auth/facebook/callback');
-            const scope = encodeURIComponent('pages_show_list,pages_messaging,pages_read_engagement,pages_manage_posts');
-            window.location.href = 'https://www.facebook.com/v19.0/dialog/oauth?client_id=' + appId + '&redirect_uri=' + redirectUri + '&scope=' + scope + '&response_type=token';
+        async function loadUserPages() {
+            const res = await fetch('/api/user/pages?token=' + authToken);
+            const data = await res.json();
+            if(data.success) {
+                const selector = document.getElementById('active-page-selector');
+                selector.innerHTML = '';
+                const pageIds = Object.keys(data.pages);
+                if(pageIds.length === 0) {
+                    selector.innerHTML = '<option value="">-- ยังไม่มีเพจในระบบ (ไปเพิ่มที่เมนูตั้งค่า) --</option>';
+                    currentActivePageId = '';
+                } else {
+                    pageIds.forEach((pid, idx) => {
+                        const pName = data.pages[pid].config.pageName || pid;
+                        selector.innerHTML += '<option value="' + pid + '">' + pName + '</option>';
+                        if(idx === 0 && !currentActivePageId) currentActivePageId = pid;
+                    });
+                    if(currentActivePageId) selector.value = currentActivePageId;
+                    loadConfigForActivePage();
+                }
+            }
         }
 
-        async function loadConfig() {
-            const pageId = currentConfig.pageId || '';
-            const res = await fetch('/api/config?token=' + authToken + '&pageId=' + pageId);
+        async function switchActivePage(pageId) {
+            currentActivePageId = pageId;
+            loadConfigForActivePage();
+        }
+
+        async function loadConfigForActivePage() {
+            if(!currentActivePageId) return;
+            const res = await fetch('/api/config?token=' + authToken + '&pageId=' + currentActivePageId);
             const data = await res.json();
             if(data.success) {
                 currentConfig = data.config;
+                if(!currentConfig.keywords) currentConfig.keywords = [];
+                document.getElementById('header-page-name').innerText = currentConfig.pageName || currentConfig.pageId;
                 document.getElementById('subscriber-count').innerText = (data.subscriberCount || 0) + ' คน';
                 renderUI();
             }
@@ -459,12 +479,11 @@ app.get('/', (req, res) => {
         }
 
         function renderUI() {
-            document.getElementById('header-page-name').innerText = currentConfig.pageName || (currentConfig.pageId ? 'ID: ' + currentConfig.pageId : 'ยังไม่ได้เลือกเพจ');
-            
+            if(!currentConfig.keywords) currentConfig.keywords = [];
             const kwContainer = document.getElementById('keywords-container');
             kwContainer.innerHTML = '';
             currentConfig.keywords.forEach((kw, i) => {
-                kwContainer.innerHTML += '<span class="inline-flex items-center gap-1.5 px-3 py-1 bg-blue-600 text-white text-xs font-medium rounded-lg">' + kw + ' <button onclick="removeKeyword(' + i + ')" class="hover:text-red-200 font-bold ml-1">×</button></span>';
+                kwContainer.innerHTML += '<span class="inline-flex items-center gap-1.5 px-3 py-1 bg-blue-600 text-white text-xs font-medium rounded-lg">' + kw + ' <button type="button" onclick="removeKeyword(' + i + ')" class="hover:text-red-200 font-bold ml-1">×</button></span>';
             });
 
             document.getElementById('reply-comment-input').value = currentConfig.replyCommentText || '';
@@ -492,6 +511,25 @@ app.get('/', (req, res) => {
             document.getElementById('btn-contains').className = !isExact ? "px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-600 text-white" : "px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-100 text-slate-600";
         }
 
+        function loginWithFacebook() {
+            const appId = '1611337127153323';
+            const redirectUri = encodeURIComponent(window.location.origin + '/auth/facebook/callback');
+            const scope = encodeURIComponent('pages_show_list,pages_messaging,pages_read_engagement,pages_manage_posts');
+            window.location.href = 'https://www.facebook.com/v19.0/dialog/oauth?client_id=' + appId + '&redirect_uri=' + redirectUri + '&scope=' + scope + '&response_type=token';
+        }
+
+        window.onload = () => {
+            const hash = window.location.hash;
+            if(hash.includes('access_token')) {
+                const token = new URLSearchParams(hash.substring(1)).get('access_token');
+                localStorage.setItem('fb_user_token', token);
+                window.location.href = '/?tab=webhook';
+            }
+            const savedFbToken = localStorage.getItem('fb_user_token');
+            if(savedFbToken) fetchPagesWithToken(savedFbToken, false);
+            checkAuthSession();
+        };
+
         async function fetchPagesWithToken(token, showAlert) {
             try {
                 const res = await fetch('/api/fetch-pages', {
@@ -504,10 +542,9 @@ app.get('/', (req, res) => {
                 if (data.success && data.pages) {
                     fetchedPagesList = data.pages;
                     const dropdown = document.getElementById('page-select-dropdown');
-                    dropdown.innerHTML = '<option value="">-- เลือกเพจที่ต้องการใช้งาน --</option>';
+                    dropdown.innerHTML = '<option value="">-- เลือกเพจ --</option>';
                     data.pages.forEach((p, idx) => {
-                        const isSelected = p.id === currentConfig.pageId ? 'selected' : '';
-                        dropdown.innerHTML += '<option value="' + idx + '" ' + isSelected + '>' + p.name + ' (ID: ' + p.id + ')</option>';
+                        dropdown.innerHTML += '<option value="' + idx + '">' + p.name + ' (ID: ' + p.id + ')</option>';
                     });
                     if(showAlert) alert('✅ ดึงข้อมูลสำเร็จ พบ ' + data.pages.length + ' เพจ');
                 } else {
@@ -518,32 +555,29 @@ app.get('/', (req, res) => {
             }
         }
 
-        function fetchMyPagesManually() {
-            const token = localStorage.getItem('fb_user_token');
-            if(!token) {
-                alert('⚠️ กรุณากดปุ่มเข้าสู่ระบบ Facebook ด้านบนก่อนครับ');
-                return;
-            }
-            fetchPagesWithToken(token, true);
-        }
-
-        function onPageDropdownSelected() {
+        async function addSelectedPageToSystem() {
             const idx = document.getElementById('page-select-dropdown').value;
-            if (idx !== "") {
-                const selected = fetchedPagesList[idx];
-                document.getElementById('conf-page-token').value = selected.access_token;
-                document.getElementById('conf-page-id').value = selected.id;
-                currentConfig.pageName = selected.name;
-                currentConfig.pageAccessToken = selected.access_token;
-                currentConfig.pageId = selected.id;
-                saveConfig();
+            if(idx === "") return alert('กรุณาเลือกเพจจากดรอปดาวน์ก่อนครับ');
+            const selected = fetchedPagesList[idx];
+
+            const res = await fetch('/api/user/add-page?token=' + authToken, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ pageId: selected.id, pageName: selected.name, pageAccessToken: selected.access_token })
+            });
+            const data = await res.json();
+            if(data.success) {
+                alert('✅ เพิ่มเพจเข้าสู่ระบบสำเร็จ!');
+                loadUserPages();
+            } else {
+                alert('❌ ' + data.error);
             }
         }
 
         async function subscribeWebhookDirectly() {
             const pageToken = document.getElementById('conf-page-token').value;
             if(!pageToken) {
-                alert('⚠️ กรุณาเลือกเพจจากเมนูด้านบนก่อนครับ!');
+                alert('⚠️ กรุณาเลือกเพจที่กำลังใช้งานก่อนครับ!');
                 return;
             }
 
@@ -577,6 +611,7 @@ app.get('/', (req, res) => {
 
         function addKeyword() {
             const val = document.getElementById('new-keyword-input').value.trim();
+            if(!currentConfig.keywords) currentConfig.keywords = [];
             if(val && !currentConfig.keywords.includes(val)) {
                 currentConfig.keywords.push(val);
                 document.getElementById('new-keyword-input').value = '';
@@ -584,9 +619,14 @@ app.get('/', (req, res) => {
             }
         }
 
-        function removeKeyword(i) { currentConfig.keywords.splice(i, 1); renderUI(); }
+        function removeKeyword(i) { 
+            if(!currentConfig.keywords) currentConfig.keywords = [];
+            currentConfig.keywords.splice(i, 1); 
+            renderUI(); 
+        }
 
         async function saveConfig() {
+            if(!currentActivePageId) return alert('กรุณาเลือกเพจก่อนบันทึก');
             currentConfig.replyCommentText = document.getElementById('reply-comment-input').value;
             currentConfig.inboxText = document.getElementById('inbox-input').value;
             currentConfig.enableCommentReply = document.getElementById('enable-comment-reply').checked;
@@ -605,8 +645,12 @@ app.get('/', (req, res) => {
             currentConfig.msgSlipUnreadable = document.getElementById('msg-slip-unreadable').value;
             currentConfig.msgSlipDuplicate = document.getElementById('msg-slip-duplicate').value;
 
-            await fetch('/api/config?token=' + authToken, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(currentConfig) });
-            alert('✅ บันทึกการตั้งค่าระบบเรียบร้อยแล้ว!');
+            await fetch('/api/config?token=' + authToken + '&pageId=' + currentActivePageId, { 
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json' }, 
+                body: JSON.stringify(currentConfig) 
+            });
+            alert('✅ บันทึกการตั้งค่าเพจนี้เรียบร้อยแล้ว!');
             renderUI();
         }
 
@@ -620,6 +664,7 @@ app.get('/', (req, res) => {
         }
 
         async function startBroadcast() {
+            if(!currentActivePageId) return alert('กรุณาเลือกเพจก่อน');
             const message = document.getElementById('bc-message').value.trim();
             const delaySec = parseInt(document.getElementById('bc-delay').value) || 3;
             const batchSize = parseInt(document.getElementById('bc-batch-size').value) || 20;
@@ -628,10 +673,10 @@ app.get('/', (req, res) => {
             if(!message) return alert('กรุณากรอกข้อความบรอดแคสก่อนครับ!');
             if(!confirm('ยืนยันเริ่มส่งบรอดแคส?')) return;
 
-            const res = await fetch('/api/broadcast/start?token=' + authToken, {
+            const res = await fetch('/api/broadcast/start?token=' + authToken + '&pageId=' + currentActivePageId, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ message, delaySec, batchSize, pauseMin, pageId: currentConfig.pageId })
+                body: JSON.stringify({ message, delaySec, batchSize, pauseMin })
             });
             const data = await res.json();
             if(data.success) {
@@ -645,12 +690,12 @@ app.get('/', (req, res) => {
         }
 
         async function stopBroadcast() {
-            await fetch('/api/broadcast/stop?token=' + authToken + '&pageId=' + currentConfig.pageId, { method: 'POST' });
+            await fetch('/api/broadcast/stop?token=' + authToken + '&pageId=' + currentActivePageId, { method: 'POST' });
             alert('ส่งคำสั่งหยุดบรอดแคสเรียบร้อยแล้ว');
         }
 
         async function checkBroadcastStatus() {
-            const res = await fetch('/api/broadcast/status?token=' + authToken + '&pageId=' + currentConfig.pageId);
+            const res = await fetch('/api/broadcast/status?token=' + authToken + '&pageId=' + currentActivePageId);
             const status = await res.json();
 
             document.getElementById('bc-status-text').innerText = status.statusMessage;
@@ -665,8 +710,6 @@ app.get('/', (req, res) => {
                 document.getElementById('btn-stop-bc').classList.add('hidden');
             }
         }
-
-        checkAuthSession();
     </script>
 </body>
 </html>`);
@@ -682,7 +725,7 @@ app.post('/api/signup', (req, res) => {
 
   usersDB[username] = {
     password: password,
-    pages: {} // เก็บเพจของ user นี้
+    pages: {} 
   };
 
   const token = 'token_' + Date.now() + '_' + Math.random().toString(36).substring(2);
@@ -737,18 +780,36 @@ app.get('/auth/facebook/callback', (req, res) => {
 });
 
 // -------------------------------------------------------------
-// 4. API Config & Management แยกตาม User และ Page ID
+// 4. API จัดการเพจและตั้งค่า (Multi-Page Support สูงสุด 5 เพจ)
 // -------------------------------------------------------------
+app.get('/api/user/pages', checkAuth, (req, res) => {
+  res.json({ success: true, pages: usersDB[req.userId].pages });
+});
+
+app.post('/api/user/add-page', checkAuth, (req, res) => {
+  const username = req.userId;
+  const { pageId, pageName, pageAccessToken } = req.body;
+  const userPages = usersDB[username].pages;
+
+  if (userPages[pageId]) return res.json({ success: false, error: 'เพจนี้ถูกเพิ่มในระบบแล้ว' });
+  if (Object.keys(userPages).length >= 5) return res.json({ success: false, error: 'จำกัดการเพิ่มสูงสุดไม่เกิน 5 เพจต่อ User ครับ' });
+
+  userPages[pageId] = {
+    config: { ...defaultPageConfig, pageId, pageName, pageAccessToken },
+    subscribers: new Set(),
+    usedSlips: new Set(),
+    broadcastStatus: { isBroadcasting: false, total: 0, current: 0, success: 0, failed: 0, statusMessage: 'พร้อมใช้งาน', shouldStop: false }
+  };
+  res.json({ success: true });
+});
+
 app.get('/api/config', checkAuth, (req, res) => {
   const username = req.userId;
   const pageId = req.query.pageId;
+  const pageData = usersDB[username]?.pages[pageId];
 
-  if (!pageId || !usersDB[username].pages[pageId]) {
-    // ส่งค่าเริ่มต้นถ้ายังไม่ได้เลือกเพจ
-    return res.json({ success: true, config: defaultPageConfig, subscriberCount: 0 });
-  }
+  if (!pageData) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
 
-  const pageData = usersDB[username].pages[pageId];
   res.json({ 
     success: true, 
     config: pageData.config, 
@@ -758,22 +819,12 @@ app.get('/api/config', checkAuth, (req, res) => {
 
 app.post('/api/config', checkAuth, (req, res) => {
   const username = req.userId;
-  const newConfig = req.body;
-  const pageId = newConfig.pageId;
+  const pageId = req.query.pageId;
+  const pageData = usersDB[username]?.pages[pageId];
 
-  if (!pageId) return res.json({ success: false, error: 'ไม่พบ Page ID' });
+  if (!pageData) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
 
-  if (!usersDB[username].pages[pageId]) {
-    usersDB[username].pages[pageId] = {
-      config: { ...defaultPageConfig, ...newConfig },
-      subscribers: new Set(),
-      usedSlips: new Set(),
-      broadcastStatus: { isBroadcasting: false, total: 0, current: 0, success: 0, failed: 0, statusMessage: 'พร้อมใช้งาน', shouldStop: false }
-    };
-  } else {
-    usersDB[username].pages[pageId].config = { ...usersDB[username].pages[pageId].config, ...newConfig };
-  }
-
+  pageData.config = { ...pageData.config, ...req.body };
   res.json({ success: true });
 });
 
@@ -813,11 +864,12 @@ app.post('/api/subscribe-webhook', async (req, res) => {
 // -------------------------------------------------------------
 app.post('/api/broadcast/start', checkAuth, async (req, res) => {
   const username = req.userId;
-  const { message, delaySec, batchSize, pauseMin, pageId } = req.body;
+  const pageId = req.query.pageId;
+  const { message, delaySec, batchSize, pauseMin } = req.body;
   
-  if (!pageId || !usersDB[username]?.pages[pageId]) return res.json({ success: false, error: 'กรุณาเลือกเพจก่อนทำรายการ' });
+  const pageData = usersDB[username]?.pages[pageId];
+  if (!pageData) return res.json({ success: false, error: 'กรุณาเลือกเพจก่อนทำรายการ' });
   
-  const pageData = usersDB[username].pages[pageId];
   if (pageData.broadcastStatus.isBroadcasting) return res.json({ success: false, error: 'กำลังรันบรอดแคสอยู่แล้ว' });
   if (pageData.subscribers.size === 0) return res.json({ success: false, error: 'ยังไม่มีผู้รับในระบบของเพจนี้' });
 
@@ -880,11 +932,10 @@ app.get('/api/broadcast/status', checkAuth, (req, res) => {
 });
 
 // -------------------------------------------------------------
-// 6. Webhook Endpoints (รองรับแยกแยะตาม Page ID ของทุก User)
+// 6. Webhook Endpoints
 // -------------------------------------------------------------
 app.get('/webhook', (req, res) => {
   const verifyToken = req.query['hub.verify_token'];
-  // ค้นหาว่า verifyToken ตรงกับเพจไหนในระบบ
   let matchedConfig = null;
   for (const uname in usersDB) {
     for (const pid in usersDB[uname].pages) {
@@ -909,9 +960,8 @@ app.post('/webhook', async (req, res) => {
 
   if (body.object === 'page') {
     for (const entry of body.entry || []) {
-      const pageId = entry.id; // Page ID ที่ส่งอีเวนต์มา
+      const pageId = entry.id;
 
-      // ค้นหาว่า Page ID นี้ผูกอยู่กับ User คนไหนในระบบ
       let targetPageData = null;
       for (const uname in usersDB) {
         if (usersDB[uname].pages[pageId]) {
@@ -920,7 +970,7 @@ app.post('/webhook', async (req, res) => {
         }
       }
 
-      if (!targetPageData) continue; // ถ้าไม่พบเพจนี้ในฐานข้อมูล ข้ามไป
+      if (!targetPageData) continue;
 
       const configStore = targetPageData.config;
       const subscribers = targetPageData.subscribers;
@@ -990,9 +1040,10 @@ app.post('/webhook', async (req, res) => {
             if (senderId) subscribers.add(senderId);
 
             const commentText = comment.message || '';
+            const keywordsList = configStore.keywords || [];
             let isMatched = configStore.matchType === 'exact' ?
-              configStore.keywords.some(function(kw) { return commentText.trim().toLowerCase() === kw.toLowerCase(); }) :
-              configStore.keywords.some(function(kw) { return commentText.toLowerCase().includes(kw.toLowerCase()); });
+              keywordsList.some(function(kw) { return commentText.trim().toLowerCase() === kw.toLowerCase(); }) :
+              keywordsList.some(function(kw) { return commentText.toLowerCase().includes(kw.toLowerCase()); });
 
             if (isMatched && configStore.pageAccessToken) {
               if (configStore.enableAutoLike) {
