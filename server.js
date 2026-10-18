@@ -22,6 +22,7 @@ let configStore = {
   inboxText: 'ร.กรุงศรี 6651198576\nชื่อภิญโญ แจ้งกระจ่าง\n\n🙏 โอนแล้วแจ้งสลิป พร้อมชื่อที่อยู่ ได้เลยคะ🥰\n✨ (ส่งฟรี) ส่งฟรี EMS ✨',
   enableInbox: true,
   enableCommentReply: true,
+  enableAutoLike: true, // เพิ่มค่าตั้งค่าเปิด/ปิดกดไลก์คอมเมนต์
   
   enableSlipVerify: true,
   merchantBank: 'BAY', 
@@ -63,7 +64,7 @@ async function verifySlipWithEasySlip(imageUrl) {
 }
 
 // -------------------------------------------------------------
-// 1. หน้า Dashboard HTML UI + UI เลือกเพจ
+// 1. หน้า Dashboard HTML UI + เพิ่ม UI กดไลก์คอมเมนต์
 // -------------------------------------------------------------
 app.get('/', (req, res) => {
   res.send(`<!DOCTYPE html>
@@ -111,6 +112,14 @@ app.get('/', (req, res) => {
                             <input type="text" id="new-keyword-input" placeholder="พิมพ์คำดักเพิ่ม เช่น สนใจ, cf, 1" class="px-3 py-1.5 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-500">
                             <button onclick="addKeyword()" class="px-4 py-1.5 bg-slate-800 text-white text-sm rounded-lg hover:bg-slate-700">เพิ่มคำ</button>
                         </div>
+                    </div>
+
+                    <!-- เพิ่ม Checkbox เปิด/ปิด กดไลก์คอมเมนต์ -->
+                    <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-4">
+                        <label class="flex items-center gap-2 cursor-pointer">
+                            <input type="checkbox" id="enable-auto-like" class="w-4 h-4 text-blue-600 rounded">
+                            <span class="text-sm font-semibold text-slate-700">👍 กดไลก์คอมเมนต์อัตโนมัติ (เมื่อคอมเมนต์ตรงกับคีย์เวิร์ด)</span>
+                        </label>
                     </div>
 
                     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -355,6 +364,8 @@ app.get('/', (req, res) => {
             document.getElementById('inbox-input').value = currentConfig.inboxText || '';
             document.getElementById('enable-comment-reply').checked = !!currentConfig.enableCommentReply;
             document.getElementById('enable-inbox').checked = !!currentConfig.enableInbox;
+            document.getElementById('enable-auto-like').checked = !!currentConfig.enableAutoLike;
+
             document.getElementById('conf-verify-token').value = currentConfig.verifyToken || '';
             document.getElementById('conf-page-token').value = currentConfig.pageAccessToken || '';
             document.getElementById('conf-page-id').value = currentConfig.pageId || '';
@@ -449,6 +460,7 @@ app.get('/', (req, res) => {
             currentConfig.inboxText = document.getElementById('inbox-input').value;
             currentConfig.enableCommentReply = document.getElementById('enable-comment-reply').checked;
             currentConfig.enableInbox = document.getElementById('enable-inbox').checked;
+            currentConfig.enableAutoLike = document.getElementById('enable-auto-like').checked;
             currentConfig.verifyToken = document.getElementById('conf-verify-token').value;
             currentConfig.pageAccessToken = document.getElementById('conf-page-token').value;
             currentConfig.pageId = document.getElementById('conf-page-id').value;
@@ -653,7 +665,7 @@ app.post('/api/broadcast/stop', (req, res) => {
 app.get('/api/broadcast/status', (req, res) => res.json(broadcastStatus));
 
 // -------------------------------------------------------------
-// 5. Webhook Endpoints
+// 5. Webhook Endpoints (เพิ่มฟังก์ชันกดไลก์คอมเมนต์อัตโนมัติ)
 // -------------------------------------------------------------
 app.get('/webhook', (req, res) => {
   if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === configStore.verifyToken) {
@@ -738,11 +750,25 @@ app.post('/webhook', async (req, res) => {
               configStore.keywords.some(function(kw) { return commentText.toLowerCase().includes(kw.toLowerCase()); });
 
             if (isMatched && configStore.pageAccessToken) {
+              // 1. กดไลก์คอมเมนต์ (ถ้าเปิดใช้งาน)
+              if (configStore.enableAutoLike) {
+                try {
+                  await axios.post('https://graph.facebook.com/v19.0/' + comment.comment_id + '/likes', {}, {
+                    params: { access_token: configStore.pageAccessToken }
+                  });
+                } catch (likeErr) {
+                  console.error('❌ Auto-like error:', likeErr.response?.data || likeErr.message);
+                }
+              }
+
+              // 2. ตอบกลับใต้คอมเมนต์
               if (configStore.enableCommentReply) {
                 await axios.post('https://graph.facebook.com/v19.0/' + comment.comment_id + '/comments', {
                   message: configStore.replyCommentText
                 }, { params: { access_token: configStore.pageAccessToken } });
               }
+
+              // 3. ส่งข้อความเข้าแชทส่วนตัว (Inbox)
               if (configStore.enableInbox) {
                 await axios.post('https://graph.facebook.com/v19.0/me/messages', {
                   recipient: { comment_id: comment.comment_id },
