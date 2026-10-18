@@ -65,7 +65,7 @@ function checkAuth(req, res, next) {
 }
 
 // -------------------------------------------------------------
-// 1. หน้า Dashboard HTML UI
+// 1. หน้า Dashboard HTML UI (เพิ่มปุ่มลบเพจปัจจุบัน)
 // -------------------------------------------------------------
 app.get('/', (req, res) => {
   res.send(`<!DOCTYPE html>
@@ -88,8 +88,8 @@ app.get('/', (req, res) => {
                 <p class="text-xs text-slate-500 mt-1">เข้าสู่ระบบเพื่อจัดการเพจของคุณ (สูงสุด 5 เพจ)</p>
             </div>
             <div class="flex bg-slate-100 p-1 rounded-xl">
-                <button onclick="switchAuthMode('login')" id="tab-login" class="flex-1 py-2 text-xs font-bold rounded-lg bg-white shadow-sm text-blue-600 transition-all">เข้าสู่ระบบ</button>
-                <button onclick="switchAuthMode('signup')" id="tab-signup" class="flex-1 py-2 text-xs font-medium rounded-lg text-slate-500 transition-all">สมัครสมาชิก</button>
+                <button type="button" onclick="switchAuthMode('login')" id="tab-login" class="flex-1 py-2 text-xs font-bold rounded-lg bg-white shadow-sm text-blue-600 transition-all">เข้าสู่ระบบ</button>
+                <button type="button" onclick="switchAuthMode('signup')" id="tab-signup" class="flex-1 py-2 text-xs font-medium rounded-lg text-slate-500 transition-all">สมัครสมาชิก</button>
             </div>
             <div class="space-y-4">
                 <div>
@@ -100,7 +100,7 @@ app.get('/', (req, res) => {
                     <label class="text-xs font-semibold text-slate-600 block mb-1">รหัสผ่าน (Password):</label>
                     <input type="password" id="auth-pass" class="w-full p-3 text-sm border border-slate-200 rounded-xl focus:outline-none focus:border-blue-500" placeholder="กรอกรหัสผ่าน">
                 </div>
-                <button id="auth-btn" onclick="handleAuth()" class="w-full py-3 bg-blue-600 text-white font-medium text-sm rounded-xl hover:bg-blue-700 shadow-md">เข้าสู่ระบบ</button>
+                <button type="button" id="auth-btn" onclick="handleAuth()" class="w-full py-3 bg-blue-600 text-white font-medium text-sm rounded-xl hover:bg-blue-700 shadow-md">เข้าสู่ระบบ</button>
             </div>
         </div>
     </div>
@@ -110,14 +110,16 @@ app.get('/', (req, res) => {
         <aside class="w-64 bg-white border-r border-slate-200 flex flex-col z-20">
             <div class="h-16 flex items-center justify-between px-6 border-b border-slate-100">
                 <span class="font-bold text-lg text-blue-600">FB Bot Manager</span>
-                <button onclick="logout()" class="text-xs text-rose-500 hover:underline font-semibold">ออกจากระบบ</button>
+                <button type="button" onclick="logout()" class="text-xs text-rose-500 hover:underline font-semibold">ออกจากระบบ</button>
             </div>
             
-            <div class="p-4 border-b border-slate-100 bg-slate-50">
-                <label class="text-xs font-bold text-slate-600 block mb-1">🏪 เลือกเพจที่กำลังจัดการ:</label>
+            <!-- ส่วนเลือกเพจสลับทำงาน + ปุ่มลบเพจ -->
+            <div class="p-4 border-b border-slate-100 bg-slate-50 space-y-2">
+                <label class="text-xs font-bold text-slate-600 block">🏪 เลือกเพจที่กำลังจัดการ:</label>
                 <select id="active-page-selector" onchange="switchActivePage(this.value)" class="w-full p-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-blue-500">
                     <option value="">-- ยังไม่มีเพจในระบบ --</option>
                 </select>
+                <button type="button" onclick="deleteCurrentPage()" class="w-full py-1.5 bg-rose-50 text-rose-600 border border-rose-200 hover:bg-rose-100 text-xs font-semibold rounded-lg transition-all">🗑️ ลบเพจนี้ออกจากระบบ</button>
             </div>
 
             <div class="flex-1 overflow-y-auto py-4 px-3 space-y-1">
@@ -438,13 +440,19 @@ app.get('/', (req, res) => {
                 if(pageIds.length === 0) {
                     selector.innerHTML = '<option value="">-- ยังไม่มีเพจในระบบ (ไปเพิ่มที่เมนูตั้งค่า) --</option>';
                     currentActivePageId = '';
+                    document.getElementById('header-page-name').innerText = 'ยังไม่ได้เลือกเพจ';
                 } else {
                     pageIds.forEach((pid, idx) => {
                         const pName = data.pages[pid].config.pageName || pid;
                         selector.innerHTML += '<option value="' + pid + '">' + pName + '</option>';
                         if(idx === 0 && !currentActivePageId) currentActivePageId = pid;
                     });
-                    if(currentActivePageId) selector.value = currentActivePageId;
+                    if(currentActivePageId && data.pages[currentActivePageId]) {
+                        selector.value = currentActivePageId;
+                    } else {
+                        currentActivePageId = pageIds[0];
+                        selector.value = currentActivePageId;
+                    }
                     loadConfigForActivePage();
                 }
             }
@@ -453,6 +461,30 @@ app.get('/', (req, res) => {
         async function switchActivePage(pageId) {
             currentActivePageId = pageId;
             loadConfigForActivePage();
+        }
+
+        // 🌟 ฟังก์ชันลบเพจที่กำลังเลือกอยู่ออกจากระบบ
+        async function deleteCurrentPage() {
+            if(!currentActivePageId) return alert('⚠️ ไม่มีเพจให้ลบครับ');
+            if(!confirm('⚠️ ยืนยันการลบเพจนี้ออกจากระบบ? บอตและข้อมูลตั้งค่าของเพจนี้จะถูกลบออก')) return;
+
+            try {
+                const res = await fetch('/api/user/delete-page?token=' + authToken, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pageId: currentActivePageId })
+                });
+                const data = await res.json();
+                if(data.success) {
+                    alert('🗑️ ลบเพจออกจากระบบเรียบร้อยแล้ว');
+                    currentActivePageId = '';
+                    loadUserPages();
+                } else {
+                    alert('❌ ลบเพจไม่สำเร็จ: ' + data.error);
+                }
+            } catch(e) {
+                alert('❌ เกิดข้อผิดพลาดในการเชื่อมต่อเซิร์ฟเวอร์');
+            }
         }
 
         async function loadConfigForActivePage() {
@@ -780,7 +812,7 @@ app.get('/auth/facebook/callback', (req, res) => {
 });
 
 // -------------------------------------------------------------
-// 4. API จัดการเพจและตั้งค่า (Multi-Page Support สูงสุด 5 เพจ)
+// 4. API จัดการเพจและตั้งค่า (เพิ่ม Endpoint สำหรับลบเพจ)
 // -------------------------------------------------------------
 app.get('/api/user/pages', checkAuth, (req, res) => {
   res.json({ success: true, pages: usersDB[req.userId].pages });
@@ -801,6 +833,20 @@ app.post('/api/user/add-page', checkAuth, (req, res) => {
     broadcastStatus: { isBroadcasting: false, total: 0, current: 0, success: 0, failed: 0, statusMessage: 'พร้อมใช้งาน', shouldStop: false }
   };
   res.json({ success: true });
+});
+
+// 🌟 เพิ่ม API สำหรับลบเพจที่กำลังรันอยู่
+app.post('/api/user/delete-page', checkAuth, (req, res) => {
+  const username = req.userId;
+  const { pageId } = req.body;
+  const userPages = usersDB[username].pages;
+
+  if (userPages[pageId]) {
+    delete userPages[pageId];
+    res.json({ success: true });
+  } else {
+    res.json({ success: false, error: 'ไม่พบเพจนี้ในระบบ' });
+  }
 });
 
 app.get('/api/config', checkAuth, (req, res) => {
