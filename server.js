@@ -255,15 +255,30 @@ function parseAddressBlock(texts, nameHint) {
   const postcode = pcs.length ? pcs[pcs.length - 1] : '';
 
   // เบอร์โทรถือเป็นตัวคั่นบรรทัด: "ชื่อ 08xxxxxxxx บ้าน 2/5 ..." -> ชื่อ / บ้าน 2/5 ...
+  // บรรทัดที่ตามหลังหัวข้อ "ผู้รับ" / "ชื่อ" = ชื่อผู้รับ (ถ้าดูเป็นชื่อคน)
+  let labelledName = '';
+  const rawLines = full.replace(PHONE_RE_G, '\n').split(/\n+/).map(l => l.trim()).filter(Boolean);
+  for (let i = 0; i < rawLines.length - 1 && !labelledName; i++) {
+    if (/^(ผู้รับ(สินค้า|ของ)?|ชื่อ\s*(-?\s*(สกุล|นามสกุล))?\s*(ผู้รับ)?|name)\s*[:：\-]?\s*$/i.test(rawLines[i])) {
+      const cand = rawLines[i + 1].replace(/[📞☎️📱]/g, '').trim();
+      if (isNameLike(cand)) labelledName = cand;
+    }
+  }
+
   let lines = full.replace(PHONE_RE_G, '\n').split(/\n+/)
     .map(l => l.replace(LABEL_RE, '')
       .replace(/(เบอร์โทรศัพท์|เบอร์โทร|เบอร์|โทร\.?|tel\.?)\s*[:：]?\s*$/i, '')
+      .replace(/[📞☎️📱✆]/g, '')
       .replace(/\s{2,}/g, ' ').trim())
     .filter(l => l && !/^[\s,.:\-]*$/.test(l));
 
   lines = lines.filter(l => !HEADER_ONLY.test(l.trim()));
 
   let recipientName = '';
+  if (labelledName) {
+    const k = lines.indexOf(labelledName);
+    if (k >= 0) { recipientName = labelledName; lines.splice(k, 1); }
+  }
   // มีคำนำหน้าชื่อ (นาย/นาง/นางสาว/คุณ): เอาคำนำหน้า + ชื่อ + นามสกุล
   for (let i = 0; i < lines.length && !recipientName; i++) {
     const m = lines[i].match(NAME_TITLE_RE);
@@ -284,6 +299,16 @@ function parseAddressBlock(texts, nameHint) {
     // ได้ชื่อแล้ว
   } else if (lines.length > 1 && isNameLike(lines[0])) {
     recipientName = lines.shift();
+  } else if (lines.length > 2 && (() => {
+    // บรรทัดแรกไม่ใช่ชื่อคน (เช่น ชื่อร้าน) -> หาชื่อในบรรทัดถัดไป ก่อนเริ่มส่วนที่อยู่
+    const sig = lines.findIndex(l => /\d/.test(l) || ADDR_PATTERNS.some(re => re.test(l)));
+    const limit = Math.min(sig < 0 ? lines.length - 1 : sig, 3);
+    for (let k = 1; k < limit; k++) {
+      if (isNameLike(lines[k])) { recipientName = lines.splice(k, 1)[0]; return true; }
+    }
+    return false;
+  })()) {
+    // ได้ชื่อจากบรรทัดถัดไปแล้ว
   } else if (lines.length >= 1) {
     // กรณีพิมพ์ชื่อกับที่อยู่ในบรรทัดเดียว เช่น "สมชาย ใจดี 12/3 ม.4 ต.หาดใหญ่ ..."
     // รวมกรณีชื่อติดบ้านเลขที่ไม่เว้นวรรค เช่น "นันทพล นาคศรีโภชน์1952/21 ม.6"
@@ -322,6 +347,27 @@ function extractAddressInfo(msgs) {
     if (scoreAddressText(text) >= 4) best = { block: b, keptIdx };
   }
   if (!best) return null;
+
+  // มีข้อความที่เป็นที่อยู่ครบในตัว (มีรหัสไปรษณีย์ + ลักษณะที่อยู่ชัด) -> ใช้ข้อความนั้นเป็นหลัก
+  // กันข้อความอื่นในช่วงเดียวกัน (เช่น ชื่อร้าน + เบอร์อีกเบอร์) มาปนในที่อยู่
+  const complete = best.keptIdx.filter(i => {
+    const t = best.block[i].text;
+    return (stripPhones(t).match(POSTCODE_RE) || []).length > 0 && scoreAddressText(t) >= 6;
+  });
+  if (complete.length) {
+    const i = complete[complete.length - 1];
+    const prev = i > 0 ? best.block[i - 1].text : '';
+    const res = parseAddressBlock([best.block[i].text], isNameLike(prev) ? prev : '');
+    if (!res.phone) {
+      // เบอร์อยู่คนละข้อความ: ใช้เบอร์จากข้อความถัดไป/ก่อนหน้าที่ใกล้ที่สุด
+      const order = best.block.map((m, k) => k).sort((a, b) => Math.abs(a - i) - Math.abs(b - i));
+      for (const k of order) {
+        const pm = String(best.block[k].text).match(PHONE_RE);
+        if (pm) { res.phone = pm[0].replace(/\D/g, '').replace(/^66/, '0'); break; }
+      }
+    }
+    return res;
+  }
 
   const first = best.keptIdx[0];
   const prevMsg = first > 0 ? best.block[first - 1].text : '';
