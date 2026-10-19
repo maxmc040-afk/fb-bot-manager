@@ -721,14 +721,15 @@ function smartThaiAddress(text, postcode) {
       const dHit = r.dn === r.an ? (dCount >= 2 || (marked.district && compactTh(marked.district) === r.dn)) : dCount >= 1;
       if (dHit) sc += 4;
       const amphoeShort = r.an.replace(/^เมือง/, '');
-      if (hay.includes(r.an)) sc += 3;
-      else if (r.an.startsWith('เมือง') && hay.includes('เมือง')) sc += 2;
+      let aHit = false;
+      if (hay.includes(r.an)) { sc += 3; aHit = true; }
+      else if (r.an.startsWith('เมือง') && hay.includes('เมือง')) { sc += 2; aHit = true; }
       else if (amphoeShort && amphoeShort !== r.an && hay.includes(amphoeShort)) sc += 1;
       if (hay.includes(r.pn) || (isBangkok(r.p) && /กรุงเทพ/.test(raw))) sc += 2;
       if (zip && r.z === zip) sc += 2;
       // ให้ความสำคัญกับ marker ที่ลูกค้าพิมพ์มาเอง
       if (marked.district && compactTh(marked.district) === r.dn) sc += 2;
-      if (sc > bestScore) { best = { ...r, _dHit: dHit, _fuzzy: false }; bestScore = sc; }
+      if (sc > bestScore) { best = { ...r, _dHit: dHit, _aHit: aHit, _fuzzy: false }; bestScore = sc; }
     }
     // ไม่พบชื่อตำบลตรงๆ: ลองหาคำที่คล้ายชื่อตำบลในรหัสไปรษณีย์เดียวกัน (พิมพ์ผิดเล็กน้อย)
     if ((!best || !best._dHit) && zip && thaiAddrByZip.has(zip)) {
@@ -761,14 +762,16 @@ function smartThaiAddress(text, postcode) {
         .replace(/(ตำบล|แขวง|อำเภอ|เขต|จังหวัด|(?<![ก-๙])ต\.|(?<![ก-๙])อ\.|(?<![ก-๙])จ\.)\s*(?=$|\s)/g, ' ');
       rest = tidyStreet(rest);
       const parts = { address: rest, district: best.d, city: best.a, province: best.p, postal_code: best.z };
-      return { ...parts, ok: true, source: 'db', formatted: formatThaiAddress(parts) };
+      // เดา = พิมพ์ตำบลผิด/ไม่มีตำบล/อำเภอไม่ตรง -> ให้แอดมินตรวจเลือกเอง
+      const guess = !!(best._fuzzy || !best._dHit || !best._aHit || (zip && best.z !== zip));
+      return { ...parts, ok: true, source: 'db', guess, formatted: formatThaiAddress(parts) };
     }
   }
 
   if (marked.district && marked.city && marked.province && marked.postal_code) {
     const pseudo = { dn: compactTh(marked.district), an: compactTh(marked.city), pn: compactTh(marked.province) };
     const parts = { ...marked, address: tidyStreet(stripLocationWords(marked.address, pseudo)) };
-    return { ...parts, ok: true, source: 'marker', formatted: formatThaiAddress(parts) };
+    return { ...parts, ok: true, source: 'marker', guess: !!thaiAddrDb, formatted: formatThaiAddress(parts) };
   }
 
   // สำรอง (กรณีโหลดฐานข้อมูลไม่ได้): "... ตำบล อำเภอ จังหวัด รหัสไปรษณีย์" ไล่จากท้าย
@@ -778,10 +781,45 @@ function smartThaiAddress(text, postcode) {
     while (before.length && tail.length < 3 && !/\d/.test(before[before.length - 1])) tail.unshift(before.pop());
     if (tail.length === 3) {
       const parts = { address: tidyStreet(before.join(' ')), district: tail[0].replace(/^(ตำบล|แขวง|ต\.)/, ''), city: tail[1].replace(/^(อำเภอ|เขต|อ\.)/, ''), province: tail[2].replace(/^(จังหวัด|จ\.)/, ''), postal_code: zip };
-      return { ...parts, ok: true, source: 'position', formatted: formatThaiAddress(parts) };
+      return { ...parts, ok: true, source: 'position', guess: true, formatted: formatThaiAddress(parts) };
     }
   }
   return { ...marked, postal_code: marked.postal_code || zip, ok: false, source: 'none', formatted: '' };
+}
+
+// ตรวจว่า ตำบล/อำเภอ ในที่อยู่ ตรงกับรหัสไปรษณีย์หรือไม่ และคืนตัวเลือกทั้งหมดของรหัสไปรษณีย์นั้น
+function checkAddressAgainstZip(address, postcode) {
+  if (!thaiAddrDb) return { status: 'nodb', options: [] };
+  const raw = applyProvinceAliases(String(address || ''));
+  const pcs = raw.match(/(?<!\d)[1-9]\d{4}(?!\d)/g) || [];
+  const zip = String(postcode || '').trim() || (pcs.length ? pcs[pcs.length - 1] : '');
+  if (!zip) return { status: 'nozip', options: [] };
+  const rows = thaiAddrByZip.get(zip);
+  if (!rows) return { status: 'badzip', zip, options: [] };
+  const options = rows.map(r => ({ d: r.d, a: r.a, p: r.p, z: r.z }));
+  const marked = parseThaiAddress(raw, zip);
+  const hay = compactTh(raw.replace(/(ตำบล|แขวง|อำเภอ|เขต|จังหวัด|ต\.|อ\.|จ\.)/g, ' '));
+  const idx = rows.findIndex(r => {
+    const dOk = marked.district ? compactTh(marked.district) === r.dn
+      : countOcc(hay, r.dn) >= (r.dn === r.an ? 2 : 1);
+    const mc = compactTh(marked.city);
+    const aOk = marked.city ? (mc === r.an || (r.an.startsWith('เมือง') && (mc === 'เมือง' || mc === r.an.replace(/^เมือง/, ''))))
+      : (hay.includes(r.an) || (r.an.startsWith('เมือง') && hay.includes('เมือง')));
+    return dOk && aOk;
+  });
+  return { status: idx >= 0 ? 'ok' : 'check', zip, matchIndex: idx, options };
+}
+
+// เปลี่ยน ตำบล/อำเภอ/จังหวัด ของที่อยู่เป็นค่าที่เลือก (เก็บบ้านเลขที่/หมู่/ซอย/ถนนไว้)
+function rebuildAddressWithLocation(address, loc) {
+  const best = { d: loc.d, a: loc.a, p: loc.p, dn: compactTh(loc.d), an: compactTh(loc.a), pn: compactTh(loc.p) };
+  let raw = applyProvinceAliases(String(address || '').replace(PHONE_RE_G, ' '));
+  raw = raw.replace(/(?<!\d)[1-9]\d{4}(?!\d)/g, ' ').replace(/\s+/g, ' ').trim();
+  let street = raw.slice(0, findLocationStart(raw, best));
+  if (!/\d/.test(street)) street = raw;
+  street = stripLocationWords(street, best)
+    .replace(/(ตำบล|แขวง|อำเภอ|เขต|จังหวัด|(?<![ก-๙])ต\.|(?<![ก-๙])อ\.|(?<![ก-๙])จ\.)\s*[^\s\d]*/g, ' ');
+  return formatThaiAddress({ address: tidyStreet(street), district: loc.d, city: loc.a, province: loc.p, postal_code: String(loc.z) });
 }
 
 function unwrapData(body) {
@@ -886,6 +924,13 @@ async function beemoveResolveSender(bm) {
 // สร้างพัสดุ 1 รายการ คืนค่า { id, trackingNo, partnerName }
 async function beemoveCreateShipment(bm, buyer, remark) {
   if (!thaiAddrDb) await loadThaiAddressDb();
+  if (thaiAddrDb) {
+    const chk = checkAddressAgainstZip(buyer.address, buyer.postcode);
+    if (chk.status === 'badzip') throw new Error('รหัสไปรษณีย์ ' + chk.zip + ' ไม่มีอยู่จริง กรุณาตรวจรหัสไปรษณีย์');
+    if (chk.status === 'check' || buyer.addrGuess) {
+      throw new Error('ตำบล/อำเภอ ยังไม่ได้ยืนยัน กรุณาเลือกให้ถูกต้องจากช่องเลือกใต้ที่อยู่');
+    }
+  }
   const sm = smartThaiAddress(buyer.address, buyer.postcode);
   const addr = { address: sm.address, district: sm.district, city: sm.city, province: sm.province, postal_code: sm.postal_code };
   const phone = String(buyer.phone || '').replace(/\D/g, '');
@@ -2304,6 +2349,7 @@ app.get('/', (req, res) => {
                     + '<td class="py-2 pr-2 text-right text-emerald-600 font-semibold whitespace-nowrap">' + (b.slipTotal ? fmtMoney(b.slipTotal) : '-') + '</td>'
                     + '<td class="py-2 pr-2 min-w-[8rem]"><input type="text" class="bf-name ' + inp + '" value="' + escapeHtml(b.recipientName || '') + '"></td>'
                     + '<td class="py-2 pr-2 min-w-[16rem]"><textarea rows="2" class="bf-addr ' + inp + '">' + escapeHtml(b.address || '') + '</textarea>'
+                    + renderLocationPicker(b)
                     + (b.raw ? '<details class="text-[10px] text-slate-400 mt-1"><summary class="cursor-pointer">ข้อความต้นฉบับ</summary><div class="whitespace-pre-wrap">' + escapeHtml(b.raw) + '</div></details>' : '')
                     + '</td>'
                     + '<td class="py-2 pr-2 w-20"><input type="text" class="bf-post ' + inp + '" value="' + escapeHtml(b.postcode || '') + '"></td>'
@@ -2320,6 +2366,53 @@ app.get('/', (req, res) => {
             });
             tbody.innerHTML = html;
             updateBuyersSummary();
+        }
+
+        // ช่องเลือก ตำบล › อำเภอ › จังหวัด จากรหัสไปรษณีย์
+        function renderLocationPicker(b) {
+            if(b.addrCheck === 'badzip') {
+                return '<div class="mt-1 text-[11px] font-semibold text-rose-600">❌ ไม่มีรหัสไปรษณีย์ ' + escapeHtml(b.addrZip) + ' ในประเทศไทย ตรวจช่องรหัส ปณ.</div>';
+            }
+            const opts = b.addrOptions || [];
+            if(!opts.length) return '';
+            const needCheck = b.addrCheck === 'check' || b.addrGuess;
+            const sel = needCheck && b.addrGuess && b.addrMatch >= 0 ? -1 : b.addrMatch;
+            let html = '<div class="mt-1 rounded-md ' + (needCheck ? 'bg-amber-50 border border-amber-300 p-1.5' : '') + '">';
+            if(needCheck) {
+                html += '<div class="text-[11px] font-semibold text-amber-700 mb-1">⚠️ ' + (b.addrCheck === 'check'
+                    ? 'ตำบล/อำเภอไม่ตรงกับรหัสไปรษณีย์ ' + escapeHtml(b.addrZip) + ' กรุณาเลือกที่ถูกต้อง'
+                    : 'ระบบเดาตำบล/อำเภอให้ (ลูกค้าพิมพ์ไม่ชัด) กรุณาเลือกยืนยัน') + '</div>';
+            }
+            html += '<select class="bf-loc w-full p-1 text-[11px] border rounded-md ' + (needCheck ? 'border-amber-400 bg-white text-amber-900' : 'border-slate-200 bg-slate-50 text-slate-600') + '">';
+            html += '<option value="">' + (needCheck ? '-- เลือก ตำบล › อำเภอ (รหัส ปณ. ' + escapeHtml(b.addrZip) + ') --' : '') + '</option>';
+            opts.forEach(function(o, i) {
+                const isBkk = o.p.indexOf('กรุงเทพ') >= 0;
+                const label = (isBkk ? 'แขวง' : 'ต.') + o.d + ' › ' + (isBkk ? 'เขต' : 'อ.') + o.a + ' › ' + o.p + ' ' + o.z;
+                const mark = (i === b.addrMatch && !needCheck) ? '✓ ' : (i === b.addrMatch ? '★ ' : '');
+                html += '<option value="' + i + '"' + (i === sel ? ' selected' : '') + '>' + escapeHtml(mark + label) + '</option>';
+            });
+            html += '</select></div>';
+            return html;
+        }
+
+        async function setBuyerLocation(tr, idx) {
+            const uid = tr.getAttribute('data-uid');
+            const b = buyersList.find(function(x) { return x.userId === uid; });
+            if(!b || !b.addrOptions || !b.addrOptions[idx]) return;
+            // บันทึกข้อมูลที่แก้ในแถวก่อน
+            const row = readBuyerRow(tr);
+            await fetch(liveUrl('/api/live/buyers/update', '&sid=' + currentLiveId), {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(row)
+            });
+            const o = b.addrOptions[idx];
+            const res = await fetch(liveUrl('/api/live/buyers/set-location', '&sid=' + currentLiveId), {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ userId: uid, d: o.d, a: o.a, p: o.p, z: o.z })
+            });
+            const d = await res.json();
+            if(!d.success) alert('❌ ' + d.error);
+            if(document.activeElement) document.activeElement.blur();
+            await loadBuyers();
         }
 
         function updateBuyersSummary() {
@@ -2356,6 +2449,10 @@ app.get('/', (req, res) => {
                 updateBuyersSummary();
                 return;
             }
+            if(e.target.classList.contains('bf-loc')) {
+                if(e.target.value !== '') await setBuyerLocation(tr, parseInt(e.target.value, 10));
+                return;
+            }
             const row = readBuyerRow(tr);
             const item = buyersList.find(function(b) { return b.userId === uid; });
             if(item) Object.assign(item, row, { status: 'manual' });
@@ -2365,6 +2462,11 @@ app.get('/', (req, res) => {
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(row)
                 });
+                // แก้รหัสไปรษณีย์/ที่อยู่แล้ว โหลดตัวเลือกตำบลใหม่
+                if(e.target.classList.contains('bf-post') || e.target.classList.contains('bf-addr')) {
+                    e.target.blur();
+                    await loadBuyers();
+                }
             } catch(err) { console.error(err); }
         });
 
@@ -3344,6 +3446,7 @@ async function runBuyersJob(pageData, s, matched) {
           if (fixed.ok && fixed.formatted) {
             item.address = fixed.formatted;
             item.postcode = fixed.postal_code;
+            item.addrGuess = !!fixed.guess;
             if (fixed.source !== 'marker') item.note = 'ระบบจัดรูปแบบที่อยู่ให้แล้ว';
           }
           if (!item.recipientName) item.recipientName = item.fbName;
@@ -3405,7 +3508,8 @@ app.get('/api/live/buyers', checkAuth, (req, res) => {
     const slipTotal = s.slips
       .filter(x => x.senderId === b.userId || (b.psid && x.senderId === b.psid))
       .reduce((sum, x) => sum + (Number(x.amount) || 0), 0);
-    return { ...b, slipTotal };
+    const chk = checkAddressAgainstZip(b.address, b.postcode);
+    return { ...b, slipTotal, addrCheck: chk.status, addrZip: chk.zip || '', addrOptions: chk.options, addrMatch: chk.matchIndex ?? -1 };
   });
   const job = s.buyersJob
     ? { running: s.buyersJob.running, total: s.buyersJob.total, done: s.buyersJob.done, found: s.buyersJob.found, message: s.buyersJob.message, warning: s.buyersJob.warning }
@@ -3427,8 +3531,36 @@ app.post('/api/live/buyers/update', checkAuth, (req, res) => {
   ['recipientName', 'address', 'phone', 'postcode'].forEach(k => {
     if (typeof b[k] === 'string') item[k] = b[k].slice(0, 1000);
   });
+  if (item.addrGuess && checkAddressAgainstZip(item.address, item.postcode).status === 'ok' && b.confirmAddress) item.addrGuess = false;
   item.status = 'manual';
   res.json({ success: true });
+});
+
+// 🗺️ เลือก ตำบล/อำเภอ/จังหวัด ที่ถูกต้องจากรายการของรหัสไปรษณีย์
+app.post('/api/live/buyers/set-location', checkAuth, async (req, res) => {
+  const ctx = getLiveContext(req, res);
+  if (!ctx) return;
+  const s = ctx.live;
+  if (!s || !s.buyers) return res.json({ success: false, error: 'ไม่พบ session นี้' });
+  if (!thaiAddrDb) await loadThaiAddressDb();
+  const b = req.body || {};
+  const item = s.buyers.get(String(b.userId));
+  if (!item) return res.json({ success: false, error: 'ไม่พบลูกค้าคนนี้' });
+  const rows = thaiAddrByZip.get(String(b.z)) || [];
+  const loc = rows.find(r => r.d === b.d && r.a === b.a && r.p === b.p);
+  if (!loc) return res.json({ success: false, error: 'ตัวเลือกไม่ถูกต้อง' });
+  item.address = rebuildAddressWithLocation(item.address, loc);
+  item.postcode = loc.z;
+  item.addrGuess = false;
+  item.status = 'manual';
+  if (item.shipStatus === 'error') item.shipNote = '';
+  res.json({ success: true, address: item.address });
+});
+
+app.get('/api/thai-address/zip', checkAuth, async (req, res) => {
+  if (!thaiAddrDb) await loadThaiAddressDb();
+  const rows = (thaiAddrByZip.get(String(req.query.zip || '').trim()) || []).map(r => ({ d: r.d, a: r.a, p: r.p, z: r.z }));
+  res.json({ success: true, loaded: !!thaiAddrDb, rows });
 });
 
 // 🗺️ จัดรูปแบบที่อยู่ลูกค้าให้ถูกต้อง (เติม ต./อ./จ./รหัสไปรษณีย์)
@@ -3447,6 +3579,7 @@ app.post('/api/live/buyers/fix-address', checkAuth, async (req, res) => {
     if (r.ok && r.formatted) {
       item.address = r.formatted;
       item.postcode = r.postal_code;
+      item.addrGuess = !!r.guess;
       fixed++;
     } else {
       item.note = 'จัดรูปแบบที่อยู่ไม่ได้ ตรวจชื่อตำบล/อำเภอ/จังหวัด';
