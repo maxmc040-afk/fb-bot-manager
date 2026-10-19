@@ -358,12 +358,61 @@ const defaultBeemoveConfig = {
   packageName: 'กล่อง', width: 20, length: 30, height: 10, weight: 1,
   labelSize: 'A6',
   notifyCustomer: false,
+  notifyStatus: false,         // แจ้งลูกค้าเมื่อพัสดุจัดส่งสำเร็จ (จาก Webhook)
+  webhookKey: '',              // รหัสลับใน Webhook URL สร้างอัตโนมัติ
   notifyText: '📦 ร้านจัดส่งสินค้าแล้วค่ะ\nเลขพัสดุ: {tracking}\nขอบคุณที่อุดหนุนนะคะ 🙏'
 };
 
 function getBeemoveConfig(pageData) {
   pageData.config.beemove = { ...defaultBeemoveConfig, ...(pageData.config.beemove || {}) };
+  if (!pageData.config.beemove.webhookKey) pageData.config.beemove.webhookKey = crypto.randomBytes(16).toString('hex');
   return pageData.config.beemove;
+}
+
+// ---------- 📡 Webhook สถานะพัสดุจาก Bee Move ----------
+function bmPick(o, keys) {
+  for (const k of keys) {
+    const v = k.split('.').reduce((x, p) => (x && x[p] !== undefined ? x[p] : undefined), o);
+    if (v !== undefined && v !== null && v !== '' && typeof v !== 'object') return String(v);
+  }
+  return '';
+}
+
+// แปลงข้อมูลที่ Bee Move ส่งมาเป็นรายการ { ids, awb, status }
+function parseBeemoveWebhook(body) {
+  const out = [];
+  const visit = (o, depth) => {
+    if (!o || typeof o !== 'object' || depth > 3) return;
+    if (Array.isArray(o)) { o.forEach(x => visit(x, depth + 1)); return; }
+    const awb = bmPick(o, ['partner_awb_no', 'awb_no', 'tracking_no', 'tracking_number', 'shipment_order.partner_awb_no']);
+    const ids = [bmPick(o, ['shipment_order_id']), bmPick(o, ['shipment_order.id']), bmPick(o, ['order_id']), bmPick(o, ['id'])].filter(Boolean);
+    const status = bmPick(o, ['shipment_status_name', 'status_name', 'status_th', 'shipment_status.name', 'shipment_status.name_th',
+      'shipment_status', 'order_status', 'status', 'event_status', 'description', 'shipment_order.shipment_status']);
+    if (awb || (ids.length && status)) out.push({ ids, awb, status });
+    for (const k of ['data', 'order', 'orders', 'shipment_order', 'shipment_orders', 'payload', 'items']) {
+      if (o[k] && typeof o[k] === 'object') visit(o[k], depth + 1);
+    }
+  };
+  visit(body, 0);
+  return out;
+}
+
+function findBuyerByShipment(pageData, ids, awb) {
+  for (const s of Object.values(getLiveSessions(pageData))) {
+    if (!s.buyers) continue;
+    for (const item of s.buyers.values()) {
+      if ((item.beemoveOrderId && ids.includes(String(item.beemoveOrderId))) || (awb && item.trackingNo === awb)) return item;
+    }
+  }
+  return null;
+}
+
+async function sendMessengerText(pageData, psid, text) {
+  const token = pageData.config.pageAccessToken;
+  if (!psid || !token) throw new Error('ไม่มี PSID หรือ Page token');
+  await axios.post('https://graph.facebook.com/v19.0/me/messages', {
+    recipient: { id: psid }, message: { text }
+  }, { params: { access_token: token }, timeout: 10000 });
 }
 
 const BM_JSON = { Accept: 'application/json', 'Content-Type': 'application/json' };
@@ -524,11 +573,59 @@ function beemoveParcel(bm) {
   };
 }
 
-async function beemoveEstimate(bm, order) {
+async function beemoveEstimateRaw(bm, order) {
   const res = await beemoveRequest(bm, 'POST', '/client/v2/shipment-orders/partner-shipping-prices', { data: { orders: [order] } });
   const data = unwrapData(res.data) || {};
   const orders = data.orders || [];
-  return (orders[0] && orders[0].estimate_prices) || [];
+  return { prices: (orders[0] && orders[0].estimate_prices) || [], raw: res.data };
+}
+
+async function beemoveEstimate(bm, order) {
+  return (await beemoveEstimateRaw(bm, order)).prices;
+}
+
+// จุดเข้ารับพัสดุ (ที่อยู่ผู้ส่ง) ที่ตั้งไว้ในบัญชี Bee Move
+async function beemoveGetPickupPoints(bm) {
+  const res = await beemoveRequest(bm, 'GET', '/client/v1/pickup-points', { params: { page: 1, limit: 50 } });
+  let list = unwrapData(res.data);
+  if (list && !Array.isArray(list) && Array.isArray(list.data)) list = list.data;
+  return (Array.isArray(list) ? list : []).map(p => ({
+    id: p.id,
+    name: p.pickup_point_name || p.name || '',
+    responser: p.responser_name || '',
+    tel: String(p.responser_tel || p.telephone || '').replace(/\D/g, ''),
+    address: p.pickup_point_addr || '',
+    district: p.pickup_point_district || '',
+    city: p.pickup_point_city || '',
+    province: p.pickup_point_province || '',
+    postal_code: String(p.pickup_point_postal_code || '')
+  })).filter(p => p.id !== undefined && p.id !== null);
+}
+
+// ที่อยู่ผู้ส่ง: ใช้จุดเข้ารับพัสดุใน Bee Move เป็นหลัก (หน้าเว็บ Bee Move ทำแบบนี้) ถ้าไม่มีจึงใช้ที่กรอกเอง
+async function beemoveResolveSender(bm) {
+  const manual = beemoveSender(bm);
+  let points = [];
+  try { points = await beemoveGetPickupPoints(bm); } catch (e) {
+    console.error('⚠️ [Bee Move] ดึงจุดเข้ารับพัสดุไม่สำเร็จ:', beemoveError(e));
+  }
+  const p = bm.pickupPointId ? points.find(x => String(x.id) === String(bm.pickupPointId)) : points[0];
+  if (p) {
+    return {
+      pickupPointId: p.id,
+      from: {
+        name: manual.name || p.responser || p.name,
+        address: p.address || manual.address,
+        district: p.district || manual.district,
+        city: p.city || manual.city,
+        province: p.province || manual.province,
+        postal_code: p.postal_code || manual.postal_code,
+        phone_number: manual.phone_number || p.tel
+      },
+      points
+    };
+  }
+  return { pickupPointId: bm.pickupPointId || null, from: manual, points };
 }
 
 // สร้างพัสดุ 1 รายการ คืนค่า { id, trackingNo, partnerName }
@@ -545,16 +642,29 @@ async function beemoveCreateShipment(bm, buyer, remark) {
   if (phone.length < 9) missing.push('เบอร์โทร');
   if (missing.length) throw new Error('ข้อมูลไม่ครบ: ' + missing.join(', ') + ' (แก้ในช่องที่อยู่ เช่น "12/3 ม.4 ต.คอหงส์ อ.หาดใหญ่ จ.สงขลา 90110")');
 
+  const sender = await beemoveResolveSender(bm);
+  const fs = sender.from;
+  if (!fs.district || !fs.city || !fs.province || !fs.postal_code) {
+    throw new Error('ไม่มีที่อยู่ผู้ส่ง: เพิ่ม "ที่อยู่รับสินค้า" ใน Bee Move (ตั้งค่า → ที่อยู่รับสินค้า) หรือกรอกที่อยู่ผู้ส่งในเมนู 🚚 ขนส่ง Bee Move');
+  }
   const base = {
-    from: beemoveSender(bm),
+    from: fs,
     to: { name: buyer.recipientName || buyer.fbName, ...addr, phone_number: phone },
     parcel: beemoveParcel(bm)
   };
-  const prices = await beemoveEstimate(bm, base);
+  if (sender.pickupPointId !== null && sender.pickupPointId !== undefined && sender.pickupPointId !== '') {
+    base.pickup_point_id = isNaN(Number(sender.pickupPointId)) ? sender.pickupPointId : Number(sender.pickupPointId);
+  }
+  const est = await beemoveEstimateRaw(bm, base);
+  const prices = est.prices;
   const chosen = pickPartner(bm, prices);
   if (!chosen) {
-    const names = prices.filter(p => p.partner).map(p => p.partner.partner_name + (p.errors && p.errors.length ? '(ใช้ไม่ได้)' : '')).join(', ');
-    throw new Error('ไม่พบขนส่งที่ตั้งไว้ ขนส่งที่ใช้ได้: ' + (names || '-'));
+    if (!prices.length) {
+      throw new Error('Bee Move ไม่ส่งราคาขนส่งกลับมา: ' + JSON.stringify(est.raw).slice(0, 250));
+    }
+    const names = prices.filter(p => p.partner).map(p => p.partner.partner_name +
+      (p.errors && p.errors.length ? '(ใช้ไม่ได้: ' + [].concat(p.errors).map(x => typeof x === 'string' ? x : (x.message || JSON.stringify(x))).join(' ').slice(0, 80) + ')' : '')).join(', ');
+    throw new Error('ไม่พบขนส่งที่ตั้งไว้ ขนส่งที่มี: ' + names);
   }
   const body = {
     ...base,
@@ -567,7 +677,6 @@ async function beemoveCreateShipment(bm, buyer, remark) {
     },
     label_remark: String(remark || '').slice(0, 100)
   };
-  if (bm.pickupPointId) body.pickup_point_id = isNaN(Number(bm.pickupPointId)) ? bm.pickupPointId : Number(bm.pickupPointId);
   const res = await beemoveRequest(bm, 'POST', '/client/v1/shipment-orders', { data: body });
   const d = unwrapData(res.data) || {};
   const id = d.id || d.shipment_order_id || d.order_id;
@@ -1043,7 +1152,10 @@ app.get('/', (req, res) => {
                                 <div><label class="text-xs font-semibold text-slate-600 block mb-1">จังหวัด *</label><input id="bm-sender-province" class="w-full p-2 text-sm border border-slate-200 rounded-lg bg-white"></div>
                                 <div><label class="text-xs font-semibold text-slate-600 block mb-1">รหัสไปรษณีย์ *</label><input id="bm-sender-postcode" class="w-full p-2 text-sm border border-slate-200 rounded-lg bg-white"></div>
                             </div>
-                            <div><label class="text-xs font-semibold text-slate-600 block mb-1">รหัสจุดเข้ารับพัสดุ (Pickup point ID) — เว้นว่างได้:</label><input id="bm-pickup-id" class="w-full md:w-1/3 p-2 text-sm border border-slate-200 rounded-lg bg-white"></div>
+                            <div><label class="text-xs font-semibold text-slate-600 block mb-1">ที่อยู่รับสินค้าใน Bee Move (กด "ทดสอบ + ดึงขนส่ง" เพื่อโหลดรายการ):</label>
+                                <select id="bm-pickup-id" class="w-full p-2 text-sm border border-slate-200 rounded-lg bg-white"><option value="">-- ใช้ที่อยู่แรกในบัญชี Bee Move --</option></select>
+                                <div class="text-[11px] text-slate-500 mt-1">ถ้าเลือกที่อยู่รับสินค้า ระบบจะใช้ที่อยู่นั้นเป็นผู้ส่ง ช่องด้านบนใช้เฉพาะชื่อ/เบอร์ผู้ส่ง (เว้นว่างได้) หรือเมื่อบัญชีไม่มีที่อยู่รับสินค้า</div>
+                            </div>
                         </div>
 
                         <div class="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">
@@ -1070,6 +1182,25 @@ app.get('/', (req, res) => {
                         <div class="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">
                             <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" id="bm-notify" class="w-4 h-4 rounded"><span class="text-sm font-semibold text-slate-700">💬 ส่งเลขพัสดุให้ลูกค้าทางแชทอัตโนมัติหลังสร้างพัสดุ</span></label>
                             <textarea id="bm-notify-text" rows="3" class="w-full p-3 text-sm border border-slate-200 rounded-xl bg-white" placeholder="ใช้ {tracking} = เลขพัสดุ, {courier} = ชื่อขนส่ง"></textarea>
+                        </div>
+
+                        <div class="bg-indigo-50 border border-indigo-200 rounded-2xl p-4 space-y-3">
+                            <h4 class="text-sm font-bold text-indigo-800">📡 Webhook สถานะพัสดุ (Bee Move ส่งสถานะกลับมาที่เว็บนี้)</h4>
+                            <ol class="list-decimal pl-5 text-xs text-indigo-900 space-y-1">
+                                <li>ที่ client.beemove.co.th ไปที่ ตั้งค่า → การเชื่อมต่อ API → จัดการ Webhook</li>
+                                <li>ชื่อ ใส่อะไรก็ได้ · Webhook URL เลือก "กำหนดเอง" แล้ววางลิงก์ด้านล่าง · Event: Order status Updated</li>
+                                <li>ติ๊กยอมรับเงื่อนไข แล้วกดบันทึก</li>
+                            </ol>
+                            <div class="flex gap-2">
+                                <input id="bm-webhook-url" readonly class="flex-1 p-2 text-xs border border-indigo-200 rounded-lg bg-white text-slate-700">
+                                <button type="button" onclick="copyBmWebhook()" class="px-3 py-2 text-xs font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700">คัดลอก</button>
+                            </div>
+                            <div class="text-xs text-amber-700">⚠️ Bee Move ตั้ง Webhook ได้ 1 ลิงก์ ถ้าเปลี่ยนจากลิงก์ Page365 เดิม Page365 จะไม่ได้รับสถานะพัสดุจาก Bee Move อีก</div>
+                            <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" id="bm-notify-status" class="w-4 h-4 rounded"><span class="text-xs text-slate-700">💬 แจ้งลูกค้าทางแชทเมื่อพัสดุจัดส่งสำเร็จ</span></label>
+                            <details class="text-xs text-slate-600">
+                                <summary class="cursor-pointer font-semibold">ข้อมูลล่าสุดที่ Bee Move ส่งมา <span id="bm-hook-count"></span></summary>
+                                <div id="bm-hook-list" class="mt-2 space-y-2"></div>
+                            </details>
                         </div>
 
                         <div id="bm-test-result" class="hidden text-sm p-3 rounded-xl border"></div>
@@ -1921,6 +2052,7 @@ app.get('/', (req, res) => {
                     + '<td class="py-2 pr-2 w-28"><input type="text" class="bf-phone ' + inp + '" value="' + escapeHtml(b.phone || '') + '"></td>'
                     + '<td class="py-2 pr-2 min-w-[7rem]">' + (b.trackingNo
                         ? '<div class="font-bold text-emerald-700 whitespace-nowrap">' + escapeHtml(b.trackingNo) + '</div><div class="text-[10px] text-slate-400">' + escapeHtml(b.partnerName || '') + (b.notified ? ' · แจ้งลูกค้าแล้ว' : '') + '</div>'
+                            + (b.bmStatus ? '<div class="text-[10px] font-semibold text-indigo-600">' + escapeHtml(b.bmStatus) + '</div>' : '')
                         : (b.shipStatus === 'error' ? '<div class="text-[10px] text-rose-600">❌ ' + escapeHtml(b.shipNote || '') + '</div>' : (b.beemoveOrderId ? '<span class="text-[10px] text-amber-600">รอเลขพัสดุ</span>' : '<span class="text-slate-300">-</span>')))
                         + (b.trackingNo && b.shipNote ? '<div class="text-[10px] text-amber-600">' + escapeHtml(b.shipNote) + '</div>' : '')
                         + '</td>'
@@ -2088,12 +2220,36 @@ app.get('/', (req, res) => {
             document.getElementById('bm-pass-state').innerText = c.hasPassword ? '(บันทึกแล้ว)' : '(ยังไม่ได้ใส่)';
             if(!c.authMode) document.getElementById('bm-auth-mode').value = 'login';
             fillBmAccounts(c.accounts || [], c.accountId || '');
+            fillBmPickups(c.pickupPoints || bmPickupCache, c.pickupPointId || '');
+            document.getElementById('bm-webhook-url').value = window.location.origin + c.webhookPath;
+            document.getElementById('bm-notify-status').checked = !!c.notifyStatus;
+            const hooks = c.recentHooks || [];
+            document.getElementById('bm-hook-count').innerText = hooks.length ? '(' + hooks.length + ')' : '(ยังไม่มี)';
+            document.getElementById('bm-hook-list').innerHTML = hooks.map(function(h) {
+                return '<div class="bg-white border border-slate-200 rounded-lg p-2"><div class="text-slate-400">' + escapeHtml(new Date(h.time).toLocaleString('th-TH')) + '</div><div class="font-mono break-all">' + escapeHtml(h.body) + '</div></div>';
+            }).join('') || '<div class="text-slate-400">ยังไม่ได้รับข้อมูล</div>';
             document.getElementById('bm-notify').checked = !!c.notifyCustomer;
             const sel = document.getElementById('bm-partner-id');
             if(c.partnerId && !Array.from(sel.options).some(function(o) { return o.value === String(c.partnerId); })) {
                 sel.innerHTML += '<option value="' + escapeHtml(c.partnerId) + '">ขนส่ง ID ' + escapeHtml(c.partnerId) + '</option>';
             }
             sel.value = c.partnerId || '';
+        }
+
+        function copyBmWebhook() {
+            const v = document.getElementById('bm-webhook-url').value;
+            navigator.clipboard.writeText(v).then(function() { alert('✅ คัดลอก Webhook URL แล้ว นำไปวางใน Bee Move ได้เลย'); }, function() { alert(v); });
+        }
+
+        let bmPickupCache = [];
+        function fillBmPickups(points, selected) {
+            const sel = document.getElementById('bm-pickup-id');
+            sel.innerHTML = '<option value="">-- ใช้ที่อยู่แรกในบัญชี Bee Move --</option>';
+            points.forEach(function(p) { sel.innerHTML += '<option value="' + escapeHtml(p.id) + '">' + escapeHtml((p.name ? p.name + ' · ' : '') + p.address) + '</option>'; });
+            if(selected && !points.some(function(p) { return String(p.id) === String(selected); })) {
+                sel.innerHTML += '<option value="' + escapeHtml(selected) + '">ที่อยู่ ID ' + escapeHtml(selected) + '</option>';
+            }
+            sel.value = selected || '';
         }
 
         function fillBmAccounts(accounts, selected) {
@@ -2114,6 +2270,7 @@ app.get('/', (req, res) => {
             const pass = document.getElementById('bm-password').value;
             if(pass) body.password = pass;
             body.notifyCustomer = document.getElementById('bm-notify').checked;
+            body.notifyStatus = document.getElementById('bm-notify-status').checked;
             const key = document.getElementById('bm-api-key').value.trim();
             if(key) body.apiKey = key;
             return body;
@@ -2142,6 +2299,11 @@ app.get('/', (req, res) => {
             if(d.accounts && d.accounts.length) {
                 fillBmAccounts(d.accounts, document.getElementById('bm-account-id').value);
                 if(d.accounts.length > 1) html += '<div>🏪 บัญชีนี้มี ' + d.accounts.length + ' ร้าน เลือกร้านที่ช่อง "ร้าน" แล้วกดบันทึก</div>';
+            }
+            if(d.pickupPoints) {
+                bmPickupCache = d.pickupPoints;
+                fillBmPickups(d.pickupPoints, document.getElementById('bm-pickup-id').value);
+                if(d.pickupPoints.length) html += '<div>📍 พบที่อยู่รับสินค้า ' + d.pickupPoints.length + ' แห่ง (เลือกได้ในช่อง "ที่อยู่รับสินค้าใน Bee Move")</div>';
             }
             if(d.account) html += '<div>✅ เชื่อมต่อบัญชีสำเร็จ: <b>' + escapeHtml(d.account.name || '-') + '</b>' + (d.account.wallet != null ? ' · Wallet ' + fmtMoney(d.account.wallet) + ' บาท' : '') + '</div>';
             if(d.partners && d.partners.length) {
@@ -2997,7 +3159,9 @@ app.get('/api/beemove/config', checkAuth, (req, res) => {
   res.json({ success: true, config: {
     ...bm, apiKey: '', password: '',
     apiKeyMasked: maskKey(bm.apiKey), hasKey: !!bm.apiKey, hasPassword: !!bm.password,
-    accounts: cached ? cached.accounts : []
+    accounts: cached ? cached.accounts : [],
+    webhookPath: '/beemove/webhook/' + bm.webhookKey,
+    recentHooks: (pageData.beemoveHooks || []).slice(0, 5)
   } });
 });
 
@@ -3007,13 +3171,14 @@ app.post('/api/beemove/config', checkAuth, (req, res) => {
   const bm = getBeemoveConfig(pageData);
   const b = req.body || {};
   for (const k of Object.keys(defaultBeemoveConfig)) {
-    if (k === 'apiKey' || k === 'password') continue;
+    if (k === 'apiKey' || k === 'password' || k === 'webhookKey') continue;
     if (b[k] === undefined) continue;
     bm[k] = typeof defaultBeemoveConfig[k] === 'boolean' ? !!b[k] : String(b[k]);
   }
   if (typeof b.apiKey === 'string' && b.apiKey.trim()) bm.apiKey = b.apiKey.trim();
   if (typeof b.password === 'string' && b.password) bm.password = b.password;
   if (b.clearKey) bm.apiKey = '';
+  if (b.newWebhookKey) bm.webhookKey = crypto.randomBytes(16).toString('hex');
   res.json({ success: true });
 });
 
@@ -3040,10 +3205,22 @@ app.post('/api/beemove/test', checkAuth, async (req, res) => {
   } catch (e) {
     out.warnings.push('ตรวจบัญชีไม่สำเร็จ: ' + beemoveError(e));
   }
-  const s = beemoveSender(bm);
+  let sender = null;
+  try {
+    sender = await beemoveResolveSender(bm);
+    out.pickupPoints = sender.points.map(p => ({ id: p.id, name: p.name || p.responser, address: [p.address, p.district, p.city, p.province, p.postal_code].join(' ') }));
+    if (!sender.points.length) out.warnings.push('ไม่พบ "ที่อยู่รับสินค้า" ในบัญชี Bee Move แนะนำให้เพิ่มที่ client.beemove.co.th → ตั้งค่า → ที่อยู่รับสินค้า');
+  } catch (e) {
+    out.warnings.push('ดึงที่อยู่รับสินค้าไม่สำเร็จ: ' + beemoveError(e));
+  }
+  const s = sender ? sender.from : beemoveSender(bm);
   if (s.district && s.city && s.province && s.postal_code) {
     try {
-      const prices = await beemoveEstimate(bm, { from: s, to: { ...s }, parcel: beemoveParcel(bm) });
+      const order = { from: s, to: { ...s }, parcel: beemoveParcel(bm) };
+      if (sender && sender.pickupPointId) order.pickup_point_id = isNaN(Number(sender.pickupPointId)) ? sender.pickupPointId : Number(sender.pickupPointId);
+      const est = await beemoveEstimateRaw(bm, order);
+      const prices = est.prices;
+      if (!prices.length) out.warnings.push('Bee Move ไม่ส่งราคาขนส่งกลับมา: ' + JSON.stringify(est.raw).slice(0, 250));
       out.partners = prices.filter(p => p.partner).map(p => ({
         id: p.partner.id, name: p.partner.partner_name, code: p.partner.partner_code || '',
         price: p.price?.sell_price ?? null, usable: !(p.errors && p.errors.length)
@@ -3112,10 +3289,6 @@ app.post('/api/live/beemove/create', checkAuth, (req, res) => {
   const loginMode = !bm.authMode || bm.authMode === 'login';
   if (loginMode && (!bm.username || !bm.password)) return res.json({ success: false, error: 'ยังไม่ได้ใส่เบอร์โทรและรหัสผ่าน Bee Move (เมนู 🚚 ขนส่ง Bee Move)' });
   if (!loginMode && !bm.apiKey) return res.json({ success: false, error: 'ยังไม่ได้ใส่ API Key ของ Bee Move (เมนู 🚚 ขนส่ง Bee Move)' });
-  const sd = beemoveSender(bm);
-  if (!sd.name || !sd.phone_number || !sd.district || !sd.city || !sd.province || !sd.postal_code) {
-    return res.json({ success: false, error: 'กรุณากรอกข้อมูลผู้ส่งให้ครบที่เมนู 🚚 ขนส่ง Bee Move' });
-  }
   const userIds = (Array.isArray(req.body.userIds) ? req.body.userIds : []).map(String).filter(id => s.buyers.has(id));
   if (!userIds.length) return res.json({ success: false, error: 'กรุณาเลือกลูกค้าอย่างน้อย 1 คน' });
 
@@ -3125,6 +3298,48 @@ app.post('/api/live/beemove/create', checkAuth, (req, res) => {
     s.shipJob.running = false;
     s.shipJob.message = 'เกิดข้อผิดพลาด: ' + e.message;
   });
+});
+
+// 📡 รับสถานะพัสดุจาก Bee Move (ตั้งค่าที่ client.beemove.co.th → การเชื่อมต่อ API → Webhook แบบ "กำหนดเอง")
+app.post('/beemove/webhook/:key', async (req, res) => {
+  res.status(200).json({ success: true });
+  let pageData = null;
+  for (const uid in usersDB) {
+    for (const pid in usersDB[uid].pages) {
+      const pd = usersDB[uid].pages[pid];
+      if (pd.config.beemove && pd.config.beemove.webhookKey === req.params.key) { pageData = pd; break; }
+    }
+    if (pageData) break;
+  }
+  if (!pageData) { console.log('⚠️ [Bee Move Webhook] ไม่พบเพจของรหัสนี้'); return; }
+
+  const bm = getBeemoveConfig(pageData);
+  const body = req.body || {};
+  if (!pageData.beemoveHooks) pageData.beemoveHooks = [];
+  pageData.beemoveHooks.unshift({ time: Date.now(), body: JSON.stringify(body).slice(0, 3000) });
+  pageData.beemoveHooks.length = Math.min(pageData.beemoveHooks.length, 20);
+  console.log('📡 [Bee Move Webhook]', JSON.stringify(body).slice(0, 500));
+
+  for (const ev of parseBeemoveWebhook(body)) {
+    const item = findBuyerByShipment(pageData, ev.ids, ev.awb);
+    if (!item) continue;
+    if (ev.status) { item.bmStatus = ev.status; item.bmStatusAt = Date.now(); }
+    const gotNewTracking = ev.awb && !item.trackingNo;
+    if (gotNewTracking) { item.trackingNo = ev.awb; item.shipNote = ''; }
+
+    try {
+      if (gotNewTracking && bm.notifyCustomer && !item.notified && item.psid) {
+        await sendMessengerText(pageData, item.psid, String(bm.notifyText || '').replace('{tracking}', item.trackingNo).replace('{courier}', item.partnerName || ''));
+        item.notified = true;
+      }
+      if (bm.notifyStatus && !item.notifiedDelivered && item.psid && /สำเร็จ|delivered|success|complete/i.test(ev.status || '')) {
+        await sendMessengerText(pageData, item.psid, '✅ พัสดุ ' + (item.trackingNo || '') + ' จัดส่งถึงแล้วค่ะ ขอบคุณที่อุดหนุนนะคะ 🙏');
+        item.notifiedDelivered = true;
+      }
+    } catch (e) {
+      console.error('❌ [Bee Move Webhook] แจ้งลูกค้าไม่สำเร็จ', e.response?.data || e.message);
+    }
+  }
 });
 
 // ดาวน์โหลดใบแปะหน้า PDF จาก Bee Move (ส่งต่อให้เบราว์เซอร์)
