@@ -366,6 +366,43 @@ async function fetchConversationMessages(pageId, token, psid) {
   };
 }
 
+// อ่านข้อความในแชทย้อนหลังทีละหน้า จนเจอ "ที่อยู่ล่าสุด" ที่ลูกค้าส่งมา (หรือครบจำนวนหน้าที่กำหนด)
+// คืนค่า { messages: [...ทุกข้อความที่อ่าน], customerMsgs, info, pagesRead }
+async function scanConversationForAddress(convId, token, customerId, opts = {}) {
+  const maxPages = opts.maxPages || 15;      // 15 หน้า x 100 = ย้อนหลังได้ราว 1,500 ข้อความ
+  const deadline = opts.deadline || (Date.now() + 25000);
+  const all = [];
+  let url = 'https://graph.facebook.com/v19.0/' + encodeURIComponent(convId) + '/messages';
+  let params = { fields: 'message,from,created_time', limit: 100, access_token: token };
+  let info = null, pagesRead = 0, extraAfterFound = 0;
+  while (url && pagesRead < maxPages && Date.now() < deadline) {
+    const r = await axios.get(url, { params, timeout: 15000 });
+    pagesRead++;
+    for (const m of r.data.data || []) {
+      all.push({ text: m.message || '', fromId: String(m.from?.id || ''), time: fbTime(m.created_time) });
+    }
+    url = r.data.paging?.next || null;
+    params = undefined;
+    const cust = all.filter(m => m.fromId === String(customerId));
+    info = extractAddressInfo(cust.map(m => ({ text: m.text, time: m.time })));
+    if (info) {
+      // เจอแล้ว อ่านต่ออีก 1 หน้า เผื่อลูกค้าพิมพ์ชื่อ/ที่อยู่แยกหลายข้อความคร่อมหน้า
+      if (extraAfterFound >= 1 || !url) break;
+      extraAfterFound++;
+    }
+  }
+  const customerMsgs = all.filter(m => m.fromId === String(customerId));
+  if (customerMsgs.length) info = extractAddressInfo(customerMsgs.map(m => ({ text: m.text, time: m.time })));
+  return { messages: all, customerMsgs, info, pagesRead, reachedEnd: !url };
+}
+
+async function findConversationId(pageId, token, psid) {
+  const r = await axios.get('https://graph.facebook.com/v19.0/' + encodeURIComponent(pageId) + '/conversations', {
+    params: { user_id: psid, platform: 'messenger', fields: 'id', access_token: token }, timeout: 15000
+  });
+  return (r.data.data || [])[0]?.id || null;
+}
+
 // สร้างดัชนี ชื่อ -> PSID จากรายการแชทของเพจ (ใช้เมื่อไม่รู้ PSID ของคนคอมเมนต์)
 async function buildConversationIndex(pageId, token) {
   const index = new Map();
@@ -612,8 +649,15 @@ function beemoveError(err) {
 }
 
 // แยกที่อยู่ไทยเป็น ตำบล/อำเภอ/จังหวัด (Bee Move ต้องการแยกช่อง)
+// "ต ฉวาง อ ฉวาง จ นครศรีฯ" (ไม่มีจุด) -> "ต.ฉวาง อ.ฉวาง จ.นครศรีฯ"
+function normalizeMarkers(t) {
+  return String(t || '')
+    .replace(/(^|[\s\d,])(ต|อ|จ)\s+(?=[ก-ฮ])/g, '$1$2.')
+    .replace(/([ก-๙])(\d{5})(?!\d)/g, '$1 $2');   // นครศรีธรรมราช80150 -> นครศรีธรรมราช 80150
+}
+
 function parseThaiAddress(text, postcode) {
-  let s = ' ' + String(text || '').replace(RANK_MASK_RE, '$1') + ' ';
+  let s = ' ' + normalizeMarkers(String(text || '').replace(RANK_MASK_RE, '$1')) + ' ';
   s = s.replace(/(ตำบล|แขวง|อำเภอ|เขต|จังหวัด|ต\.|อ\.|จ\.)/g, ' $1 ');
   const grab = (re) => {
     const m = s.match(re);
@@ -730,6 +774,9 @@ function applyProvinceAliases(t) {
 // จัดบ้านเลขที่/หมู่ให้อ่านง่าย และตัดคำที่ไม่ใช่ที่อยู่
 function tidyStreet(t) {
   return String(t || '')
+    .replace(/(\d)\s*(ม\.?|หมู่)\s*(\d)/g, '$1 ม.$3')                    // 363/5ม2 -> 363/5 ม.2
+    .replace(/(\d)(ต|อ|จ|ตำบล|อำเภอ|จังหวัด|แขวง|เขต)\.?\s*$/, '$1')     // 363/5 ม.2ต -> 363/5 ม.2
+    .replace(/(^|\s)(ต|อ|จ|ตำบล|อำเภอ|จังหวัด|แขวง|เขต)\.?\s*$/, '$1')
     .replace(/^(ที่อยู่(จัดส่ง)?|ส่งที่|address)\s*[:：\-]?\s*/i, '')
     .replace(/(^|\s)(บ้านเลขที่|บ้าน|เลขที่)\s*(?=\d)/g, '$1')
     .replace(/(^|\s)(?:ม\.?|หมู่(?:ที่)?)\s*\.?\s*(\d{1,3})(?!\d|\/)/g, '$1ม.$2')
@@ -791,7 +838,7 @@ function formatThaiAddress(parts) {
 
 // แยกที่อยู่แบบฉลาด: ใช้ ต./อ./จ. ถ้ามี ไม่มีก็จับคู่กับฐานข้อมูลตำบลด้วยรหัสไปรษณีย์และชื่อ
 function smartThaiAddress(text, postcode) {
-  const raw = applyProvinceAliases(String(text || '').replace(PHONE_RE_G, ' ').replace(RANK_MASK_RE, '$1')).replace(/\s+/g, ' ').trim();
+  const raw = applyProvinceAliases(normalizeMarkers(String(text || '').replace(PHONE_RE_G, ' ').replace(RANK_MASK_RE, '$1'))).replace(/\s+/g, ' ').trim();
   const marked = parseThaiAddress(raw, postcode);
   const pcs = raw.match(/(?<!\d)[1-9]\d{4}(?!\d)/g) || [];
   const zip = String(postcode || '').trim() || (pcs.length ? pcs[pcs.length - 1] : '');
@@ -3842,8 +3889,13 @@ async function runBuyersJob(pageData, s, matched) {
 
         let msgs = [];
         try {
-          const conv = await fetchConversationMessages(pageId, token, item.psid);
-          if (conv) msgs = conv.messages.filter(m => m.fromId === String(item.psid));
+          const convId = await findConversationId(pageId, token, item.psid);
+          if (convId) {
+            job.message = 'กำลังอ่านแชทย้อนหลังของ ' + (c.name || userId);
+            const scan = await scanConversationForAddress(convId, token, item.psid);
+            msgs = scan.customerMsgs;
+            if (!scan.info && scan.pagesRead > 1) item.note = 'อ่านย้อนหลัง ' + scan.messages.length + ' ข้อความ ยังไม่พบที่อยู่';
+          }
         } catch (e) {
           item.note = 'อ่านแชทจาก Facebook ไม่สำเร็จ: ' + graphErrorMessage(e);
         }
@@ -4003,6 +4055,24 @@ app.get('/api/chats/search', checkAuth, async (req, res) => {
   await Promise.all(Array.from({ length: 6 }, worker));
   const timeCut = idx < toRead.length;
 
+  // ที่อยู่อยู่ในข้อความเก่า: อ่านย้อนหลังเพิ่มเฉพาะแชทที่ชื่อตรง (สูงสุด 15 แชท)
+  const deepTargets = convs.filter(c => (nameHits.has(c.id) || (!hasQuery && onlyAddr)) && msgsById.has(c.id))
+    .filter(c => {
+      const cust = msgsById.get(c.id).filter(m => m.fromId === c.psid);
+      return !extractAddressInfo(cust.map(m => ({ text: m.text, time: m.time })));
+    }).slice(0, 15);
+  let deepScanned = 0;
+  await Promise.all(Array.from({ length: 3 }, async () => {
+    while (deepTargets.length && Date.now() - started < 55000) {
+      const c = deepTargets.shift();
+      try {
+        const scan = await scanConversationForAddress(c.id, token, c.psid, { deadline: started + 55000 });
+        msgsById.set(c.id, scan.messages);
+        deepScanned++;
+      } catch (e) { /* ใช้ข้อความเดิม */ }
+    }
+  }));
+
   // ขั้นที่ 3: จับคู่คำค้นหา + อ่านที่อยู่
   const results = [];
   let hiddenNoAddr = 0;
@@ -4041,7 +4111,7 @@ app.get('/api/chats/search', checkAuth, async (req, res) => {
   res.json({
     success: true, results,
     scanned: convs.length, listed, oldestSeen, endReason, hiddenNoAddr, nameHits: nameHits.size,
-    readCount: msgsById.size, readLimited: readLimited || timeCut
+    readCount: msgsById.size, readLimited: readLimited || timeCut, deepScanned
   });
 });
 
