@@ -211,7 +211,25 @@ function isNameLike(s) {
   if (t.length < 2 || t.length > 45) return false;
   if (/\d/.test(t)) return false;
   if (CHAT_WORDS.test(t)) return false;
+  if (looksLikeLocation(t)) return false;
   return !ADDR_PATTERNS.some(re => re.test(t));
+}
+
+// ข้อความที่มีชื่อจังหวัด/อำเภอ ไม่ใช่ชื่อคน
+let locationNameCache = null;
+function looksLikeLocation(t) {
+  if (typeof thaiAddrDb === 'undefined' || !thaiAddrDb) return false;
+  if (!locationNameCache) {
+    const set = new Set();
+    for (const r of thaiAddrDb) { set.add(r.pn); if (r.an.length >= 4) set.add(r.an); }
+    locationNameCache = Array.from(set);
+  }
+  const c = compactTh(applyProvinceAliases(t));
+  return locationNameCache.some(n => c.includes(n));
+}
+
+function cleanName(n) {
+  return String(n || '').replace(/^[\s,.:\-]+|[\s,.:\-]+$/g, '').replace(/\s+/g, ' ').trim();
 }
 
 function parseAddressBlock(texts, nameHint) {
@@ -222,8 +240,9 @@ function parseAddressBlock(texts, nameHint) {
   const pcs = stripPhones(full).match(POSTCODE_RE) || [];
   const postcode = pcs.length ? pcs[pcs.length - 1] : '';
 
-  let lines = full.split(/\n+/)
-    .map(l => stripPhones(l).replace(LABEL_RE, '')
+  // เบอร์โทรถือเป็นตัวคั่นบรรทัด: "ชื่อ 08xxxxxxxx บ้าน 2/5 ..." -> ชื่อ / บ้าน 2/5 ...
+  let lines = full.replace(PHONE_RE_G, '\n').split(/\n+/)
+    .map(l => l.replace(LABEL_RE, '')
       .replace(/(เบอร์โทรศัพท์|เบอร์โทร|เบอร์|โทร\.?|tel\.?)\s*[:：]?\s*$/i, '')
       .replace(/\s{2,}/g, ' ').trim())
     .filter(l => l && !/^[\s,.:\-]*$/.test(l));
@@ -233,13 +252,14 @@ function parseAddressBlock(texts, nameHint) {
     recipientName = lines.shift();
   } else if (lines.length >= 1) {
     // กรณีพิมพ์ชื่อกับที่อยู่ในบรรทัดเดียว เช่น "สมชาย ใจดี 12/3 ม.4 ต.หาดใหญ่ ..."
-    const m = lines[0].match(/^([^\d]{3,40}?)\s+(?=\d)/);
+    const m = lines[0].match(/^([^\d]{2,40}?)[\s,]+(?=\d)/);
     if (m && isNameLike(m[1])) {
       recipientName = m[1].trim();
       lines[0] = lines[0].slice(m[0].length).trim();
     }
   }
   if (!recipientName && nameHint && isNameLike(nameHint)) recipientName = String(nameHint).trim();
+  recipientName = cleanName(recipientName);
 
   return { recipientName, address: lines.filter(Boolean).join(' '), phone, postcode, raw: full.slice(0, 1500) };
 }
@@ -560,6 +580,7 @@ function loadThaiAddressDb() {
     })).filter(x => x.d && x.a && x.p);
     if (!rows.length) throw new Error('ข้อมูลว่าง');
     thaiAddrDb = rows;
+    locationNameCache = null;
     thaiAddrByZip = new Map();
     for (const x of rows) {
       if (!thaiAddrByZip.has(x.z)) thaiAddrByZip.set(x.z, []);
@@ -609,6 +630,69 @@ function similarity(a, b) {
   return 1 - prev[n] / Math.max(m, n);
 }
 
+// ชื่อเรียกย่อ/ชื่อเล่นของจังหวัดที่ลูกค้าชอบพิมพ์
+const PROVINCE_ALIASES = [
+  [/กทม\.?|กรุงเทพฯ?(?!มหานคร)|bangkok|bkk/gi, 'กรุงเทพมหานคร'],
+  [/โคราช/g, 'นครราชสีมา'], [/(?<!พระนครศรี)อยุธยา/g, 'พระนครศรีอยุธยา'],
+  [/โคราช/g, 'นครราชสีมา'], [/นครศรีฯ|นครศรี(?!ธรรมราช)/g, 'นครศรีธรรมราช'],
+  [/สุราษฎร์ฯ|สุราษ(?!ฎร์ธานี)|สุราษฎร์(?!ธานี)/g, 'สุราษฎร์ธานี'], [/(?<!ประจวบ)ประจวบฯ?(?!คีรีขันธ์)/g, 'ประจวบคีรีขันธ์'],
+  [/ฉะเชิงเทรา|แปดริ้ว/g, 'ฉะเชิงเทรา'], [/อุบลฯ|อุบล(?!ราชธานี)/g, 'อุบลราชธานี'], [/(?<!นคร)ปทุม(?!ธานี|วัน)/g, 'ปทุมธานี']
+];
+function applyProvinceAliases(t) {
+  let out = String(t || '');
+  for (const [re, name] of PROVINCE_ALIASES) out = out.replace(re, name);
+  return out;
+}
+
+// จัดบ้านเลขที่/หมู่ให้อ่านง่าย และตัดคำที่ไม่ใช่ที่อยู่
+function tidyStreet(t) {
+  return String(t || '')
+    .replace(/^(ที่อยู่(จัดส่ง)?|ส่งที่|address)\s*[:：\-]?\s*/i, '')
+    .replace(/(^|\s)(บ้านเลขที่|บ้าน|เลขที่)\s*(?=\d)/g, '$1')
+    .replace(/(^|\s)(?:ม\.?|หมู่(?:ที่)?)\s*\.?\s*(\d{1,3})(?!\d|\/)/g, '$1ม.$2')
+    .replace(/(^|\s)ถนน\s*/g, '$1ถ.').replace(/(^|\s)ซอย\s*/g, '$1ซ.')
+    .replace(/ประเทศไทย|thailand/gi, ' ')
+    .replace(/[,]+/g, ' ').replace(/\s+/g, ' ')
+    .replace(/^[\s\-–:]+|[\s\-–:,]+$/g, '').trim();
+}
+
+// หาตำแหน่งที่ส่วน ตำบล/อำเภอ/จังหวัด เริ่มต้น เพื่อตัดเอาเฉพาะบ้านเลขที่/หมู่/ซอย/ถนน ที่อยู่ข้างหน้า
+function findLocationStart(raw, best) {
+  let idx = raw.length;
+  const consider = (i) => {
+    const before = raw.slice(Math.max(0, i - 8), i);
+    if (/(ถ\.|ถนน|ซ\.|ซอย|หมู่บ้าน|ม\.บ\.|มบ\.)\s*$/.test(before)) return; // ชื่อถนน/ซอย/หมู่บ้าน ที่ซ้ำกับชื่อตำบล
+    if (i < idx) idx = i;
+  };
+  const names = [best.d, best.a, best.p, best.a.replace(/^เมือง/, '')].filter(n => n && n.length >= 2);
+  for (const n of names) { let i = -1; while ((i = raw.indexOf(n, i + 1)) >= 0) consider(i); }
+  const mk = /(ตำบล|แขวง|อำเภอ|เขต|จังหวัด|(?<![ก-๙])ต\.|(?<![ก-๙])อ\.|(?<![ก-๙])จ\.)/g;
+  let m;
+  while ((m = mk.exec(raw))) consider(m.index);
+  // คำที่สะกดคล้ายชื่อตำบล/อำเภอ/จังหวัด (พิมพ์ผิด เช่น พัทุลง)
+  const wr = /[^\s,]+/g;
+  while ((m = wr.exec(raw))) {
+    if (/^(ถ\.|ถนน|ซ\.|ซอย|หมู่บ้าน|ม\.บ\.|มบ\.)/.test(m[0])) continue;
+    const w = compactTh(m[0].replace(/^(ตำบล|แขวง|อำเภอ|เขต|จังหวัด|ต\.|อ\.|จ\.)/, ''));
+    if (w.length < 3 || /\d/.test(w)) continue;
+    if ([best.dn, best.an, best.pn].some(n => similarity(w, n) >= 0.6)) consider(m.index);
+  }
+  return idx;
+}
+
+// ลบคำที่เป็นชื่อตำบล/อำเภอ/จังหวัด (รวมที่สะกดผิดเล็กน้อย) ออกจากข้อความ
+function stripLocationWords(text, best) {
+  return String(text || '').split(/(\s+)/).filter(w => {
+    const t = w.trim();
+    if (!t || /\d/.test(t)) return true;
+    if (/^(ถ\.|ถนน|ซ\.|ซอย|หมู่บ้าน|ม\.บ\.|มบ\.)/.test(t)) return true; // ชื่อถนน/ซอย/หมู่บ้าน เก็บไว้
+    const c = compactTh(t.replace(/^(ตำบล|แขวง|อำเภอ|เขต|จังหวัด|ต\.|อ\.|จ\.)/, ''));
+    if (!c) return false;
+    if (c === 'เมือง' && best.an.startsWith('เมือง')) return false;
+    return ![best.dn, best.an, best.pn].some(n => c === n || (c.length >= 3 && similarity(c, n) >= 0.6));
+  }).join('');
+}
+
 function formatThaiAddress(parts) {
   if (!parts.district || !parts.city || !parts.province) return '';
   const bkk = isBangkok(parts.province);
@@ -621,7 +705,7 @@ function formatThaiAddress(parts) {
 
 // แยกที่อยู่แบบฉลาด: ใช้ ต./อ./จ. ถ้ามี ไม่มีก็จับคู่กับฐานข้อมูลตำบลด้วยรหัสไปรษณีย์และชื่อ
 function smartThaiAddress(text, postcode) {
-  const raw = String(text || '');
+  const raw = applyProvinceAliases(String(text || '').replace(PHONE_RE_G, ' ')).replace(/\s+/g, ' ').trim();
   const marked = parseThaiAddress(raw, postcode);
   const pcs = raw.match(/(?<!\d)[1-9]\d{4}(?!\d)/g) || [];
   const zip = String(postcode || '').trim() || (pcs.length ? pcs[pcs.length - 1] : '');
@@ -640,7 +724,7 @@ function smartThaiAddress(text, postcode) {
       if (hay.includes(r.an)) sc += 3;
       else if (r.an.startsWith('เมือง') && hay.includes('เมือง')) sc += 2;
       else if (amphoeShort && amphoeShort !== r.an && hay.includes(amphoeShort)) sc += 1;
-      if (hay.includes(r.pn) || (isBangkok(r.p) && /กรุงเทพ|กทม/.test(raw))) sc += 2;
+      if (hay.includes(r.pn) || (isBangkok(r.p) && /กรุงเทพ/.test(raw))) sc += 2;
       if (zip && r.z === zip) sc += 2;
       // ให้ความสำคัญกับ marker ที่ลูกค้าพิมพ์มาเอง
       if (marked.district && compactTh(marked.district) === r.dn) sc += 2;
@@ -662,26 +746,29 @@ function smartThaiAddress(text, postcode) {
     const zipOnlyOne = zip && thaiAddrByZip.has(zip) && thaiAddrByZip.get(zip).length === 1;
     const districtMatched = best && best._dHit;
     if (best && (districtMatched || zipOnlyOne) && bestScore >= 5) {
-      let rest = raw;
-      rest = rest.replace(/กรุงเทพมหานคร|กรุงเทพฯ?|กทม\.?/g, ' ');
-      rest = removeLastName(rest, best.p, 'จังหวัด|จ\\.');
-      rest = removeLastName(rest, best.a, 'อำเภอ|เขต|อ\\.');
-      if (best.a.startsWith('เมือง')) rest = rest.replace(/(อำเภอ|อ\.)?\s*เมือง(?![ก-๙])/g, ' ');
-      if (best._fuzzy) {
-        rest = rest.split(/(\s+)/).filter(w => !(w.trim() && !/\d/.test(w) && similarity(compactTh(w.replace(/^(ตำบล|แขวง|ต\.)/, '')), best.dn) >= 0.7)).join('');
-      } else {
+      // บ้านเลขที่/หมู่/ซอย/ถนน = ข้อความก่อนส่วนตำบล/อำเภอ/จังหวัด
+      const zipFree = zip ? raw.split(zip).join(' ') : raw;
+      const cut = findLocationStart(zipFree, best);
+      let rest = zipFree.slice(0, cut);
+      if (!/\d/.test(rest)) {
+        // ลูกค้าพิมพ์ ตำบล/อำเภอ ก่อนบ้านเลขที่: ใช้วิธีลบชื่อสถานที่ออกแทน
+        rest = zipFree;
+        rest = removeLastName(rest, best.p, 'จังหวัด|จ\\.');
+        rest = removeLastName(rest, best.a, 'อำเภอ|เขต|อ\\.');
         rest = removeLastName(rest, best.d, 'ตำบล|แขวง|ต\\.');
       }
-      if (zip) rest = rest.split(zip).join(' ');
-      rest = rest.replace(/(ตำบล|แขวง|อำเภอ|เขต|จังหวัด|ต\.|อ\.|จ\.)\s*(?=$|\s)/g, ' ')
-        .replace(/\s+/g, ' ').replace(/^[\s,]+|[\s,]+$/g, '').trim();
+      rest = stripLocationWords(rest, best)
+        .replace(/(ตำบล|แขวง|อำเภอ|เขต|จังหวัด|(?<![ก-๙])ต\.|(?<![ก-๙])อ\.|(?<![ก-๙])จ\.)\s*(?=$|\s)/g, ' ');
+      rest = tidyStreet(rest);
       const parts = { address: rest, district: best.d, city: best.a, province: best.p, postal_code: best.z };
       return { ...parts, ok: true, source: 'db', formatted: formatThaiAddress(parts) };
     }
   }
 
   if (marked.district && marked.city && marked.province && marked.postal_code) {
-    return { ...marked, ok: true, source: 'marker', formatted: formatThaiAddress(marked) };
+    const pseudo = { dn: compactTh(marked.district), an: compactTh(marked.city), pn: compactTh(marked.province) };
+    const parts = { ...marked, address: tidyStreet(stripLocationWords(marked.address, pseudo)) };
+    return { ...parts, ok: true, source: 'marker', formatted: formatThaiAddress(parts) };
   }
 
   // สำรอง (กรณีโหลดฐานข้อมูลไม่ได้): "... ตำบล อำเภอ จังหวัด รหัสไปรษณีย์" ไล่จากท้าย
@@ -690,7 +777,7 @@ function smartThaiAddress(text, postcode) {
     const tail = [];
     while (before.length && tail.length < 3 && !/\d/.test(before[before.length - 1])) tail.unshift(before.pop());
     if (tail.length === 3) {
-      const parts = { address: before.join(' ').trim(), district: tail[0], city: tail[1], province: tail[2], postal_code: zip };
+      const parts = { address: tidyStreet(before.join(' ')), district: tail[0].replace(/^(ตำบล|แขวง|ต\.)/, ''), city: tail[1].replace(/^(อำเภอ|เขต|อ\.)/, ''), province: tail[2].replace(/^(จังหวัด|จ\.)/, ''), postal_code: zip };
       return { ...parts, ok: true, source: 'position', formatted: formatThaiAddress(parts) };
     }
   }
