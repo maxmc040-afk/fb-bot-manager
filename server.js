@@ -3816,9 +3816,11 @@ function paymentStatus(pageData, s, userId, psid) {
     if (!x || !ids.has(String(x.senderId)) || seen.has(x.transRef)) return;
     seen.add(x.transRef); total += Number(x.amount) || 0; count++; last = Math.max(last, x.time || 0);
   };
-  (s.slips || []).forEach(add);
-  const since = (s.startedAt || 0) - 6 * 3600 * 1000; // เผื่อโอนก่อนกดเริ่ม session เล็กน้อย
-  (pageData.slipLog || []).forEach(x => { if ((x.time || 0) >= since) add(x); });
+  // นับเฉพาะสลิปที่เข้ามาหลังกด "เริ่ม session" เท่านั้น (ก่อนกดเริ่มจะไม่นับ)
+  const since = s.firstStartedAt || s.startedAt || 0;
+  const inRange = (x) => (x.time || 0) >= since;
+  (s.slips || []).forEach(x => { if (inRange(x)) add(x); });
+  (pageData.slipLog || []).forEach(x => { if (inRange(x)) add(x); });
   return { paid: count > 0, paidTotal: total, slipCount: count, lastSlipTime: last };
 }
 
@@ -3961,6 +3963,7 @@ app.post('/api/live/status', checkAuth, (req, res) => {
       if (dup) return res.json({ success: false, error: 'มี session อื่นที่ผูกกับไลฟ์นี้ทำงานอยู่แล้ว: ' + dup.name });
     }
     s.status = 'active';
+    if (!s.firstStartedAt) s.firstStartedAt = s.startedAt; // จำเวลาที่กดเริ่มครั้งแรก ไม่ให้สลิปช่วงก่อนหน้าหายเมื่อกดเริ่มใหม่
     s.startedAt = Date.now();
     s.endedAt = null;
   } else {
