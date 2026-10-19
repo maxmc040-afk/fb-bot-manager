@@ -1507,10 +1507,23 @@ app.get('/', (req, res) => {
 
                         <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
                             <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
-                                <h3 class="text-base font-bold text-slate-700 mb-3">💬 รายชื่อคนคอมเมนต์ (ล่าสุด 300 คน)</h3>
+                                <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+                                    <h3 class="text-base font-bold text-slate-700">💬 รายชื่อคนคอมเมนต์ (ล่าสุด 300 คน)</h3>
+                                    <button type="button" onclick="pullSelectedCommenters()" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm">📥 ดึงข้อมูลคนที่เลือก</button>
+                                </div>
+                                <div class="flex flex-wrap items-center gap-3 mb-2 text-xs text-slate-600">
+                                    <label class="flex items-center gap-1.5 cursor-pointer"><input type="checkbox" id="lv-cm-all" onchange="toggleAllCommenters(this.checked)" class="w-4 h-4 rounded"> เลือกทั้งหมด</label>
+                                    <select id="lv-cm-filter" onchange="renderCommenters()" class="p-1 border border-slate-200 rounded-md bg-white">
+                                        <option value="matched">เฉพาะคนที่ตรงคำดัก</option>
+                                        <option value="unpaid">ตรงคำดัก · ยังไม่โอน</option>
+                                        <option value="paid">ตรงคำดัก · โอนแล้ว</option>
+                                        <option value="all">ทุกคนที่คอมเมนต์</option>
+                                    </select>
+                                    <span id="lv-cm-summary"></span>
+                                </div>
                                 <div class="overflow-auto max-h-96">
                                     <table class="w-full text-xs">
-                                        <thead class="text-left text-slate-500 border-b border-slate-200"><tr><th class="py-2 pr-2">ชื่อ</th><th class="py-2 pr-2">ครั้ง</th><th class="py-2 pr-2">ตรงคำดัก</th><th class="py-2 pr-2">คอมเมนต์ล่าสุด</th><th class="py-2">เวลา</th></tr></thead>
+                                        <thead class="text-left text-slate-500 border-b border-slate-200"><tr><th class="py-2 pr-2">✓</th><th class="py-2 pr-2">ชื่อ</th><th class="py-2 pr-2">ครั้ง</th><th class="py-2 pr-2">ตรงคำดัก</th><th class="py-2 pr-2">สถานะโอน</th><th class="py-2 pr-2">คอมเมนต์ล่าสุด</th><th class="py-2">เวลา</th></tr></thead>
                                         <tbody id="lv-commenters"></tbody>
                                     </table>
                                 </div>
@@ -2289,7 +2302,7 @@ app.get('/', (req, res) => {
         async function selectLiveSession(sid) {
             const changed = sid !== currentLiveId;
             currentLiveId = sid;
-            if(changed) { resetBuyers(); loadBuyers(); }
+            if(changed) { resetBuyers(); loadBuyers(); commenterSel = new Set(); commenterList = []; }
             initChatRange();
             await loadLiveDetail(true);
             loadLiveList();
@@ -2362,15 +2375,8 @@ app.get('/', (req, res) => {
             document.getElementById('lv-stat-slips').innerText = s.stats.slips;
             document.getElementById('lv-stat-total').innerText = fmtMoney(s.stats.slipTotal);
 
-            let ch = '';
-            d.commenters.forEach(function(c) {
-                ch += '<tr class="border-b border-slate-100"><td class="py-1.5 pr-2 font-medium text-slate-700">' + escapeHtml(c.name || c.userId) + '</td>'
-                    + '<td class="py-1.5 pr-2">' + c.count + '</td>'
-                    + '<td class="py-1.5 pr-2">' + (c.matchedCount > 0 ? '<span class="text-blue-600 font-semibold">' + c.matchedCount + ' (' + escapeHtml(c.lastKeyword) + ')</span>' : '-') + '</td>'
-                    + '<td class="py-1.5 pr-2 text-slate-600">' + escapeHtml(c.lastMessage) + '</td>'
-                    + '<td class="py-1.5 text-slate-500">' + fmtTime(c.lastTime) + '</td></tr>';
-            });
-            document.getElementById('lv-commenters').innerHTML = ch || '<tr><td colspan="5" class="py-3 text-slate-400">ยังไม่มีคอมเมนต์</td></tr>';
+            commenterList = d.commenters || [];
+            renderCommenters();
 
             let sh = '';
             d.slips.forEach(function(x) {
@@ -2393,6 +2399,76 @@ app.get('/', (req, res) => {
             }
             document.getElementById('lv-btn-bc-start').classList.toggle('hidden', !!bc.isBroadcasting);
             document.getElementById('lv-btn-bc-stop').classList.toggle('hidden', !bc.isBroadcasting);
+        }
+
+        // ===== ตารางคนคอมเมนต์: ติ๊กเลือก + สถานะโอน + ดึงข้อมูลรายคน =====
+        let commenterList = [];
+        let commenterSel = new Set();
+
+        function filteredCommenters() {
+            const f = document.getElementById('lv-cm-filter').value;
+            return commenterList.filter(function(c) {
+                if(f === 'all') return true;
+                if(!(c.matchedCount > 0)) return false;
+                if(f === 'paid') return c.paid;
+                if(f === 'unpaid') return !c.paid;
+                return true;
+            });
+        }
+
+        function renderCommenters() {
+            const list = filteredCommenters();
+            let ch = '';
+            list.forEach(function(c) {
+                const pay = c.matchedCount > 0
+                    ? (c.paid
+                        ? '<span class="inline-block px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-semibold whitespace-nowrap">✅ โอนแล้ว ' + fmtMoney(c.paidTotal) + ' ฿</span>' + (c.slipCount > 1 ? '<div class="text-[10px] text-slate-400">' + c.slipCount + ' สลิป</div>' : '')
+                        : '<span class="inline-block px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-semibold whitespace-nowrap">⏳ ยังไม่โอน</span>')
+                    : '<span class="text-slate-300">-</span>';
+                ch += '<tr data-cid="' + escapeHtml(c.userId) + '" class="border-b border-slate-100">'
+                    + '<td class="py-1.5 pr-2"><input type="checkbox" class="cm-sel w-4 h-4 rounded"' + (commenterSel.has(c.userId) ? ' checked' : '') + '></td>'
+                    + '<td class="py-1.5 pr-2 font-medium text-slate-700">' + escapeHtml(c.name || c.userId) + (c.inBuyers ? '<div class="text-[10px] text-indigo-500 font-normal">อยู่ในรายชื่อลูกค้าแล้ว</div>' : '') + '</td>'
+                    + '<td class="py-1.5 pr-2">' + c.count + '</td>'
+                    + '<td class="py-1.5 pr-2">' + (c.matchedCount > 0 ? '<span class="text-blue-600 font-semibold">' + c.matchedCount + ' (' + escapeHtml(c.lastKeyword) + ')</span>' : '-') + '</td>'
+                    + '<td class="py-1.5 pr-2">' + pay + '</td>'
+                    + '<td class="py-1.5 pr-2 text-slate-600">' + escapeHtml(c.lastMessage) + '</td>'
+                    + '<td class="py-1.5 text-slate-500">' + fmtTime(c.lastTime) + '</td></tr>';
+            });
+            document.getElementById('lv-commenters').innerHTML = ch || '<tr><td colspan="7" class="py-3 text-slate-400">ยังไม่มีคอมเมนต์</td></tr>';
+            const matched = commenterList.filter(function(c) { return c.matchedCount > 0; });
+            const paid = matched.filter(function(c) { return c.paid; }).length;
+            document.getElementById('lv-cm-summary').innerText = 'ตรงคำดัก ' + matched.length + ' คน · โอนแล้ว ' + paid + ' · ยังไม่โอน ' + (matched.length - paid) + ' · เลือกไว้ ' + commenterSel.size;
+            document.getElementById('lv-cm-all').checked = list.length > 0 && list.every(function(c) { return commenterSel.has(c.userId); });
+        }
+
+        function toggleAllCommenters(on) {
+            filteredCommenters().forEach(function(c) { if(on) commenterSel.add(c.userId); else commenterSel.delete(c.userId); });
+            renderCommenters();
+        }
+
+        document.addEventListener('change', function(e) {
+            if(!e.target.classList.contains('cm-sel')) return;
+            const tr = e.target.closest('tr[data-cid]');
+            const id = tr.getAttribute('data-cid');
+            if(e.target.checked) commenterSel.add(id); else commenterSel.delete(id);
+            renderCommenters();
+        });
+
+        async function pullSelectedCommenters() {
+            if(!currentLiveId) return;
+            const ids = Array.from(commenterSel).filter(function(id) { return commenterList.some(function(c) { return c.userId === id; }); });
+            if(!ids.length) return alert('กรุณาติ๊กเลือกคนที่ต้องการดึงข้อมูลก่อน');
+            const res = await fetch(liveUrl('/api/live/buyers/fetch', '&sid=' + currentLiveId), {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userIds: ids })
+            });
+            const d = await res.json();
+            if(!d.success) return alert('❌ ' + d.error);
+            commenterSel = new Set();
+            renderCommenters();
+            if(buyersPoll) clearInterval(buyersPoll);
+            buyersPoll = setInterval(loadBuyers, 2000);
+            await loadBuyers();
+            document.getElementById('lv-buyers').scrollIntoView({ behavior: 'smooth', block: 'start' });
         }
 
         async function saveLiveConfig() {
@@ -3731,6 +3807,21 @@ function findLiveSessionForSender(pageData, senderId) {
   return active[0] || null;
 }
 
+// สถานะโอนเงินของลูกค้าใน session: สลิปที่ตรวจผ่านตั้งแต่เริ่ม session (หรือที่ถูกบันทึกเข้า session นี้)
+function paymentStatus(pageData, s, userId, psid) {
+  const ids = new Set([String(userId), psid ? String(psid) : ''].filter(Boolean));
+  const seen = new Set();
+  let total = 0, count = 0, last = 0;
+  const add = (x) => {
+    if (!x || !ids.has(String(x.senderId)) || seen.has(x.transRef)) return;
+    seen.add(x.transRef); total += Number(x.amount) || 0; count++; last = Math.max(last, x.time || 0);
+  };
+  (s.slips || []).forEach(add);
+  const since = (s.startedAt || 0) - 6 * 3600 * 1000; // เผื่อโอนก่อนกดเริ่ม session เล็กน้อย
+  (pageData.slipLog || []).forEach(x => { if ((x.time || 0) >= since) add(x); });
+  return { paid: count > 0, paidTotal: total, slipCount: count, lastSlipTime: last };
+}
+
 function findMatchedKeyword(cfg, text) {
   const list = cfg.keywords || [];
   const t = String(text || '').toLowerCase();
@@ -3818,7 +3909,11 @@ app.get('/api/live/detail', checkAuth, (req, res) => {
   if (!s) return res.json({ success: false, error: 'ไม่พบ session นี้' });
 
   const commenters = Array.from(s.commenters.entries())
-    .map(([userId, c]) => ({ userId, ...c }))
+    .map(([userId, c]) => ({
+      userId, ...c,
+      ...paymentStatus(ctx.pageData, s, userId, c.psid || getPsidMap(ctx.pageData).get(userId)),
+      inBuyers: !!(s.buyers && s.buyers.has(userId))
+    }))
     .sort((a, b) => b.lastTime - a.lastTime)
     .slice(0, 300);
 
@@ -4002,8 +4097,17 @@ app.post('/api/live/buyers/fetch', checkAuth, (req, res) => {
   if (!ctx.pageData.config.pageAccessToken) return res.json({ success: false, error: 'เพจนี้ยังไม่มี Page Access Token' });
 
   const removedSet = s.buyersRemoved || new Set();
-  const matched = Array.from(s.commenters.entries()).filter(([uid, c]) => c.matchedCount > 0 && !removedSet.has(uid));
-  if (!matched.length) return res.json({ success: false, error: removedSet.size ? 'ไม่มีรายชื่อใหม่ (คนที่ลบไปแล้วจะไม่ถูกดึงกลับมา)' : 'ยังไม่มีคนที่คอมเมนต์ตรงคำดักใน session นี้' });
+  const picked = Array.isArray(req.body?.userIds) ? new Set(req.body.userIds.map(String)) : null;
+  let matched;
+  if (picked) {
+    // เลือกดึงรายคน (ติ๊กจากตารางคนคอมเมนต์) -> ดึงคนที่เลือก แม้เคยลบไปแล้ว
+    matched = Array.from(s.commenters.entries()).filter(([uid]) => picked.has(uid));
+    matched.forEach(([uid]) => removedSet.delete(uid));
+    if (!matched.length) return res.json({ success: false, error: 'กรุณาเลือกอย่างน้อย 1 คน' });
+  } else {
+    matched = Array.from(s.commenters.entries()).filter(([uid, c]) => c.matchedCount > 0 && !removedSet.has(uid));
+    if (!matched.length) return res.json({ success: false, error: removedSet.size ? 'ไม่มีรายชื่อใหม่ (คนที่ลบไปแล้วจะไม่ถูกดึงกลับมา)' : 'ยังไม่มีคนที่คอมเมนต์ตรงคำดักใน session นี้' });
+  }
 
   if (!s.buyers) s.buyers = new Map();
   s.buyersJob = { running: true, total: matched.length, done: 0, found: 0, message: 'กำลังเริ่มค้นหา...', warning: '', shouldStop: false };
@@ -4757,6 +4861,11 @@ app.post('/webhook', async (req, res) => {
                 }
 
                 usedSlips.add(slip.transRef);
+
+                // บันทึกสลิปที่ผ่านการตรวจไว้ระดับเพจ (ใช้ดูสถานะ "โอนแล้ว" ของลูกค้า)
+                if (!targetRecord.pageData.slipLog) targetRecord.pageData.slipLog = [];
+                targetRecord.pageData.slipLog.push({ senderId, amount: Number(slip.amount) || 0, transRef: slip.transRef, time: Date.now() });
+                if (targetRecord.pageData.slipLog.length > 5000) targetRecord.pageData.slipLog.splice(0, 1000);
 
                 // บันทึกยอดโอนเข้า session ไลฟ์ของลูกค้าคนนี้
                 const slipSession = findLiveSessionForSender(targetRecord.pageData, senderId);
