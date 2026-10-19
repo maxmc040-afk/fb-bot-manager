@@ -94,7 +94,7 @@ async function verifySlipByImageUrl(imageUrl, apiKey) {
   }
 }
 
-// 🔧 แปลงผลลัพธ์จาก EasySlip ให้อยู่ในรูปแบบเดียวกัน (รองรับทั้ง v2: data.rawSlip และแบบเก่า: data)
+// 🔧 แปลงผลลัพธ์จาก EasySlip ให้อยู่ในรูปแบบเดียวกัน
 function normalizeSlip(apiResponse) {
   if (!apiResponse) return null;
   if (apiResponse.success === false) return null;
@@ -138,14 +138,13 @@ function normalizeSlip(apiResponse) {
   };
 }
 
-// 🔧 เช็คเลขบัญชีผู้รับ (สลิปจะปิดเลขบางส่วน เช่น xxx-x-x9857-x) เทียบกับเลขบัญชีร้านค้า
+// 🔧 เช็คเลขบัญชีผู้รับ
 function accountMatches(merchantAcc, slipAccounts) {
   const merchant = String(merchantAcc || '').replace(/[^0-9]/g, '');
-  if (!merchant) return true; // ไม่ได้ตั้งเลขบัญชี = ไม่ตรวจ
+  if (!merchant) return true;
 
   for (const acc of slipAccounts) {
     const raw = String(acc);
-    // เทียบแบบ mask: ตัวเลขที่เห็นต้องอยู่ตำแหน่งเดียวกับเลขบัญชีร้าน (x = ถูกปิด)
     const chars = raw.replace(/[\s-]/g, '');
     if (chars.length === merchant.length) {
       let ok = true;
@@ -154,14 +153,13 @@ function accountMatches(merchantAcc, slipAccounts) {
       }
       if (ok) return true;
     }
-    // กรณีเห็นเลขแค่บางส่วน: ตรวจว่าเลขที่เห็นเรียงต่อกันอยู่ในเลขบัญชีร้าน
     const visibleRuns = raw.split(/[^0-9]+/).filter(r => r.length >= 3);
     if (visibleRuns.length && visibleRuns.every(r => merchant.includes(r))) return true;
   }
   return false;
 }
 
-// 🔧 เทียบชื่อผู้รับ (ใช้เมื่อสลิปไม่ส่งเลขบัญชีมาให้)
+// 🔧 เทียบชื่อผู้รับ
 function nameMatches(merchantName, slipName) {
   const clean = (v) => String(v || '')
     .replace(/(นางสาว|น\.ส\.|นาย|นาง|MISS|MRS|MR|MS)\.?/gi, '')
@@ -573,7 +571,7 @@ app.get('/', (req, res) => {
                         </div>
                     </div>
 
-                                        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-3">
+                    <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-3">
                         <div class="flex flex-wrap items-center justify-between gap-3">
                             <h3 class="text-base font-bold text-slate-700">📡 สถานะการเชื่อมต่อ Webhook ของเพจนี้</h3>
                             <div class="flex gap-2">
@@ -596,7 +594,7 @@ app.get('/', (req, res) => {
                         </details>
                     </div>
 
-<div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
+                    <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
                         <h3 class="text-base font-bold text-slate-700">⚙️ ตั้งค่า Webhook สำหรับ Meta for Developers</h3>
                         <div>
                             <label class="text-xs font-semibold text-slate-500 block mb-1">Callback URL:</label>
@@ -1387,7 +1385,7 @@ app.get('/api/user/pages', checkAuth, (req, res) => {
 });
 
 // -------------------------------------------------------------
-// ผูก/ตรวจสอบ Webhook ของเพจ (เทียบเท่าการยิง POST {PAGE_ID}/subscribed_apps ใน Graph API Explorer)
+// ผูก/ตรวจสอบ Webhook ของเพจ
 // -------------------------------------------------------------
 const SUBSCRIBE_FIELDS = 'messages,messaging_postbacks,feed';
 const REQUIRED_FIELDS = ['messages', 'messaging_postbacks', 'feed'];
@@ -1454,7 +1452,6 @@ app.post('/api/user/add-page', checkAuth, async (req, res) => {
   const userPages = usersDB[username].pages;
 
   if (userPages[pageId]) {
-    // เพจอยู่ในระบบแล้ว: อัปเดต Token ใหม่ (เช่น หลังขอสิทธิ์เพิ่ม) โดยไม่ต้องลบเพจทิ้ง
     userPages[pageId].config.pageAccessToken = pageAccessToken;
     if (pageName) userPages[pageId].config.pageName = pageName;
     const subscribeUpd = await autoSubscribe(pageId, pageAccessToken);
@@ -1526,17 +1523,30 @@ app.post('/api/config', checkAuth, (req, res) => {
   res.json({ success: true });
 });
 
+// 🛠️ แก้ไขเพิ่ม Pagination Loop เพื่อให้ดึงเพจมาได้ครบทุกหน้า (ไม่ติดโควต้า 25 เพจ)
 app.post('/api/fetch-pages', async (req, res) => {
   const { userAccessToken } = req.body;
   if (!userAccessToken) return res.json({ success: false, error: 'ไม่พบ Access Token' });
 
   try {
-    const response = await axios.get('https://graph.facebook.com/v19.0/me/accounts', {
-      params: { access_token: userAccessToken },
-      timeout: 10000
-    });
-    res.json({ success: true, pages: response.data.data });
+    let allPages = [];
+    let nextPageUrl = `https://graph.facebook.com/v19.0/me/accounts?limit=100&access_token=${userAccessToken}`;
+
+    while (nextPageUrl) {
+      const response = await axios.get(nextPageUrl, { timeout: 15000 });
+      const data = response.data;
+
+      if (data && data.data) {
+        allPages = allPages.concat(data.data);
+      }
+
+      nextPageUrl = data.paging && data.paging.next ? data.paging.next : null;
+    }
+
+    console.log(`✅ [Fetch Pages] ดึงข้อมูลเพจสำเร็จทั้งหมด ${allPages.length} เพจ`);
+    res.json({ success: true, pages: allPages });
   } catch (err) {
+    console.error('❌ [Fetch Pages Error]:', err.response?.data || err.message);
     res.json({ success: false, error: err.response?.data?.error?.message || err.message });
   }
 });
@@ -1636,7 +1646,6 @@ function getLiveSessions(pageData) {
   return pageData.liveSessions;
 }
 
-// รับได้ทั้ง Video ID ตรงๆ หรือลิงก์ไลฟ์ แล้วดึงเฉพาะ ID ออกมา
 function parseVideoId(input) {
   const raw = String(input || '').trim();
   if (!raw) return '';
@@ -1649,7 +1658,6 @@ function parseVideoId(input) {
   return raw.replace(/[^0-9_]/g, '');
 }
 
-// หา session ที่ตรงกับคอมเมนต์: 1) ตรงกับ Video/Post ID  2) session แบบเปิดเองที่ active ล่าสุด
 function findLiveSessionForComment(pageData, postId, videoId) {
   const active = Object.values(getLiveSessions(pageData)).filter(s => s.status === 'active');
   const ids = [postId, videoId].filter(Boolean).map(String);
@@ -1660,7 +1668,6 @@ function findLiveSessionForComment(pageData, postId, videoId) {
   return manual[0] || null;
 }
 
-// หา session ของลูกค้าที่ส่งสลิป: session ล่าสุดที่เขาเคยคอมเมนต์ ถ้าไม่เจอใช้ session ที่ active ล่าสุด
 function findLiveSessionForSender(pageData, senderId) {
   const all = Object.values(getLiveSessions(pageData));
   let best = null, bestTime = 0;
@@ -1733,7 +1740,6 @@ app.post('/api/live/create', checkAuth, (req, res) => {
     status: 'active',
     startedAt: Date.now(),
     endedAt: null,
-    // เริ่มต้นคัดลอกค่าจากหน้าตั้งค่าหลักของเพจ แล้วแก้แยกอิสระได้
     config: {
       keywords: [...(c.keywords || [])],
       matchType: c.matchType || 'contains',
@@ -1955,7 +1961,6 @@ app.post('/webhook', async (req, res) => {
                 if (!imageUrl) continue;
 
                 console.log(`🧾 [Page: ${pageId}] พบรูปภาพจากลูกค้า ID: ${senderId} กำลังตรวจสอบสลิป...`);
-                // เรียกใช้ฟังก์ชัน verifySlipByImageUrl
                 const slipResult = await verifySlipByImageUrl(imageUrl, configStore.easySlipApiKey);
 
                 const sendSlipReply = async (text) => {
@@ -2001,7 +2006,6 @@ app.post('/webhook', async (req, res) => {
 
                 usedSlips.add(slip.transRef);
 
-                // บันทึกยอดโอนเข้า session ไลฟ์ของลูกค้าคนนี้
                 const slipSession = findLiveSessionForSender(targetRecord.pageData, senderId);
                 if (slipSession) {
                   slipSession.slips.push({
@@ -2030,11 +2034,9 @@ app.post('/webhook', async (req, res) => {
           if (change.field === 'feed' && change.value.item === 'comment' && change.value.verb === 'add') {
             const comment = change.value;
             const senderId = comment.from?.id;
-            // ข้ามคอมเมนต์ที่เพจตอบเอง (ไม่นับเป็นลูกค้า และกันบอตตอบวนซ้ำ)
             if (senderId && (senderId === pageId || senderId === configStore.pageId)) continue;
             if (senderId) subscribers.add(senderId);
 
-            // หา session ไลฟ์ที่คอมเมนต์นี้สังกัด (ถ้ามี) แล้วใช้ค่าตั้งของ session แทนค่าหลักของเพจ
             const liveSession = findLiveSessionForComment(targetRecord.pageData, comment.post_id, comment.video_id);
             const cfg = liveSession ? { ...configStore, ...liveSession.config } : configStore;
 
