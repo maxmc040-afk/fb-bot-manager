@@ -344,8 +344,11 @@ async function buildConversationIndex(pageId, token) {
 //   GET  /client/v1/label?ids=1,2&size=A6                  (ใบแปะหน้า PDF)
 // -------------------------------------------------------------
 const defaultBeemoveConfig = {
+  authMode: 'login',           // login = เข้าสู่ระบบด้วยเบอร์โทร+รหัสผ่าน (แบบเดียวกับหน้าเว็บ), bearer/x-api-key/apikey = ใช้ API Key
+  username: '',                // เบอร์โทรที่ใช้เข้าสู่ระบบ Bee Move
+  password: '',
+  accountId: '',               // กรณีมีหลายร้าน (บัญชีย่อย) ระบุ ID ร้าน
   apiKey: '',
-  authMode: 'bearer',          // bearer = Authorization: Bearer <key>, x-api-key, apikey
   baseUrl: 'https://api.beemove.co.th',
   partnerKeyword: 'ไปรษณีย์',   // เลือกขนส่งที่ชื่อมีคำนี้ (เช่น ไปรษณีย์ / Thailand Post / EMS / Flash)
   partnerId: '',               // ถ้าระบุ จะใช้ขนส่งนี้เสมอ
@@ -363,26 +366,93 @@ function getBeemoveConfig(pageData) {
   return pageData.config.beemove;
 }
 
-function beemoveHeaders(bm) {
+const BM_JSON = { Accept: 'application/json', 'Content-Type': 'application/json' };
+
+function beemoveBase(bm) {
+  return String(bm.baseUrl || defaultBeemoveConfig.baseUrl).replace(/\/+$/, '');
+}
+
+function beemoveHeaders(bm, sessionToken) {
+  const h = { ...BM_JSON };
+  if (sessionToken) { h['Authorization'] = 'Bearer ' + sessionToken; return h; }
   const key = String(bm.apiKey || '').trim();
-  const h = { Accept: 'application/json', 'Content-Type': 'application/json' };
   if (bm.authMode === 'x-api-key') h['x-api-key'] = key;
   else if (bm.authMode === 'apikey') h['apikey'] = key;
   else h['Authorization'] = 'Bearer ' + key;
   return h;
 }
 
+// เก็บ token ที่ได้จากการเข้าสู่ระบบไว้ในหน่วยความจำ (ไม่ส่งกลับไปหน้าเว็บ)
+const beemoveTokenCache = new Map();
+function beemoveCacheKey(bm) { return beemoveBase(bm) + '|' + String(bm.username || '').trim() + '|' + String(bm.accountId || ''); }
+
+// เข้าสู่ระบบแบบเดียวกับหน้าเว็บ Bee Move: login -> เลือกร้าน -> ได้ token ของร้าน
+async function beemoveLogin(bm, force) {
+  const key = beemoveCacheKey(bm);
+  const cached = beemoveTokenCache.get(key);
+  if (!force && cached && Date.now() - cached.at < 6 * 3600 * 1000) return cached.token;
+  if (!bm.username || !bm.password) throw new Error('ยังไม่ได้ใส่เบอร์โทรและรหัสผ่าน Bee Move (เมนู 🚚 ขนส่ง Bee Move)');
+  const base = beemoveBase(bm);
+
+  let firstToken;
+  try {
+    const r1 = await axios.post(base + '/client/v1/auth/login',
+      { username: String(bm.username).trim(), password: String(bm.password) },
+      { headers: BM_JSON, timeout: 20000 });
+    firstToken = r1.data?.data?.access_token || r1.data?.access_token;
+  } catch (e) {
+    throw new Error('เข้าสู่ระบบ Bee Move ไม่สำเร็จ: ' + beemoveError(e));
+  }
+  if (!firstToken) throw new Error('เข้าสู่ระบบ Bee Move ไม่สำเร็จ: เบอร์โทรหรือรหัสผ่านไม่ถูกต้อง');
+
+  let token = firstToken;
+  let accounts = [];
+  try {
+    const auth = { ...BM_JSON, Authorization: 'Bearer ' + firstToken };
+    const r2 = await axios.get(base + '/client/v1/account-child-link', { params: { page: 1, limit: 50 }, headers: auth, timeout: 20000 });
+    const list = r2.data?.data || [];
+    accounts = (Array.isArray(list) ? list : []).map(x => ({
+      id: x.parent_account?.id ?? x.parent_id,
+      name: x.parent_account?.name || x.parent_account?.account_name || x.name || ''
+    })).filter(a => a.id !== undefined && a.id !== null);
+    const pick = bm.accountId ? accounts.find(a => String(a.id) === String(bm.accountId)) : accounts[0];
+    if (bm.accountId && !pick) throw new Error('ไม่พบร้าน ID ' + bm.accountId + ' ในบัญชีนี้');
+    if (pick) {
+      const r3 = await axios.post(base + '/client/v1/account-child-link', { parent_id: pick.id }, { headers: auth, timeout: 20000 });
+      token = r3.data?.data?.access_token || r3.data?.access_token || firstToken;
+    }
+  } catch (e) {
+    if (/ไม่พบร้าน/.test(e.message)) throw e;
+    console.error('⚠️ [Bee Move] เลือกร้านไม่สำเร็จ ใช้ token จากการ login แทน:', beemoveError(e));
+  }
+  beemoveTokenCache.set(key, { token, at: Date.now(), accounts });
+  return token;
+}
+
 async function beemoveRequest(bm, method, path, opts = {}) {
-  if (!bm.apiKey) throw new Error('ยังไม่ได้ใส่ API Key ของ Bee Move');
-  const base = String(bm.baseUrl || defaultBeemoveConfig.baseUrl).replace(/\/+$/, '');
-  const res = await axios({
-    method, url: base + path,
-    headers: beemoveHeaders(bm),
+  const send = (sessionToken) => axios({
+    method, url: beemoveBase(bm) + path,
+    headers: beemoveHeaders(bm, sessionToken),
     data: opts.data, params: opts.params,
     responseType: opts.responseType || 'json',
     timeout: opts.timeout || 30000
   });
-  return res;
+
+  if (!bm.authMode || bm.authMode === 'login') {
+    let token = await beemoveLogin(bm, false);
+    try {
+      return await send(token);
+    } catch (e) {
+      // token หมดอายุ -> เข้าสู่ระบบใหม่แล้วลองอีกครั้ง
+      if ([401, 403].includes(e.response?.status)) {
+        token = await beemoveLogin(bm, true);
+        return await send(token);
+      }
+      throw e;
+    }
+  }
+  if (!bm.apiKey) throw new Error('ยังไม่ได้ใส่ API Key ของ Bee Move');
+  return send(null);
 }
 
 function beemoveError(err) {
@@ -929,24 +999,35 @@ app.get('/', (req, res) => {
                             <h3 class="text-base font-bold text-slate-800">🚚 เชื่อมต่อขนส่ง Bee Move (client.beemove.co.th)</h3>
                             <p class="text-xs text-slate-500 mt-1">เมื่อเชื่อมแล้ว กดปุ่ม "สร้างเลขพัสดุ + พิมพ์ใบแปะหน้า" ในหน้าไลฟ์ ระบบจะสร้างพัสดุใน Bee Move ให้ลูกค้าแต่ละคน ได้เลขพัสดุทันที และเปิดใบแปะหน้า A6 ของขนส่งให้พิมพ์</p>
                         </div>
-                        <div class="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-800 space-y-1">
-                            <div class="font-semibold">วิธีเอา API Key</div>
-                            <div>เข้า client.beemove.co.th แล้วไปที่ ตั้งค่า → การเชื่อมต่อ API กด Generate Key แล้วคัดลอกมาวางด้านล่าง</div>
-                            <div>⚠️ การสร้างพัสดุจะตัดเงินจาก Wallet ของ Bee Move ตามค่าส่งจริง</div>
-                        </div>
-                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                            <div class="md:col-span-2">
-                                <label class="text-xs font-semibold text-slate-600 block mb-1">API Key: <span id="bm-key-state" class="font-normal text-slate-400"></span></label>
-                                <input type="password" id="bm-api-key" autocomplete="off" class="w-full p-2.5 text-sm border border-slate-200 rounded-xl focus:outline-none focus:border-blue-500" placeholder="วาง API Key จาก Bee Move (เว้นว่างไว้ = ใช้ Key เดิม)">
+                        <div class="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">
+                            <h4 class="text-sm font-bold text-slate-700">🔐 บัญชี Bee Move</h4>
+                            <p class="text-xs text-slate-500">ใช้เบอร์โทรและรหัสผ่านเดียวกับที่เข้า client.beemove.co.th ระบบจะเข้าสู่ระบบให้อัตโนมัติ และเข้าใหม่เองเมื่อหมดอายุ</p>
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                <div><label class="text-xs font-semibold text-slate-600 block mb-1">เบอร์โทร (ที่ใช้เข้าสู่ระบบ) *</label><input id="bm-username" autocomplete="off" class="w-full p-2 text-sm border border-slate-200 rounded-lg bg-white"></div>
+                                <div><label class="text-xs font-semibold text-slate-600 block mb-1">รหัสผ่าน * <span id="bm-pass-state" class="font-normal text-slate-400"></span></label><input type="password" id="bm-password" autocomplete="new-password" class="w-full p-2 text-sm border border-slate-200 rounded-lg bg-white" placeholder="เว้นว่าง = ใช้รหัสเดิม"></div>
+                                <div><label class="text-xs font-semibold text-slate-600 block mb-1">ร้าน (ถ้ามีหลายร้าน):</label>
+                                    <select id="bm-account-id" class="w-full p-2 text-sm border border-slate-200 rounded-lg bg-white"><option value="">-- ร้านแรก (ค่าเริ่มต้น) --</option></select>
+                                </div>
                             </div>
-                            <div>
-                                <label class="text-xs font-semibold text-slate-600 block mb-1">รูปแบบส่ง Key:</label>
-                                <select id="bm-auth-mode" class="w-full p-2.5 text-sm border border-slate-200 rounded-xl bg-white">
-                                    <option value="bearer">Authorization: Bearer (ค่าเริ่มต้น)</option>
-                                    <option value="x-api-key">x-api-key</option>
-                                    <option value="apikey">apikey</option>
-                                </select>
-                            </div>
+                            <div class="text-xs text-amber-700">⚠️ การสร้างพัสดุจะตัดเงินจาก Wallet ของ Bee Move ตามค่าส่งจริง</div>
+                            <details class="text-xs text-slate-600">
+                                <summary class="cursor-pointer font-semibold">ขั้นสูง: เชื่อมต่อด้วย API Key แทน (ใช้เมื่อ Bee Move แจ้งวิธีใช้ Key ให้แล้ว)</summary>
+                                <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mt-2">
+                                    <div>
+                                        <label class="font-semibold block mb-1">วิธีเชื่อมต่อ:</label>
+                                        <select id="bm-auth-mode" class="w-full p-2 text-sm border border-slate-200 rounded-lg bg-white">
+                                            <option value="login">เบอร์โทร + รหัสผ่าน (แนะนำ)</option>
+                                            <option value="bearer">API Key: Authorization Bearer</option>
+                                            <option value="x-api-key">API Key: x-api-key</option>
+                                            <option value="apikey">API Key: apikey</option>
+                                        </select>
+                                    </div>
+                                    <div class="md:col-span-2">
+                                        <label class="font-semibold block mb-1">API Key: <span id="bm-key-state" class="font-normal text-slate-400"></span></label>
+                                        <input type="password" id="bm-api-key" autocomplete="off" class="w-full p-2 text-sm border border-slate-200 rounded-lg bg-white" placeholder="เว้นว่าง = ใช้ Key เดิม">
+                                    </div>
+                                </div>
+                            </details>
                         </div>
 
                         <div class="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">
@@ -1983,7 +2064,7 @@ app.get('/', (req, res) => {
         // ================= 🚚 Bee Move =================
         let lastShipJob = null;
         const BM_FIELDS = {
-            'bm-auth-mode': 'authMode', 'bm-sender-name': 'senderName', 'bm-sender-phone': 'senderPhone',
+            'bm-auth-mode': 'authMode', 'bm-username': 'username', 'bm-sender-name': 'senderName', 'bm-sender-phone': 'senderPhone',
             'bm-sender-address': 'senderAddress', 'bm-sender-district': 'senderDistrict', 'bm-sender-city': 'senderCity',
             'bm-sender-province': 'senderProvince', 'bm-sender-postcode': 'senderPostcode', 'bm-pickup-id': 'pickupPointId',
             'bm-partner-kw': 'partnerKeyword', 'bm-pkg-name': 'packageName', 'bm-width': 'width', 'bm-length': 'length',
@@ -2002,7 +2083,11 @@ app.get('/', (req, res) => {
             const c = d.config;
             Object.keys(BM_FIELDS).forEach(function(id) { document.getElementById(id).value = c[BM_FIELDS[id]] == null ? '' : c[BM_FIELDS[id]]; });
             document.getElementById('bm-api-key').value = '';
+            document.getElementById('bm-password').value = '';
             document.getElementById('bm-key-state').innerText = c.hasKey ? '(บันทึกแล้ว: ' + c.apiKeyMasked + ')' : '(ยังไม่ได้ใส่)';
+            document.getElementById('bm-pass-state').innerText = c.hasPassword ? '(บันทึกแล้ว)' : '(ยังไม่ได้ใส่)';
+            if(!c.authMode) document.getElementById('bm-auth-mode').value = 'login';
+            fillBmAccounts(c.accounts || [], c.accountId || '');
             document.getElementById('bm-notify').checked = !!c.notifyCustomer;
             const sel = document.getElementById('bm-partner-id');
             if(c.partnerId && !Array.from(sel.options).some(function(o) { return o.value === String(c.partnerId); })) {
@@ -2011,10 +2096,23 @@ app.get('/', (req, res) => {
             sel.value = c.partnerId || '';
         }
 
+        function fillBmAccounts(accounts, selected) {
+            const sel = document.getElementById('bm-account-id');
+            sel.innerHTML = '<option value="">-- ร้านแรก (ค่าเริ่มต้น) --</option>';
+            accounts.forEach(function(a) { sel.innerHTML += '<option value="' + escapeHtml(a.id) + '">' + escapeHtml(a.name || ('ร้าน ID ' + a.id)) + '</option>'; });
+            if(selected && !accounts.some(function(a) { return String(a.id) === String(selected); })) {
+                sel.innerHTML += '<option value="' + escapeHtml(selected) + '">ร้าน ID ' + escapeHtml(selected) + '</option>';
+            }
+            sel.value = selected || '';
+        }
+
         function collectBeemove() {
             const body = {};
             Object.keys(BM_FIELDS).forEach(function(id) { body[BM_FIELDS[id]] = document.getElementById(id).value.trim(); });
             body.partnerId = document.getElementById('bm-partner-id').value;
+            body.accountId = document.getElementById('bm-account-id').value;
+            const pass = document.getElementById('bm-password').value;
+            if(pass) body.password = pass;
             body.notifyCustomer = document.getElementById('bm-notify').checked;
             const key = document.getElementById('bm-api-key').value.trim();
             if(key) body.apiKey = key;
@@ -2041,6 +2139,10 @@ app.get('/', (req, res) => {
             const res = await fetch(bmUrl('/api/beemove/test'), { method: 'POST' });
             const d = await res.json();
             let html = '';
+            if(d.accounts && d.accounts.length) {
+                fillBmAccounts(d.accounts, document.getElementById('bm-account-id').value);
+                if(d.accounts.length > 1) html += '<div>🏪 บัญชีนี้มี ' + d.accounts.length + ' ร้าน เลือกร้านที่ช่อง "ร้าน" แล้วกดบันทึก</div>';
+            }
             if(d.account) html += '<div>✅ เชื่อมต่อบัญชีสำเร็จ: <b>' + escapeHtml(d.account.name || '-') + '</b>' + (d.account.wallet != null ? ' · Wallet ' + fmtMoney(d.account.wallet) + ' บาท' : '') + '</div>';
             if(d.partners && d.partners.length) {
                 html += '<div class="mt-2 font-semibold">ขนส่งที่ใช้ได้:</div><ul class="list-disc pl-5">';
@@ -2391,9 +2493,10 @@ app.get('/api/config', checkAuth, (req, res) => {
 
   if (!pageData) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
 
+  const { beemove, ...publicConfig } = pageData.config;
   res.json({ 
     success: true, 
-    config: pageData.config, 
+    config: publicConfig, 
     subscriberCount: pageData.subscribers.size 
   });
 });
@@ -2890,7 +2993,12 @@ app.get('/api/beemove/config', checkAuth, (req, res) => {
   const pageData = usersDB[req.userId]?.pages[req.query.pageId];
   if (!pageData) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
   const bm = getBeemoveConfig(pageData);
-  res.json({ success: true, config: { ...bm, apiKey: '', apiKeyMasked: maskKey(bm.apiKey), hasKey: !!bm.apiKey } });
+  const cached = beemoveTokenCache.get(beemoveCacheKey(bm));
+  res.json({ success: true, config: {
+    ...bm, apiKey: '', password: '',
+    apiKeyMasked: maskKey(bm.apiKey), hasKey: !!bm.apiKey, hasPassword: !!bm.password,
+    accounts: cached ? cached.accounts : []
+  } });
 });
 
 app.post('/api/beemove/config', checkAuth, (req, res) => {
@@ -2899,11 +3007,12 @@ app.post('/api/beemove/config', checkAuth, (req, res) => {
   const bm = getBeemoveConfig(pageData);
   const b = req.body || {};
   for (const k of Object.keys(defaultBeemoveConfig)) {
-    if (k === 'apiKey') continue;
+    if (k === 'apiKey' || k === 'password') continue;
     if (b[k] === undefined) continue;
     bm[k] = typeof defaultBeemoveConfig[k] === 'boolean' ? !!b[k] : String(b[k]);
   }
   if (typeof b.apiKey === 'string' && b.apiKey.trim()) bm.apiKey = b.apiKey.trim();
+  if (typeof b.password === 'string' && b.password) bm.password = b.password;
   if (b.clearKey) bm.apiKey = '';
   res.json({ success: true });
 });
@@ -2913,7 +3022,16 @@ app.post('/api/beemove/test', checkAuth, async (req, res) => {
   const pageData = usersDB[req.userId]?.pages[req.query.pageId];
   if (!pageData) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
   const bm = getBeemoveConfig(pageData);
-  const out = { success: false, account: null, partners: [], warnings: [] };
+  const out = { success: false, account: null, accounts: [], partners: [], warnings: [] };
+  if (!bm.authMode || bm.authMode === 'login') {
+    try {
+      await beemoveLogin(bm, true);
+      out.accounts = (beemoveTokenCache.get(beemoveCacheKey(bm)) || {}).accounts || [];
+    } catch (e) {
+      out.warnings.push(e.message);
+      return res.json(out);
+    }
+  }
   try {
     const r = await beemoveRequest(bm, 'GET', '/client/v1/init');
     const d = unwrapData(r.data) || {};
@@ -2991,7 +3109,9 @@ app.post('/api/live/beemove/create', checkAuth, (req, res) => {
   if (!s || !s.buyers) return res.json({ success: false, error: 'ไม่พบ session นี้' });
   if (s.shipJob && s.shipJob.running) return res.json({ success: false, error: 'กำลังสร้างพัสดุอยู่ กรุณารอสักครู่' });
   const bm = getBeemoveConfig(ctx.pageData);
-  if (!bm.apiKey) return res.json({ success: false, error: 'ยังไม่ได้ใส่ API Key ของ Bee Move (เมนู 🚚 ขนส่ง Bee Move)' });
+  const loginMode = !bm.authMode || bm.authMode === 'login';
+  if (loginMode && (!bm.username || !bm.password)) return res.json({ success: false, error: 'ยังไม่ได้ใส่เบอร์โทรและรหัสผ่าน Bee Move (เมนู 🚚 ขนส่ง Bee Move)' });
+  if (!loginMode && !bm.apiKey) return res.json({ success: false, error: 'ยังไม่ได้ใส่ API Key ของ Bee Move (เมนู 🚚 ขนส่ง Bee Move)' });
   const sd = beemoveSender(bm);
   if (!sd.name || !sd.phone_number || !sd.district || !sd.city || !sd.province || !sd.postal_code) {
     return res.json({ success: false, error: 'กรุณากรอกข้อมูลผู้ส่งให้ครบที่เมนู 🚚 ขนส่ง Bee Move' });
