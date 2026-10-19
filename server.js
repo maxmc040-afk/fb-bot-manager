@@ -183,8 +183,11 @@ const ADDR_PATTERNS = [
 const PHONE_RE = /(?<!\d)(?:\+?66[ -]?|0)\d(?:[ -]?\d){7,8}(?!\d)/;
 const PHONE_RE_G = new RegExp(PHONE_RE.source, 'g');
 const POSTCODE_RE = /(?<!\d)[1-9]\d{4}(?!\d)/g;
-const CHAT_WORDS = /สลิป|โอน|ขอบคุณ|สนใจ|ราคา|เท่าไหร่|ไหม|มั้ย|\?|ค่ะ$|ครับ$|คะ$|จ้า|นะ/;
-const LABEL_RE = /^(ชื่อ\s*-?\s*(สกุล|นามสกุล)?\s*(ผู้รับ)?|ผู้รับ|ที่อยู่\s*(จัดส่ง|ผู้รับ)?|ส่งที่|name|address)\s*[:：\-]?\s*/i;
+const CHAT_WORDS = /สลิป|โอน|ขอบคุณ|สนใจ|ราคา|เท่าไหร่|ไหม|มั้ย|\?|ค่ะ$|ครับ$|คะ$|จ้า|นะ|จัดส่ง|ส่งของ|ที่อยู่|บาท|ยอด|สั่ง/;
+const LABEL_RE = /^(ข้อมูล\s*(ผู้รับ|การจัดส่ง|จัดส่ง)?|รายละเอียด\s*(ผู้รับ|การจัดส่ง|จัดส่ง|ที่อยู่)?|ชื่อ\s*-?\s*(สกุล|นามสกุล)?\s*(ที่อยู่)?\s*(ผู้รับ)?|ผู้รับ(สินค้า|ของ)?|ที่อยู่\s*(ใน)?\s*(การ)?\s*(จัดส่ง|ผู้รับ|ส่งของ)?|จัดส่ง(ที่|ไปที่|ถึง)?|ส่ง(ของ)?(ที่|ไปที่|ถึง)|name|address|ship\s*to)\s*[:：\-]?\s*/i;
+// บรรทัดที่เป็นแค่หัวข้อ (ไม่ใช่ชื่อคน)
+const HEADER_ONLY = /^(จัดส่ง|ส่ง|ส่งของ|ที่อยู่|ที่อยู่จัดส่ง|ข้อมูล|ข้อมูลจัดส่ง|ข้อมูลผู้รับ|ผู้รับ|รายละเอียด|ชื่อ|ชื่อที่อยู่|ชื่อ ที่อยู่ เบอร์|ชื่อที่อยู่เบอร์โทร|ตามนี้|ตามนี้ค่ะ|ตามนี้ครับ|ค่ะ|ครับ|คะ|นะคะ)[\s:：\-.]*$/i;
+const NAME_TITLE_RE = /(?:^|\s)((?:นางสาว|น\.ส\.|นาย|นาง|คุณ|ด\.ช\.|ด\.ญ\.|mr\.?|mrs\.?|ms\.?|miss)\s*[^\s\d,]+(?:\s+[^\s\d,]+)?)/i;
 
 function stripPhones(t) { return String(t || '').replace(PHONE_RE_G, ' '); }
 
@@ -247,8 +250,28 @@ function parseAddressBlock(texts, nameHint) {
       .replace(/\s{2,}/g, ' ').trim())
     .filter(l => l && !/^[\s,.:\-]*$/.test(l));
 
+  lines = lines.filter(l => !HEADER_ONLY.test(l.trim()));
+
   let recipientName = '';
-  if (lines.length > 1 && isNameLike(lines[0])) {
+  // มีคำนำหน้าชื่อ (นาย/นาง/นางสาว/คุณ): เอาคำนำหน้า + ชื่อ + นามสกุล
+  for (let i = 0; i < lines.length && !recipientName; i++) {
+    const m = lines[i].match(NAME_TITLE_RE);
+    if (!m) continue;
+    const before = lines[i].slice(0, m.index + (m[0].length - m[1].length));
+    if (/\d/.test(before)) continue; // คำนำหน้าอยู่หลังบ้านเลขที่ ไม่น่าใช่ชื่อผู้รับ
+    let name = m[1].trim();
+    // ตัดคำที่เป็นที่อยู่ติดมาท้ายนามสกุล
+    name = name.split(/\s+/).filter((w, k) => k === 0 || !ADDR_PATTERNS.some(re => re.test(w))).join(' ');
+    if (looksLikeLocation(name.replace(/^(นางสาว|น\.ส\.|นาย|นาง|คุณ)\s*/, ''))) continue;
+    recipientName = name;
+    const rest = (lines[i].slice(0, m.index) + ' ' + lines[i].slice(m.index + m[0].length)).trim();
+    lines[i] = rest;
+    if (before.trim() && isNameLike(before.trim())) lines[i] = lines[i].replace(before.trim(), '').trim(); // คำนำหน้าบรรทัด เช่น "ส่ง"
+  }
+  lines = lines.filter(Boolean);
+  if (recipientName) {
+    // ได้ชื่อแล้ว
+  } else if (lines.length > 1 && isNameLike(lines[0])) {
     recipientName = lines.shift();
   } else if (lines.length >= 1) {
     // กรณีพิมพ์ชื่อกับที่อยู่ในบรรทัดเดียว เช่น "สมชาย ใจดี 12/3 ม.4 ต.หาดใหญ่ ..."
@@ -712,7 +735,10 @@ function tidyStreet(t) {
 // หาตำแหน่งที่ส่วน ตำบล/อำเภอ/จังหวัด เริ่มต้น เพื่อตัดเอาเฉพาะบ้านเลขที่/หมู่/ซอย/ถนน ที่อยู่ข้างหน้า
 function findLocationStart(raw, best) {
   let idx = raw.length;
+  // ชื่อสถานที่ก่อนบ้านเลขที่ (เช่น "การไฟฟ้าส่วนภูมิภาคอำเภอเกาะจันทร์ 99/99") ไม่ใช่ส่วนตำบล/อำเภอ
+  const firstDigit = raw.search(/\d/);
   const consider = (i) => {
+    if (firstDigit >= 0 && i < firstDigit) return;
     const before = raw.slice(Math.max(0, i - 8), i);
     if (/(ถ\.|ถนน|ซ\.|ซอย|หมู่บ้าน|ม\.บ\.|มบ\.)\s*$/.test(before)) return; // ชื่อถนน/ซอย/หมู่บ้าน ที่ซ้ำกับชื่อตำบล
     if (i < idx) idx = i;
