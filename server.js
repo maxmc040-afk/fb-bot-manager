@@ -187,7 +187,13 @@ const CHAT_WORDS = /สลิป|โอน|ขอบคุณ|สนใจ|ร�
 const LABEL_RE = /^(ข้อมูล\s*(ผู้รับ|การจัดส่ง|จัดส่ง)?|รายละเอียด\s*(ผู้รับ|การจัดส่ง|จัดส่ง|ที่อยู่)?|ชื่อ\s*-?\s*(สกุล|นามสกุล)?\s*(ที่อยู่)?\s*(ผู้รับ)?|ผู้รับ(สินค้า|ของ)?|ที่อยู่\s*(ใน)?\s*(การ)?\s*(จัดส่ง|ผู้รับ|ส่งของ)?|จัดส่ง(ที่|ไปที่|ถึง)?|ส่ง(ของ)?(ที่|ไปที่|ถึง)|name|address|ship\s*to)\s*[:：\-]?\s*/i;
 // บรรทัดที่เป็นแค่หัวข้อ (ไม่ใช่ชื่อคน)
 const HEADER_ONLY = /^(จัดส่ง|ส่ง|ส่งของ|ที่อยู่|ที่อยู่จัดส่ง|ข้อมูล|ข้อมูลจัดส่ง|ข้อมูลผู้รับ|ผู้รับ|รายละเอียด|ชื่อ|ชื่อที่อยู่|ชื่อ ที่อยู่ เบอร์|ชื่อที่อยู่เบอร์โทร|ตามนี้|ตามนี้ค่ะ|ตามนี้ครับ|ค่ะ|ครับ|คะ|นะคะ)[\s:：\-.]*$/i;
-const NAME_TITLE_RE = /(?:^|\s)((?:นางสาว|น\.ส\.|นาย|นาง|คุณ|ด\.ช\.|ด\.ญ\.|mr\.?|mrs\.?|ms\.?|miss)\s*[^\s\d,]+(?:\s+[^\s\d,]+)?)/i;
+// คำนำหน้าชื่อ ยศทหาร/ตำรวจ และตำแหน่งวิชาการ (ยาวก่อนสั้น)
+const RANK_SRC = String.raw`(?:ว่าที่\s*)?(?:พล\.(?:ร\.|ต\.|อ\.|ท\.)?[อทต]\.|[พร]\.ต\.[อทต]\.|จ\.ส\.[อทต]\.|[พรน]\.[อทต]\.|ส\.[อทต]\.|ด\.ต\.|จ\.ต\.|จ\.อ\.|พ\.จ\.[อทต]\.|ร\.ต\.)`;
+const NAME_TITLES = String.raw`(?:` + RANK_SRC + String.raw`(?:\s*หญิง)?|ศ\.|รศ\.|ผศ\.|ดร\.|นพ\.|พญ\.|ทพญ?\.|ภ[กญ]\.|สพ\.ญ\.|น\.?สพ\.|ด\.ช\.|ด\.ญ\.|น\.ส\.|นางสาว|นาย|นาง|คุณ|mr\.?|mrs\.?|ms\.?|miss|dr\.?)`;
+const NAME_TITLE_RE = new RegExp(String.raw`(?:^|\s)(` + NAME_TITLES + String.raw`\s*[^\s\d,]+(?:\s+[^\s\d,]+)?)`, 'i');
+const NAME_TITLE_PREFIX_RE = new RegExp('^' + NAME_TITLES + String.raw`\s*`, 'i');
+// ลบยศออกก่อนอ่าน ต./อ./จ. (กัน จ.ส.อ. ถูกมองเป็นจังหวัด/อำเภอ)
+const RANK_MASK_RE = new RegExp(String.raw`(^|\s)` + RANK_SRC + String.raw`\s*[^\s\d,]*`, 'g');
 
 function stripPhones(t) { return String(t || '').replace(PHONE_RE_G, ' '); }
 
@@ -213,6 +219,7 @@ function isNameLike(s) {
   const t = String(s || '').trim();
   if (t.length < 2 || t.length > 45) return false;
   if (/\d/.test(t)) return false;
+  if (NAME_TITLE_PREFIX_RE.test(t) && t.split(/\s+/).length <= 4 && !looksLikeLocation(t.replace(NAME_TITLE_PREFIX_RE, ''))) return true;
   if (CHAT_WORDS.test(t)) return false;
   if (looksLikeLocation(t)) return false;
   return !ADDR_PATTERNS.some(re => re.test(t));
@@ -261,8 +268,8 @@ function parseAddressBlock(texts, nameHint) {
     if (/\d/.test(before)) continue; // คำนำหน้าอยู่หลังบ้านเลขที่ ไม่น่าใช่ชื่อผู้รับ
     let name = m[1].trim();
     // ตัดคำที่เป็นที่อยู่ติดมาท้ายนามสกุล
-    name = name.split(/\s+/).filter((w, k) => k === 0 || !ADDR_PATTERNS.some(re => re.test(w))).join(' ');
-    if (looksLikeLocation(name.replace(/^(นางสาว|น\.ส\.|นาย|นาง|คุณ)\s*/, ''))) continue;
+    name = name.split(/\s+/).filter((w, k) => k === 0 || NAME_TITLE_PREFIX_RE.test(w) || !ADDR_PATTERNS.some(re => re.test(w))).join(' ');
+    if (looksLikeLocation(name.replace(NAME_TITLE_PREFIX_RE, ''))) continue;
     recipientName = name;
     const rest = (lines[i].slice(0, m.index) + ' ' + lines[i].slice(m.index + m[0].length)).trim();
     lines[i] = rest;
@@ -606,7 +613,7 @@ function beemoveError(err) {
 
 // แยกที่อยู่ไทยเป็น ตำบล/อำเภอ/จังหวัด (Bee Move ต้องการแยกช่อง)
 function parseThaiAddress(text, postcode) {
-  let s = ' ' + String(text || '') + ' ';
+  let s = ' ' + String(text || '').replace(RANK_MASK_RE, '$1') + ' ';
   s = s.replace(/(ตำบล|แขวง|อำเภอ|เขต|จังหวัด|ต\.|อ\.|จ\.)/g, ' $1 ');
   const grab = (re) => {
     const m = s.match(re);
@@ -784,7 +791,7 @@ function formatThaiAddress(parts) {
 
 // แยกที่อยู่แบบฉลาด: ใช้ ต./อ./จ. ถ้ามี ไม่มีก็จับคู่กับฐานข้อมูลตำบลด้วยรหัสไปรษณีย์และชื่อ
 function smartThaiAddress(text, postcode) {
-  const raw = applyProvinceAliases(String(text || '').replace(PHONE_RE_G, ' ')).replace(/\s+/g, ' ').trim();
+  const raw = applyProvinceAliases(String(text || '').replace(PHONE_RE_G, ' ').replace(RANK_MASK_RE, '$1')).replace(/\s+/g, ' ').trim();
   const marked = parseThaiAddress(raw, postcode);
   const pcs = raw.match(/(?<!\d)[1-9]\d{4}(?!\d)/g) || [];
   const zip = String(postcode || '').trim() || (pcs.length ? pcs[pcs.length - 1] : '');
