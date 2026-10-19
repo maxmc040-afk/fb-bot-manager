@@ -1333,6 +1333,46 @@ app.get('/', (req, res) => {
                             </div>
                         </div>
 
+                        <!-- 💬 ค้นหารายชื่อจากแชทเพจ -->
+                        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
+                            <div>
+                                <h3 class="text-base font-bold text-slate-700">💬 ค้นหารายชื่อจากแชทเพจ</h3>
+                                <p class="text-xs text-slate-500 mt-1">ค้นหาจากชื่อบัญชีเฟสบุ๊ค หรือข้อความในแชท (ชื่อผู้รับ ที่อยู่ เบอร์โทร) ตามช่วงวันที่ แล้วเลือกเพิ่มเข้าตารางรายชื่อลูกค้าด้านล่าง</p>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
+                                    <label class="text-xs font-semibold text-slate-600 block mb-1">ข้อมูล</label>
+                                    <input type="text" id="lv-chat-q" class="w-full p-2.5 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-500" placeholder="ค้นหา ชื่อเฟสบุ๊ค, ชื่อผู้รับ, ที่อยู่, เบอร์โทร (เว้นว่าง = ทุกแชทในช่วงวันที่)">
+                                </div>
+                                <div class="relative">
+                                    <label class="text-xs font-semibold text-slate-600 block mb-1">วันที่</label>
+                                    <div id="lv-chat-range" onclick="toggleChatCal()" class="w-full p-2.5 text-sm border border-slate-200 rounded-lg bg-white flex items-center justify-between cursor-pointer hover:border-blue-400">
+                                        <span id="lv-chat-range-text">-</span><span class="text-slate-400">📅</span>
+                                    </div>
+                                    <div id="lv-chat-cal" class="hidden absolute right-0 top-full mt-1 z-30 bg-white border border-slate-200 rounded-xl shadow-lg p-3"></div>
+                                </div>
+                            </div>
+                            <div class="flex flex-wrap items-center justify-between gap-3">
+                                <label class="flex items-center gap-2 cursor-pointer text-xs text-slate-600"><input type="checkbox" id="lv-chat-onlyaddr" class="w-4 h-4 rounded"> เฉพาะคนที่ส่งที่อยู่มาในแชทแล้ว</label>
+                                <button type="button" id="lv-chat-btn" onclick="searchChats()" class="px-5 py-2 text-sm font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700 shadow-sm">🔍 ค้นหา</button>
+                            </div>
+                            <div id="lv-chat-status" class="hidden text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded-lg p-2"></div>
+                            <div id="lv-chat-results-box" class="hidden space-y-3">
+                                <div class="flex flex-wrap items-center justify-between gap-2">
+                                    <label class="flex items-center gap-2 cursor-pointer text-xs text-slate-600"><input type="checkbox" id="lv-chat-all" onchange="toggleAllChats(this.checked)" class="w-4 h-4 rounded"> เลือกทั้งหมด <span id="lv-chat-count"></span></label>
+                                    <button type="button" onclick="addChatsToBuyers()" class="px-4 py-2 text-xs font-semibold rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm">➕ เพิ่มที่เลือกเข้ารายชื่อลูกค้า</button>
+                                </div>
+                                <div class="overflow-auto max-h-96">
+                                    <table class="w-full text-xs">
+                                        <thead class="text-left text-slate-500 border-b border-slate-200"><tr>
+                                            <th class="py-2 pr-2">✓</th><th class="py-2 pr-2">บัญชีเฟสบุ๊ค</th><th class="py-2 pr-2">ข้อความที่พบ</th><th class="py-2 pr-2">ที่อยู่ในแชท</th><th class="py-2">แชทล่าสุด</th>
+                                        </tr></thead>
+                                        <tbody id="lv-chat-results"></tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+
                         <!-- 📦 รายชื่อลูกค้า + ที่อยู่จากแชท สำหรับใบแปะหน้า -->
                         <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
                             <div class="flex flex-wrap items-start justify-between gap-3">
@@ -2052,6 +2092,7 @@ app.get('/', (req, res) => {
             const changed = sid !== currentLiveId;
             currentLiveId = sid;
             if(changed) { resetBuyers(); loadBuyers(); }
+            initChatRange();
             await loadLiveDetail(true);
             loadLiveList();
         }
@@ -2345,7 +2386,7 @@ app.get('/', (req, res) => {
                 html += '<tr data-uid="' + escapeHtml(b.userId) + '" class="border-b border-slate-100 align-top">'
                     + '<td class="py-2 pr-2"><input type="checkbox" class="bf-sel w-4 h-4 rounded"' + (buyersSelected.has(b.userId) ? ' checked' : '') + '></td>'
                     + '<td class="py-2 pr-2 font-medium text-slate-700 min-w-[7rem]">' + escapeHtml(b.fbName || b.userId) + '<div class="text-[10px] text-slate-400 font-normal">' + escapeHtml(b.lastMessage || '') + '</div></td>'
-                    + '<td class="py-2 pr-2 text-blue-600 font-semibold whitespace-nowrap">' + escapeHtml(b.keyword || '') + ' ×' + (b.matchedCount || 0) + '</td>'
+                    + '<td class="py-2 pr-2 text-blue-600 font-semibold whitespace-nowrap">' + (b.source === 'chat' && !b.matchedCount ? '<span class="text-violet-600">💬 จากแชท</span>' : escapeHtml(b.keyword || '') + ' ×' + (b.matchedCount || 0)) + '</td>'
                     + '<td class="py-2 pr-2 text-right text-emerald-600 font-semibold whitespace-nowrap">' + (b.slipTotal ? fmtMoney(b.slipTotal) : '-') + '</td>'
                     + '<td class="py-2 pr-2 min-w-[8rem]"><input type="text" class="bf-name ' + inp + '" value="' + escapeHtml(b.recipientName || '') + '"></td>'
                     + '<td class="py-2 pr-2 min-w-[16rem]"><textarea rows="2" class="bf-addr ' + inp + '">' + escapeHtml(b.address || '') + '</textarea>'
@@ -2366,6 +2407,211 @@ app.get('/', (req, res) => {
             });
             tbody.innerHTML = html;
             updateBuyersSummary();
+        }
+
+        // ============ 💬 ค้นหารายชื่อจากแชทเพจ + ปฏิทินเลือกช่วงวันที่ ============
+        const TH_MONTHS = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
+        const TH_DOW = ['จ.','อ.','พ.','พฤ.','ศ.','ส.','อา.'];
+        let chatRange = null;
+        let chatCalView = null;
+        let chatPicking = false;
+        let chatResults = [];
+        let chatSel = new Set();
+
+        function pad2(n) { return (n < 10 ? '0' : '') + n; }
+        function ymd(d) { return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
+        function dayOnly(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
+
+        function initChatRange() {
+            if(chatRange) return;
+            const end = dayOnly(new Date());
+            const start = new Date(end.getFullYear(), end.getMonth() - 1, end.getDate());
+            chatRange = { start: start, end: end };
+            chatCalView = new Date(start.getFullYear(), start.getMonth(), 1);
+            updateChatRangeText();
+        }
+
+        function updateChatRangeText() {
+            document.getElementById('lv-chat-range-text').innerText = ymd(chatRange.start) + ' ถึง ' + (chatRange.end ? ymd(chatRange.end) : '...');
+        }
+
+        function toggleChatCal() {
+            initChatRange();
+            const cal = document.getElementById('lv-chat-cal');
+            if(cal.classList.contains('hidden')) {
+                chatCalView = new Date(chatRange.start.getFullYear(), chatRange.start.getMonth(), 1);
+                renderChatCal();
+                cal.classList.remove('hidden');
+            } else {
+                cal.classList.add('hidden');
+            }
+        }
+
+        function renderMonth(year, month, navLeft, navRight) {
+            const first = new Date(year, month, 1);
+            const offset = (first.getDay() + 6) % 7; // เริ่มวันจันทร์
+            const startDay = new Date(year, month, 1 - offset);
+            const s = chatRange.start ? chatRange.start.getTime() : 0;
+            const e = chatRange.end ? chatRange.end.getTime() : s;
+            const today = dayOnly(new Date()).getTime();
+            let html = '<div class="w-64">';
+            html += '<div class="flex items-center justify-between text-xs text-slate-500 mb-2">';
+            html += navLeft ? '<span><button type="button" data-nav="-12" class="px-1 hover:text-blue-600">«</button><button type="button" data-nav="-1" class="px-1 hover:text-blue-600">‹</button></span>' : '<span class="w-8"></span>';
+            html += '<span class="font-semibold text-slate-700">' + year + ' ' + TH_MONTHS[month] + '</span>';
+            html += navRight ? '<span><button type="button" data-nav="1" class="px-1 hover:text-blue-600">›</button><button type="button" data-nav="12" class="px-1 hover:text-blue-600">»</button></span>' : '<span class="w-8"></span>';
+            html += '</div><div class="grid grid-cols-7 text-center text-[11px] text-slate-400 mb-1">';
+            TH_DOW.forEach(function(d) { html += '<div>' + d + '</div>'; });
+            html += '</div><div class="grid grid-cols-7 text-center text-xs">';
+            for(let i = 0; i < 42; i++) {
+                const d = new Date(startDay.getFullYear(), startDay.getMonth(), startDay.getDate() + i);
+                const t = d.getTime();
+                const inMonth = d.getMonth() === month;
+                const isEdge = inMonth && (t === s || (chatRange.end && t === e));
+                const inRange = inMonth && t > Math.min(s, e) && t < Math.max(s, e);
+                let cls = 'py-1.5 cursor-pointer ';
+                if(isEdge) cls += 'bg-blue-600 text-white font-semibold rounded ';
+                else if(inRange) cls += 'bg-blue-100 text-slate-700 ';
+                else if(!inMonth) cls += 'text-slate-300 hover:bg-slate-100 rounded ';
+                else cls += 'text-slate-700 hover:bg-slate-100 rounded ';
+                if(t > today) cls += 'opacity-40 ';
+                html += '<div class="' + cls + '" data-day="' + ymd(d) + '">' + d.getDate() + '</div>';
+            }
+            html += '</div></div>';
+            return html;
+        }
+
+        function renderChatCal() {
+            const cal = document.getElementById('lv-chat-cal');
+            const y = chatCalView.getFullYear(), m = chatCalView.getMonth();
+            const next = new Date(y, m + 1, 1);
+            let html = '<div class="flex gap-4">' + renderMonth(y, m, true, false) + '<div class="w-px bg-slate-200"></div>' + renderMonth(next.getFullYear(), next.getMonth(), false, true) + '</div>';
+            html += '<div class="flex flex-wrap gap-2 mt-3 pt-2 border-t border-slate-100 text-xs">';
+            [['วันนี้', 0], ['7 วัน', 7], ['30 วัน', 30], ['90 วัน', 90]].forEach(function(q) {
+                html += '<button type="button" data-quick="' + q[1] + '" class="px-2 py-1 rounded bg-slate-100 hover:bg-blue-100 text-slate-600">' + q[0] + '</button>';
+            });
+            html += '<span class="ml-auto text-slate-400">' + (chatPicking ? 'เลือกวันสิ้นสุด' : 'คลิกวันเริ่มต้น') + '</span></div>';
+            cal.innerHTML = html;
+        }
+
+        document.addEventListener('click', function(e) {
+            const cal = document.getElementById('lv-chat-cal');
+            if(!cal || cal.classList.contains('hidden')) return;
+            const nav = e.target.closest('[data-nav]');
+            const day = e.target.closest('[data-day]');
+            const quick = e.target.closest('[data-quick]');
+            if(nav && cal.contains(nav)) {
+                const n = parseInt(nav.getAttribute('data-nav'), 10);
+                chatCalView = new Date(chatCalView.getFullYear(), chatCalView.getMonth() + n, 1);
+                renderChatCal();
+                return;
+            }
+            if(quick && cal.contains(quick)) {
+                const n = parseInt(quick.getAttribute('data-quick'), 10);
+                const end = dayOnly(new Date());
+                chatRange = { start: new Date(end.getFullYear(), end.getMonth(), end.getDate() - n), end: end };
+                chatPicking = false;
+                updateChatRangeText();
+                cal.classList.add('hidden');
+                return;
+            }
+            if(day && cal.contains(day)) {
+                const p = day.getAttribute('data-day').split('-');
+                const d = new Date(+p[0], +p[1] - 1, +p[2]);
+                if(!chatPicking) {
+                    chatRange = { start: d, end: null };
+                    chatPicking = true;
+                    updateChatRangeText();
+                    renderChatCal();
+                } else {
+                    if(d < chatRange.start) { chatRange.end = chatRange.start; chatRange.start = d; } else { chatRange.end = d; }
+                    chatPicking = false;
+                    updateChatRangeText();
+                    cal.classList.add('hidden');
+                }
+                return;
+            }
+            if(!cal.contains(e.target) && !e.target.closest('#lv-chat-range')) {
+                if(chatPicking) { chatRange.end = chatRange.start; chatPicking = false; updateChatRangeText(); }
+                cal.classList.add('hidden');
+            }
+        });
+
+        async function searchChats() {
+            if(!currentActivePageId) return alert('กรุณาเลือกเพจก่อน');
+            initChatRange();
+            if(!chatRange.end) chatRange.end = chatRange.start;
+            const from = chatRange.start.getTime();
+            const to = new Date(chatRange.end.getFullYear(), chatRange.end.getMonth(), chatRange.end.getDate() + 1).getTime() - 1;
+            const q = document.getElementById('lv-chat-q').value.trim();
+            const onlyAddr = document.getElementById('lv-chat-onlyaddr').checked ? '1' : '0';
+            const btn = document.getElementById('lv-chat-btn');
+            const st = document.getElementById('lv-chat-status');
+            btn.disabled = true; btn.classList.add('opacity-50');
+            st.classList.remove('hidden');
+            st.innerText = '⏳ กำลังค้นหาแชท ' + ymd(chatRange.start) + ' ถึง ' + ymd(chatRange.end) + ' ...';
+            try {
+                const res = await fetch('/api/chats/search?token=' + authToken + '&pageId=' + currentActivePageId
+                    + '&from=' + from + '&to=' + to + '&onlyAddr=' + onlyAddr + '&q=' + encodeURIComponent(q));
+                const d = await res.json();
+                if(!d.success) { st.innerText = '❌ ' + d.error; return; }
+                chatResults = d.results || [];
+                chatSel = new Set(chatResults.filter(function(r) { return r.hasAddress; }).map(function(r) { return r.psid; }));
+                st.innerText = 'พบ ' + chatResults.length + ' แชท (ตรวจ ' + d.scanned + ' แชทในช่วงวันที่)' + (d.truncated ? ' · ⚠️ ผลมากเกินไป แสดงบางส่วน ลองระบุคำค้นหาหรือย่อช่วงวันที่' : '');
+                renderChatResults();
+            } catch(e) {
+                st.innerText = '❌ เกิดข้อผิดพลาดในการเชื่อมต่อเซิร์ฟเวอร์';
+            } finally {
+                btn.disabled = false; btn.classList.remove('opacity-50');
+            }
+        }
+
+        function renderChatResults() {
+            const box = document.getElementById('lv-chat-results-box');
+            const tbody = document.getElementById('lv-chat-results');
+            box.classList.toggle('hidden', !chatResults.length);
+            const inList = new Set(buyersList.map(function(b) { return b.psid; }).filter(Boolean));
+            tbody.innerHTML = chatResults.map(function(r) {
+                const added = inList.has(r.psid);
+                return '<tr data-psid="' + escapeHtml(r.psid) + '" class="border-b border-slate-100 align-top">'
+                    + '<td class="py-2 pr-2"><input type="checkbox" class="cs-sel w-4 h-4 rounded"' + (chatSel.has(r.psid) ? ' checked' : '') + '></td>'
+                    + '<td class="py-2 pr-2 font-medium text-slate-700 min-w-[8rem]">' + escapeHtml(r.name || r.psid) + (added ? '<div class="text-[10px] text-emerald-600">อยู่ในรายชื่อแล้ว</div>' : '') + '</td>'
+                    + '<td class="py-2 pr-2 text-slate-600 max-w-xs">' + escapeHtml(r.matchedText || r.snippet || '') + '</td>'
+                    + '<td class="py-2 pr-2 min-w-[14rem]">' + (r.hasAddress
+                        ? '<div class="text-slate-700">' + escapeHtml(r.recipientName || '') + (r.phone ? ' · ' + escapeHtml(r.phone) : '') + '</div><div class="text-slate-500">' + escapeHtml(r.addressPreview || '') + '</div>'
+                        : '<span class="text-slate-300">ยังไม่มีที่อยู่ในแชท</span>') + '</td>'
+                    + '<td class="py-2 text-slate-500 whitespace-nowrap">' + escapeHtml(new Date(r.updatedTime).toLocaleString('th-TH', { dateStyle: 'short', timeStyle: 'short' })) + '</td>'
+                    + '</tr>';
+            }).join('');
+            document.getElementById('lv-chat-count').innerText = '(เลือกไว้ ' + chatSel.size + ' / ' + chatResults.length + ')';
+            document.getElementById('lv-chat-all').checked = chatResults.length > 0 && chatSel.size === chatResults.length;
+        }
+
+        function toggleAllChats(on) {
+            chatSel = new Set(on ? chatResults.map(function(r) { return r.psid; }) : []);
+            renderChatResults();
+        }
+
+        document.addEventListener('change', function(e) {
+            if(!e.target.classList.contains('cs-sel')) return;
+            const tr = e.target.closest('tr[data-psid]');
+            const id = tr.getAttribute('data-psid');
+            if(e.target.checked) chatSel.add(id); else chatSel.delete(id);
+            document.getElementById('lv-chat-count').innerText = '(เลือกไว้ ' + chatSel.size + ' / ' + chatResults.length + ')';
+        });
+
+        async function addChatsToBuyers() {
+            if(!currentLiveId) return alert('กรุณาเลือก session ไลฟ์ก่อน');
+            const people = chatResults.filter(function(r) { return chatSel.has(r.psid); }).map(function(r) { return { psid: r.psid, name: r.name }; });
+            if(!people.length) return alert('กรุณาเลือกอย่างน้อย 1 คน');
+            const res = await fetch(liveUrl('/api/live/buyers/add-from-chat', '&sid=' + currentLiveId), {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ people: people })
+            });
+            const d = await res.json();
+            if(!d.success) return alert('❌ ' + d.error);
+            if(buyersPoll) clearInterval(buyersPoll);
+            buyersPoll = setInterval(function() { loadBuyers().then(renderChatResults); }, 2000);
+            await loadBuyers();
+            document.getElementById('lv-buyers').scrollIntoView({ behavior: 'smooth', block: 'start' });
         }
 
         // ช่องเลือก ตำบล › อำเภอ › จังหวัด จากรหัสไปรษณีย์
@@ -3398,6 +3644,7 @@ async function runBuyersJob(pageData, s, matched) {
       matchedCount: c.matchedCount || 0,
       lastMessage: c.lastMessage || '',
       psid: c.psid || psidMap.get(userId) || '',
+      source: c.source || (prev && prev.source) || 'comment',
       recipientName: '', address: '', phone: '', postcode: '', raw: '',
       status: 'pending', note: ''
     };
@@ -3492,6 +3739,127 @@ app.post('/api/live/buyers/fetch', checkAuth, (req, res) => {
   s.buyersJob = { running: true, total: matched.length, done: 0, found: 0, message: 'กำลังเริ่มค้นหา...', warning: '', shouldStop: false };
   res.json({ success: true, total: matched.length });
   runBuyersJob(ctx.pageData, s, matched).catch(e => {
+    s.buyersJob.running = false;
+    s.buyersJob.message = 'เกิดข้อผิดพลาด: ' + e.message;
+  });
+});
+
+// -------------------------------------------------------------
+// 💬 ค้นหารายชื่อจากแชทเพจ (ชื่อเฟสบุ๊ค / ชื่อ / ที่อยู่ / เบอร์ / ข้อความ) ตามช่วงวันที่
+// -------------------------------------------------------------
+function fbTime(t) {
+  const ms = Date.parse(String(t || '').replace(/\+0000$/, 'Z'));
+  return isNaN(ms) ? 0 : ms;
+}
+
+app.get('/api/chats/search', checkAuth, async (req, res) => {
+  const pageData = usersDB[req.userId]?.pages[req.query.pageId];
+  if (!pageData) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
+  const cfg = pageData.config;
+  if (!cfg.pageAccessToken) return res.json({ success: false, error: 'เพจนี้ยังไม่มี Page Access Token' });
+  if (!thaiAddrDb) loadThaiAddressDb();
+
+  const from = Number(req.query.from) || (Date.now() - 30 * 86400000);
+  const to = Number(req.query.to) || Date.now();
+  const qRaw = String(req.query.q || '').trim();
+  const q = compactTh(qRaw);
+  const qDigits = qRaw.replace(/\D/g, '');
+  const onlyAddr = req.query.onlyAddr === '1';
+  const pageId = cfg.pageId || req.query.pageId;
+  const started = Date.now();
+
+  const results = [];
+  let scanned = 0, truncated = false, reachedEnd = false;
+  let url = 'https://graph.facebook.com/v19.0/' + encodeURIComponent(pageId) + '/conversations';
+  let params = {
+    platform: 'messenger', limit: 50, access_token: cfg.pageAccessToken,
+    fields: 'participants,updated_time,snippet,messages.limit(25){message,from,created_time}'
+  };
+
+  try {
+    for (let pageNo = 0; url && pageNo < 40; pageNo++) {
+      if (Date.now() - started > 45000) { truncated = true; break; }
+      const r = await axios.get(url, { params, timeout: 20000 });
+      const list = r.data.data || [];
+      for (const conv of list) {
+        const updated = fbTime(conv.updated_time);
+        if (updated < from) { reachedEnd = true; break; }   // เรียงจากใหม่ไปเก่า เลยช่วงแล้วหยุด
+        if (updated > to) continue;
+        scanned++;
+        const person = (conv.participants?.data || []).find(p => String(p.id) !== String(pageId));
+        if (!person) continue;
+        const msgs = (conv.messages?.data || []).map(m => ({
+          text: m.message || '', fromId: String(m.from?.id || ''), time: fbTime(m.created_time)
+        }));
+        const customerMsgs = msgs.filter(m => m.fromId === String(person.id));
+
+        // ค้นหา: ชื่อเฟสบุ๊ค หรือข้อความในแชท (ที่อยู่ ชื่อ เบอร์)
+        let matchedText = '';
+        if (q || qDigits) {
+          const nameHit = q && compactTh(person.name).includes(q);
+          let hitMsg = null;
+          for (const m of msgs) {
+            const t = m.text || '';
+            if ((q && compactTh(t).includes(q)) || (qDigits.length >= 4 && t.replace(/\D/g, '').includes(qDigits))) { hitMsg = m; break; }
+          }
+          if (!nameHit && !hitMsg) continue;
+          matchedText = hitMsg ? hitMsg.text.slice(0, 160) : '';
+        }
+
+        const info = extractAddressInfo(customerMsgs.map(m => ({ text: m.text, time: m.time })));
+        if (onlyAddr && !info) continue;
+        let addressPreview = '';
+        if (info) {
+          const fx = smartThaiAddress(info.address, info.postcode);
+          addressPreview = (fx.ok && fx.formatted) ? fx.formatted : info.address;
+        }
+        results.push({
+          psid: String(person.id), name: person.name || '',
+          updatedTime: updated, snippet: String(conv.snippet || '').slice(0, 120),
+          matchedText, hasAddress: !!info,
+          recipientName: info?.recipientName || '', phone: info?.phone || '', addressPreview
+        });
+        if (results.length >= 500) { truncated = true; break; }
+      }
+      if (reachedEnd || truncated) break;
+      url = r.data.paging?.next || null;
+      params = undefined;
+    }
+  } catch (e) {
+    return res.json({ success: false, error: 'ค้นหาแชทไม่สำเร็จ: ' + graphErrorMessage(e) });
+  }
+  res.json({ success: true, results, scanned, truncated });
+});
+
+// ➕ เพิ่มคนที่เลือกจากผลค้นหาแชท เข้าตารางรายชื่อลูกค้าของ session แล้วค้นหาที่อยู่ให้ทันที
+app.post('/api/live/buyers/add-from-chat', checkAuth, (req, res) => {
+  const ctx = getLiveContext(req, res);
+  if (!ctx) return;
+  const s = ctx.live;
+  if (!s) return res.json({ success: false, error: 'ไม่พบ session นี้' });
+  if (s.buyersJob && s.buyersJob.running) return res.json({ success: false, error: 'กำลังค้นหาที่อยู่อยู่ กรุณารอสักครู่' });
+  if (!ctx.pageData.config.pageAccessToken) return res.json({ success: false, error: 'เพจนี้ยังไม่มี Page Access Token' });
+
+  const people = (Array.isArray(req.body.people) ? req.body.people : [])
+    .filter(p => p && p.psid).slice(0, 300);
+  if (!people.length) return res.json({ success: false, error: 'กรุณาเลือกอย่างน้อย 1 คน' });
+  if (!s.buyers) s.buyers = new Map();
+
+  // ถ้าคนนี้เคยคอมเมนต์ใน session อยู่แล้ว ใช้รายการเดิม
+  const entries = people.map(p => {
+    const psid = String(p.psid);
+    for (const [uid, c] of s.commenters.entries()) {
+      if (c.psid === psid || uid === psid) return [uid, c];
+    }
+    for (const [uid, b] of s.buyers.entries()) {
+      if (b.psid === psid) return [uid, { name: b.fbName, lastKeyword: b.keyword, matchedCount: b.matchedCount, lastMessage: b.lastMessage, psid, source: b.source }];
+    }
+    return [psid, { name: String(p.name || ''), lastKeyword: '', matchedCount: 0, lastMessage: '(เพิ่มจากแชท)', psid, source: 'chat' }];
+  });
+
+  s.buyersJob = { running: true, total: entries.length, done: 0, found: 0, message: 'กำลังค้นหาที่อยู่จากแชท...', warning: '', shouldStop: false };
+  res.json({ success: true, total: entries.length });
+  runBuyersJob(ctx.pageData, s, entries).catch(e => {
     s.buyersJob.running = false;
     s.buyersJob.message = 'เกิดข้อผิดพลาด: ' + e.message;
   });
