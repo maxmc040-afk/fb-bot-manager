@@ -172,6 +172,170 @@ function nameMatches(merchantName, slipName) {
   return a.includes(b) || b.includes(a);
 }
 
+// -------------------------------------------------------------
+// 📦 ค้นหาชื่อ ที่อยู่ เบอร์โทร จากข้อความในแชท (สำหรับทำใบแปะหน้า)
+// -------------------------------------------------------------
+const ADDR_PATTERNS = [
+  /ตำบล|ต\.\s*\S/, /อำเภอ|อ\.\s*\S/, /จังหวัด|จ\.\s*\S/, /แขวง/, /เขต/,
+  /ถนน|ถ\.\s*\S/, /ซอย|ซ\.\s*\S/, /หมู่\s*\d|หมู่ที่|ม\.\s*\d/, /บ้านเลขที่|เลขที่/,
+  /\d+\/\d+/, /หมู่บ้าน|คอนโด|อาคาร|อพาร์ท|ห้องเลขที่/
+];
+const PHONE_RE = /(?<!\d)(?:\+?66[ -]?|0)\d(?:[ -]?\d){7,8}(?!\d)/;
+const PHONE_RE_G = new RegExp(PHONE_RE.source, 'g');
+const POSTCODE_RE = /(?<!\d)[1-9]\d{4}(?!\d)/g;
+const CHAT_WORDS = /สลิป|โอน|ขอบคุณ|สนใจ|ราคา|เท่าไหร่|ไหม|มั้ย|\?|ค่ะ$|ครับ$|คะ$|จ้า|นะ/;
+const LABEL_RE = /^(ชื่อ\s*-?\s*(สกุล|นามสกุล)?\s*(ผู้รับ)?|ผู้รับ|ที่อยู่\s*(จัดส่ง|ผู้รับ)?|ส่งที่|name|address)\s*[:：\-]?\s*/i;
+
+function stripPhones(t) { return String(t || '').replace(PHONE_RE_G, ' '); }
+
+function hasAddressSignal(t) {
+  const text = String(t || '');
+  if (PHONE_RE.test(text)) return true;
+  if ((stripPhones(text).match(POSTCODE_RE) || []).length) return true;
+  return ADDR_PATTERNS.some(re => re.test(text));
+}
+
+function scoreAddressText(t) {
+  const text = String(t || '');
+  if (!text.trim()) return 0;
+  let score = 0;
+  if (PHONE_RE.test(text)) score += 2;
+  if ((stripPhones(text).match(POSTCODE_RE) || []).length) score += 3;
+  for (const re of ADDR_PATTERNS) if (re.test(text)) score++;
+  if (text.length >= 25) score++;
+  return score;
+}
+
+function isNameLike(s) {
+  const t = String(s || '').trim();
+  if (t.length < 2 || t.length > 45) return false;
+  if (/\d/.test(t)) return false;
+  if (CHAT_WORDS.test(t)) return false;
+  return !ADDR_PATTERNS.some(re => re.test(t));
+}
+
+function parseAddressBlock(texts, nameHint) {
+  const full = texts.join('\n');
+  const phoneM = full.match(PHONE_RE);
+  let phone = phoneM ? phoneM[0].replace(/\D/g, '') : '';
+  if (phone.startsWith('66')) phone = '0' + phone.slice(2);
+  const pcs = stripPhones(full).match(POSTCODE_RE) || [];
+  const postcode = pcs.length ? pcs[pcs.length - 1] : '';
+
+  let lines = full.split(/\n+/)
+    .map(l => stripPhones(l).replace(LABEL_RE, '')
+      .replace(/(เบอร์โทรศัพท์|เบอร์โทร|เบอร์|โทร\.?|tel\.?)\s*[:：]?\s*$/i, '')
+      .replace(/\s{2,}/g, ' ').trim())
+    .filter(l => l && !/^[\s,.:\-]*$/.test(l));
+
+  let recipientName = '';
+  if (lines.length > 1 && isNameLike(lines[0])) {
+    recipientName = lines.shift();
+  } else if (lines.length >= 1) {
+    // กรณีพิมพ์ชื่อกับที่อยู่ในบรรทัดเดียว เช่น "สมชาย ใจดี 12/3 ม.4 ต.หาดใหญ่ ..."
+    const m = lines[0].match(/^([^\d]{3,40}?)\s+(?=\d)/);
+    if (m && isNameLike(m[1])) {
+      recipientName = m[1].trim();
+      lines[0] = lines[0].slice(m[0].length).trim();
+    }
+  }
+  if (!recipientName && nameHint && isNameLike(nameHint)) recipientName = String(nameHint).trim();
+
+  return { recipientName, address: lines.filter(Boolean).join(' '), phone, postcode, raw: full.slice(0, 1500) };
+}
+
+// msgs: [{ text, time }] เฉพาะข้อความที่ลูกค้าพิมพ์มา
+function extractAddressInfo(msgs) {
+  const list = (msgs || []).filter(m => m.text && String(m.text).trim()).sort((a, b) => a.time - b.time);
+  if (!list.length) return null;
+
+  // จัดกลุ่มข้อความที่ส่งติดๆ กัน (ห่างกันไม่เกิน 10 นาที) เพราะลูกค้ามักพิมพ์ชื่อ/ที่อยู่/เบอร์แยกข้อความ
+  const blocks = [];
+  let cur = null;
+  for (const m of list) {
+    if (cur && m.time - cur[cur.length - 1].time <= 10 * 60 * 1000) cur.push(m);
+    else { cur = [m]; blocks.push(cur); }
+  }
+
+  // เลือกกลุ่มล่าสุดที่ดูเป็นที่อยู่ (ลูกค้าอาจเปลี่ยนที่อยู่ ใช้อันใหม่สุด)
+  let best = null;
+  for (const b of blocks) {
+    const keptIdx = [];
+    b.forEach((m, i) => { if (hasAddressSignal(m.text)) keptIdx.push(i); });
+    if (!keptIdx.length) continue;
+    const text = keptIdx.map(i => b[i].text).join('\n');
+    if (scoreAddressText(text) >= 4) best = { block: b, keptIdx };
+  }
+  if (!best) return null;
+
+  const first = best.keptIdx[0];
+  const prevMsg = first > 0 ? best.block[first - 1].text : '';
+  const nameHint = isNameLike(prevMsg) ? prevMsg : '';
+  return parseAddressBlock(best.keptIdx.map(i => best.block[i].text), nameHint);
+}
+
+function normName(n) { return String(n || '').toLowerCase().replace(/\s+/g, ''); }
+
+function getInboxLog(pageData) {
+  if (!pageData.inboxLog) pageData.inboxLog = new Map();
+  return pageData.inboxLog;
+}
+
+function getPsidMap(pageData) {
+  if (!pageData.psidMap) pageData.psidMap = new Map(); // feed user id -> Messenger PSID
+  return pageData.psidMap;
+}
+
+function logInboxText(pageData, psid, text) {
+  const log = getInboxLog(pageData);
+  const arr = log.get(psid) || [];
+  arr.push({ text: String(text).slice(0, 1000), time: Date.now() });
+  if (arr.length > 50) arr.splice(0, arr.length - 50);
+  log.set(psid, arr);
+}
+
+async function fetchConversationMessages(pageId, token, psid) {
+  const r = await axios.get('https://graph.facebook.com/v19.0/' + encodeURIComponent(pageId) + '/conversations', {
+    params: {
+      user_id: psid,
+      platform: 'messenger',
+      fields: 'participants,messages.limit(50){message,from,created_time}',
+      access_token: token
+    },
+    timeout: 15000
+  });
+  const conv = (r.data.data || [])[0];
+  if (!conv) return null;
+  return {
+    participants: conv.participants?.data || [],
+    messages: (conv.messages?.data || []).map(m => ({
+      text: m.message || '',
+      fromId: m.from?.id ? String(m.from.id) : '',
+      time: new Date(m.created_time).getTime() || 0
+    }))
+  };
+}
+
+// สร้างดัชนี ชื่อ -> PSID จากรายการแชทของเพจ (ใช้เมื่อไม่รู้ PSID ของคนคอมเมนต์)
+async function buildConversationIndex(pageId, token) {
+  const index = new Map();
+  let url = 'https://graph.facebook.com/v19.0/' + encodeURIComponent(pageId) + '/conversations';
+  let params = { platform: 'messenger', fields: 'participants', limit: 100, access_token: token };
+  for (let i = 0; i < 10 && url; i++) {
+    const r = await axios.get(url, { params, timeout: 15000 });
+    for (const conv of r.data.data || []) {
+      for (const p of conv.participants?.data || []) {
+        if (String(p.id) !== String(pageId) && p.name && !index.has(normName(p.name))) {
+          index.set(normName(p.name), String(p.id));
+        }
+      }
+    }
+    url = r.data.paging?.next || null;
+    params = undefined; // ลิงก์ next มี token และพารามิเตอร์อยู่แล้ว
+  }
+  return index;
+}
+
 function checkAuth(req, res, next) {
   const token = req.headers['authorization'] || req.query.token;
   if (token && sessions[token]) {
@@ -517,6 +681,46 @@ app.get('/', (req, res) => {
                             </div>
                         </div>
 
+                        <!-- 📦 รายชื่อลูกค้า + ที่อยู่จากแชท สำหรับใบแปะหน้า -->
+                        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
+                            <div class="flex flex-wrap items-start justify-between gap-3">
+                                <div class="min-w-0">
+                                    <h3 class="text-base font-bold text-slate-700">📦 รายชื่อลูกค้า (คนที่กดตามคำดัก) + ที่อยู่จากแชท</h3>
+                                    <p class="text-xs text-slate-500 mt-1">ดึงคนที่คอมเมนต์ตรงคำดักใน session นี้ แล้วค้นหาชื่อ ที่อยู่ เบอร์โทร ที่ลูกค้าพิมพ์ส่งมาในแชท แก้ไขข้อมูลในตารางได้ (บันทึกอัตโนมัติ) ก่อนพิมพ์ใบแปะหน้า</p>
+                                </div>
+                                <div class="flex flex-wrap gap-2">
+                                    <button type="button" id="lv-btn-buyers" onclick="fetchBuyers()" class="px-4 py-2 text-xs font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm">🔍 ดึงรายชื่อ + ค้นหาที่อยู่</button>
+                                    <button type="button" onclick="exportBuyersCSV()" class="px-4 py-2 text-xs font-semibold rounded-lg bg-slate-100 text-slate-700 hover:bg-slate-200">⬇️ ดาวน์โหลด CSV</button>
+                                    <button type="button" onclick="printLabels()" class="px-4 py-2 text-xs font-semibold rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm">🖨️ พิมพ์ใบแปะหน้า</button>
+                                </div>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-3 bg-slate-50 p-4 rounded-xl border border-slate-200">
+                                <div><label class="text-xs font-semibold text-slate-600 block mb-1">ชื่อผู้ส่ง (บนใบแปะหน้า):</label><input type="text" id="lv-sender-name" class="w-full p-2 text-sm border border-slate-200 rounded-lg bg-white"></div>
+                                <div><label class="text-xs font-semibold text-slate-600 block mb-1">ที่อยู่ / เบอร์ผู้ส่ง:</label><input type="text" id="lv-sender-addr" class="w-full p-2 text-sm border border-slate-200 rounded-lg bg-white"></div>
+                                <div><label class="text-xs font-semibold text-slate-600 block mb-1">ขนาดใบแปะหน้า:</label>
+                                    <select id="lv-label-size" class="w-full p-2 text-sm border border-slate-200 rounded-lg bg-white">
+                                        <option value="a4-8">A4 (8 ใบต่อหน้า)</option>
+                                        <option value="a4-4">A4 (4 ใบต่อหน้า)</option>
+                                        <option value="100x150">สติกเกอร์ 100x150 มม. (1 ใบต่อแผ่น)</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div id="lv-buyers-progress" class="hidden text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-xl p-3"></div>
+                            <div class="flex flex-wrap items-center gap-4 text-xs text-slate-600">
+                                <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" id="lv-buyers-all" onchange="toggleAllBuyers(this.checked)" class="w-4 h-4 rounded"> เลือกทั้งหมด</label>
+                                <span id="lv-buyers-summary"></span>
+                            </div>
+                            <div class="overflow-auto max-h-[36rem]">
+                                <table class="w-full text-xs">
+                                    <thead class="text-left text-slate-500 border-b border-slate-200"><tr>
+                                        <th class="py-2 pr-2">✓</th><th class="py-2 pr-2">ลูกค้า (เฟส)</th><th class="py-2 pr-2">คำดัก</th><th class="py-2 pr-2 text-right">ยอดโอน</th>
+                                        <th class="py-2 pr-2">ชื่อผู้รับ</th><th class="py-2 pr-2">ที่อยู่</th><th class="py-2 pr-2">รหัส ปณ.</th><th class="py-2 pr-2">เบอร์โทร</th><th class="py-2">สถานะ</th>
+                                    </tr></thead>
+                                    <tbody id="lv-buyers"><tr><td colspan="9" class="py-3 text-slate-400">กด "ดึงรายชื่อ + ค้นหาที่อยู่" เพื่อเริ่ม</td></tr></tbody>
+                                </table>
+                            </div>
+                        </div>
+
                         <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
                             <h3 class="text-base font-bold text-slate-700">🚀 บรอดแคสต์เฉพาะคนใน session นี้</h3>
                             <textarea id="lv-bc-message" rows="3" class="w-full p-3 text-sm border border-slate-200 rounded-xl focus:outline-none focus:border-blue-500" placeholder="พิมพ์ข้อความ..."></textarea>
@@ -550,7 +754,7 @@ app.get('/', (req, res) => {
                         
                         <div class="flex items-center gap-4 pt-2">
                             <button type="button" onclick="loginWithFacebook()" class="px-6 py-3 bg-blue-600 text-white font-medium text-sm rounded-xl hover:bg-blue-700 shadow-md flex items-center gap-2 cursor-pointer">
-                                <svg class="w-5 h-5 fill-current" viewBox="0 0 24 24"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg>
+                                <svg class="w-5 h-5 fill-current" viewBox="0 0 24 24"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.830c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.470h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg>
                                 <span>เข้าสู่ระบบด้วย Facebook เพื่อดึงเพจ</span>
                             </button>
                         </div>
@@ -719,6 +923,7 @@ app.get('/', (req, res) => {
         async function switchActivePage(pageId) {
             currentActivePageId = pageId;
             currentLiveId = '';
+            resetBuyers();
             document.getElementById('live-detail').classList.add('hidden');
             loadLiveList();
             loadConfigForActivePage();
@@ -808,6 +1013,8 @@ app.get('/', (req, res) => {
             const isExact = currentConfig.matchType === 'exact';
             document.getElementById('btn-exact').className = isExact ? "px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-600 text-white" : "px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-100 text-slate-600";
             document.getElementById('btn-contains').className = !isExact ? "px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-600 text-white" : "px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-100 text-slate-600";
+
+            loadSenderInfo();
         }
 
         function loginWithFacebook() {
@@ -1075,7 +1282,9 @@ app.get('/', (req, res) => {
         }
 
         async function selectLiveSession(sid) {
+            const changed = sid !== currentLiveId;
             currentLiveId = sid;
+            if(changed) { resetBuyers(); loadBuyers(); }
             await loadLiveDetail(true);
             loadLiveList();
         }
@@ -1221,6 +1430,7 @@ app.get('/', (req, res) => {
             if(!confirm('ลบ session นี้พร้อมข้อมูลคอมเมนต์และสลิปทั้งหมด?')) return;
             await fetch(liveUrl('/api/live/delete', '&sid=' + currentLiveId), { method: 'POST' });
             currentLiveId = '';
+            resetBuyers();
             document.getElementById('live-detail').classList.add('hidden');
             loadLiveList();
         }
@@ -1250,6 +1460,261 @@ app.get('/', (req, res) => {
             if(!currentLiveId) return;
             await fetch(liveUrl('/api/live/broadcast/stop', '&sid=' + currentLiveId), { method: 'POST' });
             loadLiveDetail(false);
+        }
+
+        // ============ 📦 รายชื่อลูกค้า + ที่อยู่ + ใบแปะหน้า ============
+        const NL = String.fromCharCode(10);
+        let buyersList = [];
+        let buyersPoll = null;
+        let buyersSelected = new Set();
+        let buyersSeen = new Set();
+        const BUYER_STATUS = {
+            found: ['พบที่อยู่', 'bg-emerald-100 text-emerald-700'],
+            manual: ['แก้ไขเองแล้ว', 'bg-blue-100 text-blue-700'],
+            notfound: ['ไม่พบที่อยู่ในแชท', 'bg-amber-100 text-amber-700'],
+            nochat: ['ไม่พบแชท', 'bg-rose-100 text-rose-700'],
+            error: ['ผิดพลาด', 'bg-rose-100 text-rose-700'],
+            pending: ['รอค้นหา', 'bg-slate-200 text-slate-600']
+        };
+
+        function loadSenderInfo() {
+            const n = document.getElementById('lv-sender-name');
+            const a = document.getElementById('lv-sender-addr');
+            const key = 'label_sender_' + currentActivePageId;
+            let saved = {};
+            try { saved = JSON.parse(localStorage.getItem(key) || '{}'); } catch(e) {}
+            n.value = saved.name || currentConfig.merchantName || '';
+            a.value = saved.addr || '';
+        }
+
+        function saveSenderInfo() {
+            try {
+                localStorage.setItem('label_sender_' + currentActivePageId, JSON.stringify({
+                    name: document.getElementById('lv-sender-name').value,
+                    addr: document.getElementById('lv-sender-addr').value
+                }));
+            } catch(e) {}
+        }
+
+        function resetBuyers() {
+            if(buyersPoll) { clearInterval(buyersPoll); buyersPoll = null; }
+            buyersList = [];
+            buyersSelected = new Set();
+            buyersSeen = new Set();
+            document.getElementById('lv-buyers').innerHTML = '<tr><td colspan="9" class="py-3 text-slate-400">กด "ดึงรายชื่อ + ค้นหาที่อยู่" เพื่อเริ่ม</td></tr>';
+            document.getElementById('lv-buyers-progress').classList.add('hidden');
+            document.getElementById('lv-buyers-summary').innerText = '';
+            document.getElementById('lv-buyers-all').checked = false;
+        }
+
+        async function fetchBuyers() {
+            if(!currentLiveId) return;
+            const res = await fetch(liveUrl('/api/live/buyers/fetch', '&sid=' + currentLiveId), { method: 'POST' });
+            const d = await res.json();
+            if(!d.success) return alert('❌ ' + d.error);
+            if(buyersPoll) clearInterval(buyersPoll);
+            buyersPoll = setInterval(loadBuyers, 2000);
+            loadBuyers();
+        }
+
+        async function loadBuyers() {
+            if(!currentLiveId) return;
+            const sid = currentLiveId;
+            try {
+                const res = await fetch(liveUrl('/api/live/buyers', '&sid=' + sid));
+                const d = await res.json();
+                if(!d.success || sid !== currentLiveId) return;
+                const job = d.job;
+                const prog = document.getElementById('lv-buyers-progress');
+                const btn = document.getElementById('lv-btn-buyers');
+                if(job && (job.running || job.message)) {
+                    prog.classList.remove('hidden');
+                    prog.innerText = (job.running ? '⏳ ' : '') + job.message + ' (' + job.done + '/' + job.total + ')' + (job.warning ? ' · ⚠️ ' + job.warning : '');
+                } else {
+                    prog.classList.add('hidden');
+                }
+                btn.disabled = !!(job && job.running);
+                btn.classList.toggle('opacity-50', !!(job && job.running));
+                if(!(job && job.running) && buyersPoll) { clearInterval(buyersPoll); buyersPoll = null; }
+
+                buyersList = d.buyers || [];
+                buyersList.forEach(function(b) {
+                    if(!buyersSeen.has(b.userId) && b.status !== 'pending') {
+                        buyersSeen.add(b.userId);
+                        if(b.address) buyersSelected.add(b.userId);
+                    }
+                });
+                const tbody = document.getElementById('lv-buyers');
+                if(!tbody.contains(document.activeElement)) renderBuyers();
+                else updateBuyersSummary();
+            } catch(e) { console.error(e); }
+        }
+
+        function renderBuyers() {
+            const tbody = document.getElementById('lv-buyers');
+            if(!buyersList.length) {
+                tbody.innerHTML = '<tr><td colspan="9" class="py-3 text-slate-400">ยังไม่มีข้อมูล กด "ดึงรายชื่อ + ค้นหาที่อยู่"</td></tr>';
+                updateBuyersSummary();
+                return;
+            }
+            let html = '';
+            buyersList.forEach(function(b) {
+                const st = BUYER_STATUS[b.status] || BUYER_STATUS.pending;
+                const inp = 'w-full p-1.5 text-xs border border-slate-200 rounded-md focus:outline-none focus:border-indigo-400';
+                html += '<tr data-uid="' + escapeHtml(b.userId) + '" class="border-b border-slate-100 align-top">'
+                    + '<td class="py-2 pr-2"><input type="checkbox" class="bf-sel w-4 h-4 rounded"' + (buyersSelected.has(b.userId) ? ' checked' : '') + '></td>'
+                    + '<td class="py-2 pr-2 font-medium text-slate-700 min-w-[7rem]">' + escapeHtml(b.fbName || b.userId) + '<div class="text-[10px] text-slate-400 font-normal">' + escapeHtml(b.lastMessage || '') + '</div></td>'
+                    + '<td class="py-2 pr-2 text-blue-600 font-semibold whitespace-nowrap">' + escapeHtml(b.keyword || '') + ' ×' + (b.matchedCount || 0) + '</td>'
+                    + '<td class="py-2 pr-2 text-right text-emerald-600 font-semibold whitespace-nowrap">' + (b.slipTotal ? fmtMoney(b.slipTotal) : '-') + '</td>'
+                    + '<td class="py-2 pr-2 min-w-[8rem]"><input type="text" class="bf-name ' + inp + '" value="' + escapeHtml(b.recipientName || '') + '"></td>'
+                    + '<td class="py-2 pr-2 min-w-[16rem]"><textarea rows="2" class="bf-addr ' + inp + '">' + escapeHtml(b.address || '') + '</textarea>'
+                    + (b.raw ? '<details class="text-[10px] text-slate-400 mt-1"><summary class="cursor-pointer">ข้อความต้นฉบับ</summary><div class="whitespace-pre-wrap">' + escapeHtml(b.raw) + '</div></details>' : '')
+                    + '</td>'
+                    + '<td class="py-2 pr-2 w-20"><input type="text" class="bf-post ' + inp + '" value="' + escapeHtml(b.postcode || '') + '"></td>'
+                    + '<td class="py-2 pr-2 w-28"><input type="text" class="bf-phone ' + inp + '" value="' + escapeHtml(b.phone || '') + '"></td>'
+                    + '<td class="py-2"><span class="text-[10px] px-2 py-0.5 rounded-full font-semibold whitespace-nowrap ' + st[1] + '">' + st[0] + '</span>'
+                    + (b.note ? '<div class="text-[10px] text-slate-400 mt-1">' + escapeHtml(b.note) + '</div>' : '') + '</td>'
+                    + '</tr>';
+            });
+            tbody.innerHTML = html;
+            updateBuyersSummary();
+        }
+
+        function updateBuyersSummary() {
+            const found = buyersList.filter(function(b) { return b.address; }).length;
+            document.getElementById('lv-buyers-summary').innerText = 'ทั้งหมด ' + buyersList.length + ' คน · มีที่อยู่ ' + found + ' คน · เลือกไว้ ' + buyersSelected.size + ' คน';
+            document.getElementById('lv-buyers-all').checked = buyersList.length > 0 && buyersSelected.size === buyersList.length;
+        }
+
+        function toggleAllBuyers(on) {
+            buyersSelected = new Set(on ? buyersList.map(function(b) { return b.userId; }) : []);
+            document.querySelectorAll('#lv-buyers .bf-sel').forEach(function(cb) { cb.checked = on; });
+            updateBuyersSummary();
+        }
+
+        function readBuyerRow(tr) {
+            return {
+                userId: tr.getAttribute('data-uid'),
+                recipientName: tr.querySelector('.bf-name').value.trim(),
+                address: tr.querySelector('.bf-addr').value.trim(),
+                postcode: tr.querySelector('.bf-post').value.trim(),
+                phone: tr.querySelector('.bf-phone').value.trim()
+            };
+        }
+
+        document.addEventListener('change', async function(e) {
+            const tr = e.target.closest('#lv-buyers tr[data-uid]');
+            if(!tr) {
+                if(e.target.id === 'lv-sender-name' || e.target.id === 'lv-sender-addr') saveSenderInfo();
+                return;
+            }
+            const uid = tr.getAttribute('data-uid');
+            if(e.target.classList.contains('bf-sel')) {
+                if(e.target.checked) buyersSelected.add(uid); else buyersSelected.delete(uid);
+                updateBuyersSummary();
+                return;
+            }
+            const row = readBuyerRow(tr);
+            const item = buyersList.find(function(b) { return b.userId === uid; });
+            if(item) Object.assign(item, row, { status: 'manual' });
+            try {
+                await fetch(liveUrl('/api/live/buyers/update', '&sid=' + currentLiveId), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(row)
+                });
+            } catch(err) { console.error(err); }
+        });
+
+        function getSelectedBuyers() {
+            const out = [];
+            document.querySelectorAll('#lv-buyers tr[data-uid]').forEach(function(tr) {
+                const uid = tr.getAttribute('data-uid');
+                if(!buyersSelected.has(uid)) return;
+                const b = buyersList.find(function(x) { return x.userId === uid; }) || {};
+                out.push(Object.assign({}, b, readBuyerRow(tr)));
+            });
+            return out;
+        }
+
+        function exportBuyersCSV() {
+            const list = getSelectedBuyers();
+            if(!list.length) return alert('กรุณาเลือกลูกค้าอย่างน้อย 1 คน');
+            const q = function(v) { return '"' + String(v == null ? '' : v).split('"').join('""') + '"'; };
+            const rows = [['ชื่อเฟส', 'ชื่อผู้รับ', 'ที่อยู่', 'รหัสไปรษณีย์', 'เบอร์โทร', 'ยอดโอน', 'คำดัก', 'จำนวนครั้ง']];
+            list.forEach(function(b) {
+                rows.push([b.fbName, b.recipientName || b.fbName, b.address, b.postcode, b.phone, b.slipTotal || 0, b.keyword, b.matchedCount]);
+            });
+            const csv = String.fromCharCode(65279) + rows.map(function(r) { return r.map(q).join(','); }).join(String.fromCharCode(13, 10));
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = 'customers-' + (document.getElementById('live-name-input').value || 'live') + '.csv';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+        }
+
+        function printLabels() {
+            const list = getSelectedBuyers();
+            if(!list.length) return alert('กรุณาเลือกลูกค้าอย่างน้อย 1 คน');
+            const missing = list.filter(function(b) { return !b.address; }).length;
+            if(missing && !confirm('มี ' + missing + ' คนที่ยังไม่มีที่อยู่ พิมพ์ต่อหรือไม่?')) return;
+            saveSenderInfo();
+
+            const size = document.getElementById('lv-label-size').value;
+            const senderName = escapeHtml(document.getElementById('lv-sender-name').value);
+            const senderAddr = escapeHtml(document.getElementById('lv-sender-addr').value);
+            const br = function(s) { return escapeHtml(s || '').split(NL).join('<br>'); };
+
+            let pageCss, labelCss, gridCss;
+            if(size === '100x150') {
+                pageCss = '@page { size: 100mm 150mm; margin: 4mm; }';
+                gridCss = '.grid { display: block; }';
+                labelCss = '.label { height: 138mm; page-break-after: always; }';
+            } else if(size === 'a4-4') {
+                pageCss = '@page { size: A4; margin: 8mm; }';
+                gridCss = '.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4mm; }';
+                labelCss = '.label { height: 136mm; }';
+            } else {
+                pageCss = '@page { size: A4; margin: 8mm; }';
+                gridCss = '.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4mm; }';
+                labelCss = '.label { height: 66mm; } .label .rname { font-size: 15px; } .label .raddr { font-size: 13px; }';
+            }
+
+            let body = '';
+            list.forEach(function(b) {
+                body += '<div class="label">'
+                    + '<div class="sender"><b>ผู้ส่ง:</b> ' + senderName + (senderAddr ? ' · ' + senderAddr : '') + '</div>'
+                    + '<div class="recv"><div class="tag">ผู้รับ</div>'
+                    + '<div class="rname">' + escapeHtml(b.recipientName || b.fbName || '') + '</div>'
+                    + '<div class="raddr">' + br(b.address) + '</div>'
+                    + '<div class="rfoot"><span class="phone">' + (b.phone ? 'โทร ' + escapeHtml(b.phone) : '') + '</span>'
+                    + '<span class="post">' + escapeHtml(b.postcode || '') + '</span></div></div>'
+                    + '<div class="meta">' + escapeHtml(b.fbName || '') + ' · ' + escapeHtml(b.keyword || '') + ' ×' + (b.matchedCount || 0) + (b.slipTotal ? ' · ' + fmtMoney(b.slipTotal) + ' บาท' : '') + '</div>'
+                    + '</div>';
+            });
+
+            const css = pageCss + gridCss + labelCss
+                + 'body { font-family: Sarabun, sans-serif; margin: 0; color: #111; }'
+                + '.label { box-sizing: border-box; border: 1.5px dashed #444; padding: 3.5mm 4mm; break-inside: avoid; display: flex; flex-direction: column; overflow: hidden; }'
+                + '.sender { font-size: 11px; color: #333; border-bottom: 1px solid #ccc; padding-bottom: 2mm; }'
+                + '.recv { flex: 1; padding-top: 2mm; display: flex; flex-direction: column; }'
+                + '.tag { font-size: 11px; font-weight: 700; color: #555; }'
+                + '.rname { font-size: 18px; font-weight: 700; margin: 1mm 0; }'
+                + '.raddr { font-size: 15px; line-height: 1.35; flex: 1; }'
+                + '.rfoot { display: flex; justify-content: space-between; align-items: flex-end; font-size: 14px; font-weight: 600; }'
+                + '.post { font-size: 22px; font-weight: 700; letter-spacing: 3px; border: 1.5px solid #111; padding: 0 2mm; }'
+                + '.meta { font-size: 10px; color: #777; margin-top: 1mm; }';
+
+            const w = window.open('', '_blank');
+            if(!w) return alert('เบราว์เซอร์บล็อกหน้าต่างใหม่ กรุณาอนุญาต pop-up แล้วลองอีกครั้ง');
+            w.document.open();
+            w.document.write('<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><title>ใบแปะหน้า</title>'
+                + '<link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600;700&display=swap" rel="stylesheet">'
+                + '<style>' + css + '</style></head><body><div class="grid">' + body + '</div></body></html>');
+            w.document.close();
+            setTimeout(function() { w.focus(); w.print(); }, 800);
         }
         // =========================================================
 
@@ -1467,6 +1932,8 @@ app.post('/api/user/add-page', checkAuth, async (req, res) => {
     subscribers: new Set(),
     usedSlips: new Set(),
     liveSessions: {},
+    inboxLog: new Map(),
+    psidMap: new Map(),
     broadcastStatus: { isBroadcasting: false, total: 0, current: 0, success: 0, failed: 0, statusMessage: 'พร้อมใช้งาน', shouldStop: false }
   };
 
@@ -1660,12 +2127,20 @@ function findLiveSessionForComment(pageData, postId, videoId) {
   return manual[0] || null;
 }
 
+// หาข้อมูลคนคอมเมนต์จาก ID ผู้ส่งในแชท (PSID) ซึ่งอาจไม่ตรงกับ ID ในคอมเมนต์
+function findCommenterBySender(s, senderId) {
+  const direct = s.commenters.get(senderId);
+  if (direct) return direct;
+  for (const c of s.commenters.values()) if (c.psid === senderId) return c;
+  return null;
+}
+
 // หา session ของลูกค้าที่ส่งสลิป: session ล่าสุดที่เขาเคยคอมเมนต์ ถ้าไม่เจอใช้ session ที่ active ล่าสุด
 function findLiveSessionForSender(pageData, senderId) {
   const all = Object.values(getLiveSessions(pageData));
   let best = null, bestTime = 0;
   for (const s of all) {
-    const c = s.commenters.get(senderId);
+    const c = findCommenterBySender(s, senderId);
     if (c && c.lastTime > bestTime) { best = s; bestTime = c.lastTime; }
   }
   if (best) return best;
@@ -1746,6 +2221,8 @@ app.post('/api/live/create', checkAuth, (req, res) => {
     stats: { comments: 0, matched: 0 },
     commenters: new Map(),
     slips: [],
+    buyers: new Map(),
+    buyersJob: null,
     broadcastStatus: { isBroadcasting: false, total: 0, current: 0, success: 0, failed: 0, statusMessage: 'พร้อมใช้งาน', shouldStop: false }
   };
   res.json({ success: true, id });
@@ -1819,7 +2296,150 @@ app.post('/api/live/delete', checkAuth, (req, res) => {
   if (!ctx) return;
   if (!ctx.live) return res.json({ success: false, error: 'ไม่พบ session นี้' });
   ctx.live.broadcastStatus.shouldStop = true;
+  if (ctx.live.buyersJob) ctx.live.buyersJob.shouldStop = true;
   delete getLiveSessions(ctx.pageData)[req.query.sid];
+  res.json({ success: true });
+});
+
+// -------------------------------------------------------------
+// 5.6 📦 ดึงรายชื่อลูกค้า (คนที่คอมเมนต์ตรงคำดัก) + ค้นหาชื่อที่อยู่จากแชท
+// -------------------------------------------------------------
+async function runBuyersJob(pageData, s, matched) {
+  const job = s.buyersJob;
+  const cfg = pageData.config;
+  const pageId = cfg.pageId;
+  const token = cfg.pageAccessToken;
+  const psidMap = getPsidMap(pageData);
+  const inboxLog = getInboxLog(pageData);
+  let convIndex = null;
+
+  for (const [userId, c] of matched) {
+    if (job.shouldStop) break;
+    job.message = 'กำลังค้นหาที่อยู่ของ ' + (c.name || userId);
+
+    const prev = s.buyers.get(userId);
+    const item = {
+      userId,
+      fbName: c.name || '',
+      keyword: c.lastKeyword || '',
+      matchedCount: c.matchedCount || 0,
+      lastMessage: c.lastMessage || '',
+      psid: c.psid || psidMap.get(userId) || '',
+      recipientName: '', address: '', phone: '', postcode: '', raw: '',
+      status: 'pending', note: ''
+    };
+
+    // ลูกค้าที่แอดมินแก้ไขข้อมูลเองแล้ว ไม่เขียนทับ อัปเดตเฉพาะจำนวนครั้ง/คำดัก
+    if (prev && prev.status === 'manual') {
+      Object.assign(prev, { fbName: item.fbName || prev.fbName, keyword: item.keyword, matchedCount: item.matchedCount, lastMessage: item.lastMessage });
+      job.done++;
+      if (prev.address) job.found++;
+      continue;
+    }
+
+    try {
+      if (!item.psid && inboxLog.has(userId)) item.psid = userId;
+      if (!item.psid && item.fbName) {
+        if (!convIndex) {
+          try { convIndex = await buildConversationIndex(pageId, token); }
+          catch (e) { convIndex = new Map(); job.warning = 'ดึงรายการแชทไม่สำเร็จ: ' + graphErrorMessage(e); }
+        }
+        item.psid = convIndex.get(normName(item.fbName)) || '';
+      }
+
+      if (!item.psid) {
+        item.status = 'nochat';
+        item.note = 'ไม่พบแชทของลูกค้าคนนี้ (ลูกค้าอาจยังไม่ได้ทักแชท)';
+      } else {
+        if (!c.psid) c.psid = item.psid;
+        psidMap.set(userId, item.psid);
+
+        let msgs = [];
+        try {
+          const conv = await fetchConversationMessages(pageId, token, item.psid);
+          if (conv) msgs = conv.messages.filter(m => m.fromId === String(item.psid));
+        } catch (e) {
+          item.note = 'อ่านแชทจาก Facebook ไม่สำเร็จ: ' + graphErrorMessage(e);
+        }
+        // สำรอง: ใช้ข้อความที่ระบบเก็บไว้จาก Webhook
+        if (!msgs.length) msgs = (inboxLog.get(item.psid) || []).map(m => ({ text: m.text, time: m.time }));
+
+        const info = extractAddressInfo(msgs);
+        if (info) {
+          Object.assign(item, info);
+          if (!item.recipientName) item.recipientName = item.fbName;
+          item.status = 'found';
+          job.found++;
+        } else {
+          item.status = msgs.length ? 'notfound' : 'nochat';
+          if (!item.note) item.note = msgs.length ? 'ยังไม่พบข้อความที่เป็นที่อยู่' : 'ไม่พบข้อความในแชท';
+        }
+      }
+    } catch (e) {
+      item.status = 'error';
+      item.note = e.message;
+    }
+
+    s.buyers.set(userId, item);
+    job.done++;
+    await sleep(250);
+  }
+
+  job.running = false;
+  job.message = job.shouldStop ? 'หยุดการค้นหาแล้ว' : ('เสร็จสิ้น: มีที่อยู่ ' + job.found + ' จาก ' + job.total + ' คน');
+}
+
+app.post('/api/live/buyers/fetch', checkAuth, (req, res) => {
+  const ctx = getLiveContext(req, res);
+  if (!ctx) return;
+  const s = ctx.live;
+  if (!s) return res.json({ success: false, error: 'ไม่พบ session นี้' });
+  if (s.buyersJob && s.buyersJob.running) return res.json({ success: false, error: 'กำลังค้นหาอยู่ กรุณารอสักครู่' });
+  if (!ctx.pageData.config.pageAccessToken) return res.json({ success: false, error: 'เพจนี้ยังไม่มี Page Access Token' });
+
+  const matched = Array.from(s.commenters.entries()).filter(([, c]) => c.matchedCount > 0);
+  if (!matched.length) return res.json({ success: false, error: 'ยังไม่มีคนที่คอมเมนต์ตรงคำดักใน session นี้' });
+
+  if (!s.buyers) s.buyers = new Map();
+  s.buyersJob = { running: true, total: matched.length, done: 0, found: 0, message: 'กำลังเริ่มค้นหา...', warning: '', shouldStop: false };
+  res.json({ success: true, total: matched.length });
+  runBuyersJob(ctx.pageData, s, matched).catch(e => {
+    s.buyersJob.running = false;
+    s.buyersJob.message = 'เกิดข้อผิดพลาด: ' + e.message;
+  });
+});
+
+app.get('/api/live/buyers', checkAuth, (req, res) => {
+  const ctx = getLiveContext(req, res);
+  if (!ctx) return;
+  const s = ctx.live;
+  if (!s) return res.json({ success: false, error: 'ไม่พบ session นี้' });
+  if (!s.buyers) s.buyers = new Map();
+
+  const buyers = Array.from(s.buyers.values()).map(b => {
+    const slipTotal = s.slips
+      .filter(x => x.senderId === b.userId || (b.psid && x.senderId === b.psid))
+      .reduce((sum, x) => sum + (Number(x.amount) || 0), 0);
+    return { ...b, slipTotal };
+  });
+  const job = s.buyersJob
+    ? { running: s.buyersJob.running, total: s.buyersJob.total, done: s.buyersJob.done, found: s.buyersJob.found, message: s.buyersJob.message, warning: s.buyersJob.warning }
+    : null;
+  res.json({ success: true, job, buyers });
+});
+
+app.post('/api/live/buyers/update', checkAuth, (req, res) => {
+  const ctx = getLiveContext(req, res);
+  if (!ctx) return;
+  const s = ctx.live;
+  if (!s || !s.buyers) return res.json({ success: false, error: 'ไม่พบ session นี้' });
+  const b = req.body || {};
+  const item = s.buyers.get(String(b.userId));
+  if (!item) return res.json({ success: false, error: 'ไม่พบลูกค้าคนนี้' });
+  ['recipientName', 'address', 'phone', 'postcode'].forEach(k => {
+    if (typeof b[k] === 'string') item[k] = b[k].slice(0, 1000);
+  });
+  item.status = 'manual';
   res.json({ success: true });
 });
 
@@ -1872,7 +2492,7 @@ app.post('/api/live/broadcast/start', checkAuth, (req, res) => {
 
   const recipients = Array.from(s.commenters.entries())
     .filter(([, c]) => !onlyMatched || c.matchedCount > 0)
-    .map(([id]) => id);
+    .map(([id, c]) => c.psid || id);
   if (recipients.length === 0) return res.json({ success: false, error: 'ยังไม่มีผู้รับใน session นี้' });
 
   s.broadcastStatus = { isBroadcasting: true, total: recipients.length, current: 0, success: 0, failed: 0, statusMessage: 'กำลังเริ่มส่ง...', shouldStop: false };
@@ -1945,8 +2565,16 @@ app.post('/webhook', async (req, res) => {
       // 1. ตรวจสอบข้อความ / สลิปใน Inbox
       if (entry.messaging) {
         for (const msgEvent of entry.messaging) {
+          // ข้ามข้อความที่เพจส่งเอง (echo)
+          if (msgEvent.message && msgEvent.message.is_echo) continue;
+
           const senderId = msgEvent.sender?.id;
           if (senderId) subscribers.add(senderId);
+
+          // 📦 เก็บข้อความตัวอักษรของลูกค้าไว้ ใช้ค้นหาชื่อที่อยู่สำหรับใบแปะหน้า
+          if (senderId && msgEvent.message && msgEvent.message.text) {
+            logInboxText(targetRecord.pageData, senderId, msgEvent.message.text);
+          }
 
           if (msgEvent.message && msgEvent.message.attachments) {
             for (const att of msgEvent.message.attachments) {
@@ -2008,7 +2636,7 @@ app.post('/webhook', async (req, res) => {
                     transRef: slip.transRef,
                     amount: Number(slip.amount) || 0,
                     senderId,
-                    senderName: slipSession.commenters.get(senderId)?.name || '',
+                    senderName: findCommenterBySender(slipSession, senderId)?.name || '',
                     time: Date.now()
                   });
                 }
@@ -2047,12 +2675,13 @@ app.post('/webhook', async (req, res) => {
               if (isMatched) liveSession.stats.matched++;
               if (senderId) {
                 const prev = liveSession.commenters.get(senderId) ||
-                  { name: '', count: 0, matchedCount: 0, lastMessage: '', lastKeyword: '', lastTime: 0 };
+                  { name: '', count: 0, matchedCount: 0, lastMessage: '', lastKeyword: '', lastTime: 0, psid: '' };
                 if (comment.from?.name) prev.name = comment.from.name;
                 prev.count++;
                 if (isMatched) { prev.matchedCount++; prev.lastKeyword = matchedKw; }
                 prev.lastMessage = commentText.slice(0, 200);
                 prev.lastTime = Date.now();
+                if (!prev.psid) prev.psid = getPsidMap(targetRecord.pageData).get(senderId) || '';
                 liveSession.commenters.set(senderId, prev);
               }
             }
@@ -2082,13 +2711,20 @@ app.post('/webhook', async (req, res) => {
 
               if (cfg.enableInbox) {
                 try {
-                  await axios.post('https://graph.facebook.com/v19.0/me/messages', {
+                  const inboxRes = await axios.post('https://graph.facebook.com/v19.0/me/messages', {
                     recipient: { comment_id: comment.comment_id },
                     message: { text: cfg.inboxText }
                   }, { 
                     params: { access_token: cfg.pageAccessToken },
                     timeout: 10000 
                   });
+                  // 📦 จับคู่ ID คนคอมเมนต์ กับ ID แชท (PSID) เพื่อใช้ค้นหาที่อยู่ในแชทภายหลัง
+                  const psid = inboxRes.data?.recipient_id;
+                  if (psid && senderId) {
+                    getPsidMap(targetRecord.pageData).set(senderId, String(psid));
+                    const c = liveSession?.commenters.get(senderId);
+                    if (c) c.psid = String(psid);
+                  }
                 } catch (inbErr) {
                   console.error('❌ [Inbox Error]', inbErr.response?.data || inbErr.message);
                 }
