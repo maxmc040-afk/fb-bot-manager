@@ -215,8 +215,12 @@ function scoreAddressText(t) {
   return score;
 }
 
+// คำที่ขึ้นต้นชื่อสถานที่ ไม่ใช่ชื่อคน
+const PLACE_RE = /^(วัด|ร้าน|บริษัท|บจก|หจก|ห้าง|โรงเรียน|ร\.ร\.|โรงพยาบาล|รพ\.|รพ\.สต|คลินิก|การไฟฟ้า|การประปา|ไปรษณีย์|อบต|อบจ|เทศบาล|สำนักงาน|ที่ทำการ|สถานี|สภ\.|ตลาด|อาคาร|คอนโด|หอพัก|อพาร์ท|แฟลต|หมู่บ้าน|มหาวิทยาลัย|วิทยาลัย|ค่าย|กองร้อย|กองพัน|ฟาร์ม|สวน|โรงงาน|ศูนย์|ธนาคาร|ปั๊ม|มูลนิธิ|สหกรณ์|โรงแรม|รีสอร์ท)/;
+
 function isNameLike(s) {
   const t = String(s || '').trim();
+  if (PLACE_RE.test(t)) return false;
   if (t.length < 2 || t.length > 45) return false;
   if (/\d/.test(t)) return false;
   if (NAME_TITLE_PREFIX_RE.test(t) && t.split(/\s+/).length <= 4 && !looksLikeLocation(t.replace(NAME_TITLE_PREFIX_RE, ''))) return true;
@@ -282,7 +286,8 @@ function parseAddressBlock(texts, nameHint) {
     recipientName = lines.shift();
   } else if (lines.length >= 1) {
     // กรณีพิมพ์ชื่อกับที่อยู่ในบรรทัดเดียว เช่น "สมชาย ใจดี 12/3 ม.4 ต.หาดใหญ่ ..."
-    const m = lines[0].match(/^([^\d]{2,40}?)[\s,]+(?=\d)/);
+    // รวมกรณีชื่อติดบ้านเลขที่ไม่เว้นวรรค เช่น "นันทพล นาคศรีโภชน์1952/21 ม.6"
+    const m = lines[0].match(/^([^\d]{2,40}?)[\s,]*(?=\d)/);
     if (m && isNameLike(m[1])) {
       recipientName = m[1].trim();
       lines[0] = lines[0].slice(m[0].length).trim();
