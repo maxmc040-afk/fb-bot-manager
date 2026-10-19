@@ -427,12 +427,59 @@ function findBuyerByShipment(pageData, ids, awb) {
   return null;
 }
 
-async function sendMessengerText(pageData, psid, text) {
+// ข้อความถูกปฏิเสธเพราะลูกค้าทักล่าสุดเกิน 24 ชม.
+function isOutsideWindowError(e) {
+  const er = e.response?.data?.error || {};
+  return er.error_subcode === 2018278 || er.error_subcode === 2534022 || er.code === 10 ||
+    /outside of allowed window|24 hour|allowed window/i.test(er.message || '');
+}
+
+// humanAgent = แอดมินกดส่งเอง -> ใช้แท็ก HUMAN_AGENT ส่งได้ภายใน 7 วันหลังลูกค้าทักล่าสุด
+// (นโยบาย Meta: ห้ามใช้แท็กนี้กับข้อความอัตโนมัติ และแอปต้องได้สิทธิ์ Human Agent จาก App Review)
+async function sendMessengerText(pageData, psid, text, opts = {}) {
   const token = pageData.config.pageAccessToken;
   if (!psid || !token) throw new Error('ไม่มี PSID หรือ Page token');
-  await axios.post('https://graph.facebook.com/v19.0/me/messages', {
-    recipient: { id: psid }, message: { text }
-  }, { params: { access_token: token }, timeout: 10000 });
+  const send = (tagged) => axios.post('https://graph.facebook.com/v19.0/me/messages', tagged
+    ? { recipient: { id: psid }, messaging_type: 'MESSAGE_TAG', tag: 'HUMAN_AGENT', message: { text } }
+    : { recipient: { id: psid }, messaging_type: 'RESPONSE', message: { text } },
+  { params: { access_token: token }, timeout: 10000 });
+  try {
+    await send(false);
+    return { ok: true, tagged: false };
+  } catch (e) {
+    if (!isOutsideWindowError(e)) throw e;
+    if (!opts.humanAgent) { const err = new Error('OUTSIDE_24H'); err.outside24h = true; throw err; }
+    try {
+      await send(true);
+      return { ok: true, tagged: true };
+    } catch (e2) {
+      const er = e2.response?.data?.error || {};
+      if (er.code === 200 || /permission|human.?agent/i.test(er.message || '')) {
+        throw new Error('ส่งเกิน 24 ชม. ต้องได้สิทธิ์ Human Agent: เปิด App Review ขอสิทธิ์ "Human Agent" ให้แอป (' + (er.message || '') + ')');
+      }
+      if (isOutsideWindowError(e2)) throw new Error('ลูกค้าทักล่าสุดเกิน 7 วันแล้ว Facebook ไม่ให้ส่งข้อความ');
+      throw e2;
+    }
+  }
+}
+
+function trackingText(bm, item) {
+  return String(bm.notifyText || '').replace('{tracking}', item.trackingNo || '').replace('{courier}', item.partnerName || '');
+}
+
+// ส่งเลขพัสดุอัตโนมัติ (ภายใน 24 ชม.) ถ้าเกิน 24 ชม. ตั้งเป็น "รอแอดมินกดส่ง"
+async function autoNotifyTracking(pageData, bm, item) {
+  if (!bm.notifyCustomer || !item.trackingNo || !item.psid || item.notified) return;
+  try {
+    await sendMessengerText(pageData, item.psid, trackingText(bm, item));
+    item.notified = true;
+    item.notifyPending = false;
+  } catch (e) {
+    item.notifyPending = true;
+    item.shipNote = e.outside24h
+      ? 'ลูกค้าทักเกิน 24 ชม. กดปุ่ม 💬 ส่งเลขพัสดุ เพื่อส่งเอง (ได้ภายใน 7 วัน)'
+      : 'ส่งเลขพัสดุไม่สำเร็จ: ' + (e.response?.data?.error?.message || e.message);
+  }
 }
 
 const BM_JSON = { Accept: 'application/json', 'Content-Type': 'application/json' };
@@ -568,7 +615,10 @@ let thaiAddrDb = null;          // [{ d, a, p, z, dn, an, pn }]
 let thaiAddrByZip = new Map();
 let thaiAddrLoading = null;
 
-const compactTh = (v) => String(v || '').normalize('NFC')
+const compactTh = (v) => String(v || '')
+  .normalize('NFKD')                             // ตัวอักษรแฟนซี 𝐒𝐨𝐦𝐛𝐮𝐭 -> Sombut, é -> e
+  .replace(/[̀-ͯ]/g, '')
+  .normalize('NFC')
   .replace(/ํา/g, 'ำ')            // ํ + า -> ำ (พิมพ์ต่างกันแต่ตาเห็นเหมือนกัน)
   .replace(/[​-‍⁠﻿]/g, '')   // ตัวอักษรล่องหน
   .replace(/[\s.]/g, '').toLowerCase();
@@ -1365,7 +1415,10 @@ app.get('/', (req, res) => {
                                 </div>
                             </div>
                             <div class="flex flex-wrap items-center justify-between gap-3">
-                                <label class="flex items-center gap-2 cursor-pointer text-xs text-slate-600"><input type="checkbox" id="lv-chat-onlyaddr" class="w-4 h-4 rounded"> เฉพาะคนที่ส่งที่อยู่มาในแชทแล้ว</label>
+                                <div class="flex flex-wrap gap-4">
+                                    <label class="flex items-center gap-2 cursor-pointer text-xs text-slate-600"><input type="checkbox" id="lv-chat-onlyaddr" class="w-4 h-4 rounded"> เฉพาะคนที่ส่งที่อยู่มาในแชทแล้ว</label>
+                                    <label class="flex items-center gap-2 cursor-pointer text-xs text-slate-600"><input type="checkbox" id="lv-chat-deep" class="w-4 h-4 rounded"> ค้นในข้อความแชทด้วย (ที่อยู่/เบอร์ · ช้ากว่า)</label>
+                                </div>
                                 <button type="button" id="lv-chat-btn" onclick="searchChats()" class="px-5 py-2 text-sm font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700 shadow-sm">🔍 ค้นหา</button>
                             </div>
                             <div id="lv-chat-status" class="hidden text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded-lg p-2"></div>
@@ -1404,6 +1457,7 @@ app.get('/', (req, res) => {
                                 <div class="flex flex-wrap gap-2">
                                     <button type="button" id="lv-btn-ship" onclick="createShipmentsAndPrint()" class="px-4 py-2 text-xs font-semibold rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm">🚚 สร้างเลขพัสดุ + พิมพ์ใบแปะหน้า A6</button>
                                     <button type="button" onclick="printBeemoveLabels()" class="px-4 py-2 text-xs font-semibold rounded-lg bg-white text-emerald-700 border border-emerald-300 hover:bg-emerald-100">🖨️ พิมพ์ใบแปะหน้า Bee Move ซ้ำ</button>
+                                    <button type="button" onclick="notifySelectedBuyers()" class="px-4 py-2 text-xs font-semibold rounded-lg bg-white text-blue-700 border border-blue-300 hover:bg-blue-50">💬 ส่งเลขพัสดุให้ลูกค้าที่เลือก</button>
                                 </div>
                                 <div class="text-xs text-emerald-700">ที่อยู่ต้องมี ต./อ./จ. และรหัสไปรษณีย์ (เช่น 12/3 ม.4 ต.คอหงส์ อ.หาดใหญ่ จ.สงขลา 90110) ลูกค้าที่มีเลขพัสดุแล้วจะไม่ถูกสร้างซ้ำ · ตั้งค่า API Key ที่เมนู 🚚 ขนส่ง Bee Move</div>
                             </div>
@@ -2409,10 +2463,11 @@ app.get('/', (req, res) => {
                     + '<td class="py-2 pr-2 w-20"><input type="text" class="bf-post ' + inp + '" value="' + escapeHtml(b.postcode || '') + '"></td>'
                     + '<td class="py-2 pr-2 w-28"><input type="text" class="bf-phone ' + inp + '" value="' + escapeHtml(b.phone || '') + '"></td>'
                     + '<td class="py-2 pr-2 min-w-[7rem]">' + (b.trackingNo
-                        ? '<div class="font-bold text-emerald-700 whitespace-nowrap">' + escapeHtml(b.trackingNo) + '</div><div class="text-[10px] text-slate-400">' + escapeHtml(b.partnerName || '') + (b.notified ? ' · แจ้งลูกค้าแล้ว' : '') + '</div>'
+                        ? '<div class="font-bold text-emerald-700 whitespace-nowrap">' + escapeHtml(b.trackingNo) + '</div><div class="text-[10px] text-slate-400">' + escapeHtml(b.partnerName || '') + (b.notified ? ' · ✅ แจ้งลูกค้าแล้ว' : '') + '</div>'
+                            + (!b.notified ? '<button type="button" class="bf-notify mt-1 px-2 py-0.5 text-[10px] font-semibold rounded bg-blue-600 text-white hover:bg-blue-700">💬 ส่งเลขพัสดุ' + (b.shipNote && /24/.test(b.shipNote) ? ' (ได้ภายใน 7 วัน)' : '') + '</button>' : '')
                             + (b.bmStatus ? '<div class="text-[10px] font-semibold text-indigo-600">' + escapeHtml(b.bmStatus) + '</div>' : '')
                         : (b.shipStatus === 'error' ? '<div class="text-[10px] text-rose-600">❌ ' + escapeHtml(b.shipNote || '') + '</div>' : (b.beemoveOrderId ? '<span class="text-[10px] text-amber-600">รอเลขพัสดุ</span>' : '<span class="text-slate-300">-</span>')))
-                        + (b.trackingNo && b.shipNote ? '<div class="text-[10px] text-amber-600">' + escapeHtml(b.shipNote) + '</div>' : '')
+                        + (b.trackingNo && b.shipNote && !b.notified ? '<div class="text-[10px] text-amber-600">' + escapeHtml(/เกิน 24 ชม/.test(b.shipNote) ? 'ลูกค้าทักเกิน 24 ชม. กดปุ่มด้านบนเพื่อส่ง (ได้ภายใน 7 วันหลังลูกค้าทักล่าสุด)' : b.shipNote) + '</div>' : '')
                         + '</td>'
                     + '<td class="py-2"><span class="text-[10px] px-2 py-0.5 rounded-full font-semibold whitespace-nowrap ' + st[1] + '">' + st[0] + '</span>'
                     + (b.note ? '<div class="text-[10px] text-slate-400 mt-1">' + escapeHtml(b.note) + '</div>' : '')
@@ -2558,6 +2613,7 @@ app.get('/', (req, res) => {
             const to = new Date(chatRange.end.getFullYear(), chatRange.end.getMonth(), chatRange.end.getDate() + 1).getTime() - 1;
             const q = document.getElementById('lv-chat-q').value.trim();
             const onlyAddr = document.getElementById('lv-chat-onlyaddr').checked ? '1' : '0';
+            const deep = document.getElementById('lv-chat-deep').checked ? '1' : '0';
             const btn = document.getElementById('lv-chat-btn');
             const st = document.getElementById('lv-chat-status');
             btn.disabled = true; btn.classList.add('opacity-50');
@@ -2565,13 +2621,14 @@ app.get('/', (req, res) => {
             st.innerText = '⏳ กำลังค้นหาแชท ' + ymd(chatRange.start) + ' ถึง ' + ymd(chatRange.end) + ' ...';
             try {
                 const res = await fetch('/api/chats/search?token=' + authToken + '&pageId=' + currentActivePageId
-                    + '&from=' + from + '&to=' + to + '&onlyAddr=' + onlyAddr + '&q=' + encodeURIComponent(q));
+                    + '&from=' + from + '&to=' + to + '&onlyAddr=' + onlyAddr + '&deep=' + deep + '&q=' + encodeURIComponent(q));
                 const d = await res.json();
                 if(!d.success) { st.innerText = '❌ ' + d.error; return; }
                 chatResults = d.results || [];
                 chatSel = new Set(chatResults.filter(function(r) { return r.hasAddress; }).map(function(r) { return r.psid; }));
                 let info = 'พบ ' + chatResults.length + ' แชท · ตรวจ ' + d.scanned + ' แชทในช่วงวันที่ (อ่านข้อความ ' + d.readCount + ' แชท)';
                 if(d.oldestSeen) info += ' · ย้อนไปถึง ' + new Date(d.oldestSeen).toLocaleDateString('th-TH', { dateStyle: 'medium' });
+                if(d.hiddenNoAddr) info += ' · ซ่อน ' + d.hiddenNoAddr + ' คนที่ยังไม่พบที่อยู่ในแชท (เอาติ๊ก "เฉพาะคนที่ส่งที่อยู่" ออกเพื่อดู)';
                 if(d.endReason === 'time' || d.endReason === 'maxpages') info += ' · ⚠️ แชทเยอะมาก ค้นได้ไม่ครบช่วงวันที่ ลองย่อช่วงวันที่';
                 if(d.readLimited) info += ' · ⚠️ อ่านข้อความได้ไม่ครบทุกแชท (ค้นชื่อเฟสได้ครบ) ลองย่อช่วงวันที่ถ้าค้นจากที่อยู่/เบอร์';
                 st.innerText = info;
@@ -2744,6 +2801,35 @@ app.get('/', (req, res) => {
             });
             return out;
         }
+
+        async function notifyBuyers(ids) {
+            const list = buyersList.filter(function(b) { return ids.indexOf(b.userId) >= 0 && b.trackingNo; });
+            if(!list.length) return alert('ลูกค้าที่เลือกยังไม่มีเลขพัสดุ');
+            const again = list.filter(function(b) { return b.notified; }).length;
+            if(!confirm('ส่งเลขพัสดุทางแชทให้ ' + list.length + ' คน?' + (again ? NL + '(มี ' + again + ' คนที่เคยส่งแล้ว จะส่งซ้ำ)' : '') + NL + NL + 'ถ้าลูกค้าทักเกิน 24 ชม. ระบบจะส่งแบบแอดมินตอบกลับ (ได้ภายใน 7 วัน)')) return;
+            const res = await fetch(liveUrl('/api/live/buyers/notify', '&sid=' + currentLiveId), {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ userIds: list.map(function(b) { return b.userId; }) })
+            });
+            const d = await res.json();
+            if(!d.success) return alert('❌ ' + d.error);
+            let msg = '✅ ส่งแล้ว ' + d.sent + ' คน' + (d.tagged ? ' (ส่งแบบเกิน 24 ชม. ' + d.tagged + ' คน)' : '');
+            if(d.errors && d.errors.length) msg += NL + NL + '❌ ไม่สำเร็จ:' + NL + d.errors.join(NL);
+            alert(msg);
+            await loadBuyers();
+        }
+
+        function notifySelectedBuyers() {
+            if(!currentLiveId) return;
+            notifyBuyers(Array.from(buyersSelected));
+        }
+
+        document.addEventListener('click', function(e) {
+            const btn = e.target.closest('.bf-notify');
+            if(!btn) return;
+            const tr = btn.closest('tr[data-uid]');
+            if(tr) notifyBuyers([tr.getAttribute('data-uid')]);
+        });
 
         async function deleteBuyers(ids) {
             if(!ids.length) return alert('กรุณาเลือกลูกค้าอย่างน้อย 1 คน');
@@ -3830,7 +3916,7 @@ app.get('/api/chats/search', checkAuth, async (req, res) => {
   try {
     for (let pageNo = 0; url; pageNo++) {
       if (pageNo >= 80) { endReason = 'maxpages'; break; }
-      if (Date.now() - started > 30000) { endReason = 'time'; break; }
+      if (Date.now() - started > 25000) { endReason = 'time'; break; }
       const r = await axios.get(url, { params, timeout: 20000 });
       const list = r.data.data || [];
       let stop = false;
@@ -3856,9 +3942,12 @@ app.get('/api/chats/search', checkAuth, async (req, res) => {
   const hasQuery = qTokens.length > 0 || qDigits.length >= 4;
   const nameHits = new Set();
   if (hasQuery) convs.forEach(c => { if (textHit(c.name)) nameHits.add(c.id); });
-  const MAX_READ = 400;
+  // เจอชื่อเฟสตรงแล้ว อ่านเฉพาะแชทของคนนั้น (เร็ว) ไม่เจอค่อยค้นในข้อความทุกแชท
+  const deep = req.query.deep === '1';
+  const MAX_READ = nameHits.size && !deep ? 60 : 300;
   let toRead = hasQuery
-    ? convs.filter(c => nameHits.has(c.id)).concat(convs.filter(c => !nameHits.has(c.id)))
+    ? (nameHits.size && !deep ? convs.filter(c => nameHits.has(c.id))
+      : convs.filter(c => nameHits.has(c.id)).concat(convs.filter(c => !nameHits.has(c.id))))
     : convs.slice();
   const readLimited = toRead.length > MAX_READ;
   toRead = toRead.slice(0, MAX_READ);
@@ -3866,7 +3955,7 @@ app.get('/api/chats/search', checkAuth, async (req, res) => {
   const msgsById = new Map();
   let idx = 0;
   const worker = async () => {
-    while (idx < toRead.length && Date.now() - started < 55000) {
+    while (idx < toRead.length && Date.now() - started < 50000) {
       const c = toRead[idx++];
       try {
         const r = await axios.get('https://graph.facebook.com/v19.0/' + encodeURIComponent(c.id), {
@@ -3883,6 +3972,7 @@ app.get('/api/chats/search', checkAuth, async (req, res) => {
 
   // ขั้นที่ 3: จับคู่คำค้นหา + อ่านที่อยู่
   const results = [];
+  let hiddenNoAddr = 0;
   for (const c of convs) {
     const msgs = msgsById.get(c.id);
     let matchedText = '';
@@ -3898,7 +3988,7 @@ app.get('/api/chats/search', checkAuth, async (req, res) => {
     }
     const customerMsgs = (msgs || []).filter(m => m.fromId === c.psid);
     const info = customerMsgs.length ? extractAddressInfo(customerMsgs.map(m => ({ text: m.text, time: m.time }))) : null;
-    if (onlyAddr && !info) continue;
+    if (onlyAddr && !info) { hiddenNoAddr++; continue; }
     let addressPreview = '';
     if (info) {
       const fx = smartThaiAddress(info.address, info.postcode);
@@ -3917,9 +4007,54 @@ app.get('/api/chats/search', checkAuth, async (req, res) => {
 
   res.json({
     success: true, results,
-    scanned: convs.length, listed, oldestSeen, endReason,
+    scanned: convs.length, listed, oldestSeen, endReason, hiddenNoAddr, nameHits: nameHits.size,
     readCount: msgsById.size, readLimited: readLimited || timeCut
   });
+});
+
+// 💬 แอดมินกดส่งเลขพัสดุให้ลูกค้า (เกิน 24 ชม. ใช้แท็ก HUMAN_AGENT ได้ภายใน 7 วัน)
+app.post('/api/live/buyers/notify', checkAuth, async (req, res) => {
+  const ctx = getLiveContext(req, res);
+  if (!ctx) return;
+  const s = ctx.live;
+  if (!s || !s.buyers) return res.json({ success: false, error: 'ไม่พบ session นี้' });
+  const bm = getBeemoveConfig(ctx.pageData);
+  const ids = (Array.isArray(req.body.userIds) ? req.body.userIds : []).map(String);
+  let sent = 0, tagged = 0, skipped = 0;
+  const errors = [];
+  let convIndex = null;
+  for (const id of ids) {
+    const item = s.buyers.get(id);
+    if (!item || !item.trackingNo) { skipped++; continue; }
+    // ยังไม่รู้ว่าลูกค้าคือแชทไหน: หาจากรายการที่จับคู่ไว้ หรือจากชื่อในรายการแชทของเพจ
+    if (!item.psid) {
+      item.psid = getPsidMap(ctx.pageData).get(id) || (getInboxLog(ctx.pageData).has(id) ? id : '');
+      if (!item.psid && item.fbName) {
+        try {
+          if (!convIndex) convIndex = await buildConversationIndex(ctx.pageData.config.pageId, ctx.pageData.config.pageAccessToken);
+          item.psid = convIndex.get(normName(item.fbName)) || '';
+        } catch (e) { convIndex = new Map(); }
+      }
+      if (!item.psid) {
+        item.shipNote = 'ไม่พบแชทของลูกค้าคนนี้ ส่งเลขพัสดุทางแชทไม่ได้';
+        errors.push((item.recipientName || item.fbName || id) + ': ไม่พบแชท');
+        continue;
+      }
+    }
+    try {
+      const r = await sendMessengerText(ctx.pageData, item.psid, trackingText(bm, item), { humanAgent: true });
+      item.notified = true;
+      item.notifyPending = false;
+      item.shipNote = '';
+      sent++;
+      if (r.tagged) tagged++;
+    } catch (e) {
+      item.shipNote = 'ส่งเลขพัสดุไม่สำเร็จ: ' + (e.response?.data?.error?.message || e.message);
+      errors.push((item.recipientName || item.fbName || id) + ': ' + item.shipNote);
+    }
+    await sleep(300);
+  }
+  res.json({ success: true, sent, tagged, skipped, errors: errors.slice(0, 5) });
 });
 
 // 🗑️ ลบรายชื่อลูกค้าออกจากตาราง (ไม่ยกเลิกพัสดุใน Bee Move)
@@ -4180,17 +4315,7 @@ async function runShipJob(pageData, s, userIds) {
       item.shipNote = r.trackingNo ? '' : 'สร้างแล้ว รอเลขพัสดุจากขนส่ง';
       job.created++;
 
-      if (bm.notifyCustomer && r.trackingNo && item.psid && token) {
-        try {
-          await axios.post('https://graph.facebook.com/v19.0/me/messages', {
-            recipient: { id: item.psid },
-            message: { text: String(bm.notifyText || '').replace('{tracking}', r.trackingNo).replace('{courier}', r.partnerName) }
-          }, { params: { access_token: token }, timeout: 10000 });
-          item.notified = true;
-        } catch (e) {
-          item.shipNote = 'ส่งเลขพัสดุให้ลูกค้าไม่สำเร็จ (เกิน 24 ชม. หลังลูกค้าทักล่าสุด?)';
-        }
-      }
+      if (token) await autoNotifyTracking(pageData, bm, item);
     } catch (e) {
       item.shipStatus = 'error';
       item.shipNote = e.response ? beemoveError(e) : e.message;
@@ -4252,10 +4377,7 @@ app.post('/beemove/webhook/:key', async (req, res) => {
     if (gotNewTracking) { item.trackingNo = ev.awb; item.shipNote = ''; }
 
     try {
-      if (gotNewTracking && bm.notifyCustomer && !item.notified && item.psid) {
-        await sendMessengerText(pageData, item.psid, String(bm.notifyText || '').replace('{tracking}', item.trackingNo).replace('{courier}', item.partnerName || ''));
-        item.notified = true;
-      }
+      if (gotNewTracking) await autoNotifyTracking(pageData, bm, item);
       if (bm.notifyStatus && !item.notifiedDelivered && item.psid && /สำเร็จ|delivered|success|complete/i.test(ev.status || '')) {
         await sendMessengerText(pageData, item.psid, '✅ พัสดุ ' + (item.trackingNo || '') + ' จัดส่งถึงแล้วค่ะ ขอบคุณที่อุดหนุนนะคะ 🙏');
         item.notifiedDelivered = true;
