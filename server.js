@@ -568,7 +568,10 @@ let thaiAddrDb = null;          // [{ d, a, p, z, dn, an, pn }]
 let thaiAddrByZip = new Map();
 let thaiAddrLoading = null;
 
-const compactTh = (v) => String(v || '').replace(/[\s.]/g, '').toLowerCase();
+const compactTh = (v) => String(v || '').normalize('NFC')
+  .replace(/ํา/g, 'ำ')            // ํ + า -> ำ (พิมพ์ต่างกันแต่ตาเห็นเหมือนกัน)
+  .replace(/[​-‍⁠﻿]/g, '')   // ตัวอักษรล่องหน
+  .replace(/[\s.]/g, '').toLowerCase();
 
 function loadThaiAddressDb() {
   if (thaiAddrDb) return Promise.resolve(true);
@@ -768,6 +771,14 @@ function smartThaiAddress(text, postcode) {
     }
   }
 
+  // มี ต. และ อ. แต่ไม่มี จ. นำหน้า: คำสุดท้ายที่เหลือคือจังหวัด
+  if (marked.district && marked.city && !marked.province) {
+    const words = String(marked.address || '').split(/\s+/).filter(Boolean);
+    if (words.length && !/\d/.test(words[words.length - 1])) {
+      marked.province = words.pop();
+      marked.address = words.join(' ');
+    }
+  }
   if (marked.district && marked.city && marked.province && marked.postal_code) {
     const pseudo = { dn: compactTh(marked.district), an: compactTh(marked.city), pn: compactTh(marked.province) };
     const parts = { ...marked, address: tidyStreet(stripLocationWords(marked.address, pseudo)) };
@@ -776,7 +787,8 @@ function smartThaiAddress(text, postcode) {
 
   // สำรอง (กรณีโหลดฐานข้อมูลไม่ได้): "... ตำบล อำเภอ จังหวัด รหัสไปรษณีย์" ไล่จากท้าย
   if (zip) {
-    const before = raw.split(zip)[0].replace(/[,]/g, ' ').trim().split(/\s+/);
+    const before = raw.split(zip)[0].replace(/[,]/g, ' ')
+      .replace(/(^|\s)(ตำบล|แขวง|อำเภอ|เขต|จังหวัด)(?=\s|$)/g, ' ').trim().split(/\s+/);
     const tail = [];
     while (before.length && tail.length < 3 && !/\d/.test(before[before.length - 1])) tail.unshift(before.pop());
     if (tail.length === 3) {
@@ -1384,6 +1396,7 @@ app.get('/', (req, res) => {
                                     <button type="button" id="lv-btn-buyers" onclick="fetchBuyers()" class="px-4 py-2 text-xs font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm">🔍 ดึงรายชื่อ + ค้นหาที่อยู่</button>
                                     <button type="button" onclick="fixBuyerAddresses()" class="px-4 py-2 text-xs font-semibold rounded-lg bg-amber-500 text-white hover:bg-amber-600">🗺️ จัดรูปแบบที่อยู่ให้ถูกต้อง</button>
                                     <button type="button" onclick="exportBuyersCSV()" class="px-4 py-2 text-xs font-semibold rounded-lg bg-slate-100 text-slate-700 hover:bg-slate-200">⬇️ ดาวน์โหลด CSV</button>
+                                    <button type="button" onclick="deleteSelectedBuyers()" class="px-4 py-2 text-xs font-semibold rounded-lg bg-rose-50 text-rose-600 border border-rose-200 hover:bg-rose-100">🗑️ ลบที่เลือก</button>
                                 </div>
                             </div>
                             <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-4 space-y-3">
@@ -2402,7 +2415,8 @@ app.get('/', (req, res) => {
                         + (b.trackingNo && b.shipNote ? '<div class="text-[10px] text-amber-600">' + escapeHtml(b.shipNote) + '</div>' : '')
                         + '</td>'
                     + '<td class="py-2"><span class="text-[10px] px-2 py-0.5 rounded-full font-semibold whitespace-nowrap ' + st[1] + '">' + st[0] + '</span>'
-                    + (b.note ? '<div class="text-[10px] text-slate-400 mt-1">' + escapeHtml(b.note) + '</div>' : '') + '</td>'
+                    + (b.note ? '<div class="text-[10px] text-slate-400 mt-1">' + escapeHtml(b.note) + '</div>' : '')
+                    + '<button type="button" class="bf-del mt-2 block text-[11px] text-rose-500 hover:text-rose-700 hover:underline" title="ลบออกจากรายชื่อ">🗑️ ลบ</button></td>'
                     + '</tr>';
             });
             tbody.innerHTML = html;
@@ -2556,7 +2570,11 @@ app.get('/', (req, res) => {
                 if(!d.success) { st.innerText = '❌ ' + d.error; return; }
                 chatResults = d.results || [];
                 chatSel = new Set(chatResults.filter(function(r) { return r.hasAddress; }).map(function(r) { return r.psid; }));
-                st.innerText = 'พบ ' + chatResults.length + ' แชท (ตรวจ ' + d.scanned + ' แชทในช่วงวันที่)' + (d.truncated ? ' · ⚠️ ผลมากเกินไป แสดงบางส่วน ลองระบุคำค้นหาหรือย่อช่วงวันที่' : '');
+                let info = 'พบ ' + chatResults.length + ' แชท · ตรวจ ' + d.scanned + ' แชทในช่วงวันที่ (อ่านข้อความ ' + d.readCount + ' แชท)';
+                if(d.oldestSeen) info += ' · ย้อนไปถึง ' + new Date(d.oldestSeen).toLocaleDateString('th-TH', { dateStyle: 'medium' });
+                if(d.endReason === 'time' || d.endReason === 'maxpages') info += ' · ⚠️ แชทเยอะมาก ค้นได้ไม่ครบช่วงวันที่ ลองย่อช่วงวันที่';
+                if(d.readLimited) info += ' · ⚠️ อ่านข้อความได้ไม่ครบทุกแชท (ค้นชื่อเฟสได้ครบ) ลองย่อช่วงวันที่ถ้าค้นจากที่อยู่/เบอร์';
+                st.innerText = info;
                 renderChatResults();
             } catch(e) {
                 st.innerText = '❌ เกิดข้อผิดพลาดในการเชื่อมต่อเซิร์ฟเวอร์';
@@ -2726,6 +2744,35 @@ app.get('/', (req, res) => {
             });
             return out;
         }
+
+        async function deleteBuyers(ids) {
+            if(!ids.length) return alert('กรุณาเลือกลูกค้าอย่างน้อย 1 คน');
+            const shipped = buyersList.filter(function(b) { return ids.indexOf(b.userId) >= 0 && (b.trackingNo || b.beemoveOrderId); }).length;
+            let msg = 'ลบ ' + ids.length + ' คนออกจากรายชื่อ?';
+            if(shipped) msg += NL + NL + '⚠️ มี ' + shipped + ' คนที่สร้างพัสดุใน Bee Move แล้ว การลบที่นี่ไม่ได้ยกเลิกพัสดุ (ต้องยกเลิกใน Bee Move เอง)';
+            if(!confirm(msg)) return;
+            const res = await fetch(liveUrl('/api/live/buyers/delete', '&sid=' + currentLiveId), {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userIds: ids })
+            });
+            const d = await res.json();
+            if(!d.success) return alert('❌ ' + d.error);
+            ids.forEach(function(id) { buyersSelected.delete(id); });
+            if(document.activeElement) document.activeElement.blur();
+            await loadBuyers();
+            if(typeof renderChatResults === 'function' && chatResults.length) renderChatResults();
+        }
+
+        function deleteSelectedBuyers() {
+            if(!currentLiveId) return;
+            deleteBuyers(Array.from(buyersSelected));
+        }
+
+        document.addEventListener('click', function(e) {
+            const btn = e.target.closest('.bf-del');
+            if(!btn) return;
+            const tr = btn.closest('tr[data-uid]');
+            if(tr) deleteBuyers([tr.getAttribute('data-uid')]);
+        });
 
         async function fixBuyerAddresses() {
             if(!currentLiveId) return;
@@ -3732,8 +3779,9 @@ app.post('/api/live/buyers/fetch', checkAuth, (req, res) => {
   if (s.buyersJob && s.buyersJob.running) return res.json({ success: false, error: 'กำลังค้นหาอยู่ กรุณารอสักครู่' });
   if (!ctx.pageData.config.pageAccessToken) return res.json({ success: false, error: 'เพจนี้ยังไม่มี Page Access Token' });
 
-  const matched = Array.from(s.commenters.entries()).filter(([, c]) => c.matchedCount > 0);
-  if (!matched.length) return res.json({ success: false, error: 'ยังไม่มีคนที่คอมเมนต์ตรงคำดักใน session นี้' });
+  const removedSet = s.buyersRemoved || new Set();
+  const matched = Array.from(s.commenters.entries()).filter(([uid, c]) => c.matchedCount > 0 && !removedSet.has(uid));
+  if (!matched.length) return res.json({ success: false, error: removedSet.size ? 'ไม่มีรายชื่อใหม่ (คนที่ลบไปแล้วจะไม่ถูกดึงกลับมา)' : 'ยังไม่มีคนที่คอมเมนต์ตรงคำดักใน session นี้' });
 
   if (!s.buyers) s.buyers = new Map();
   s.buyersJob = { running: true, total: matched.length, done: 0, found: 0, message: 'กำลังเริ่มค้นหา...', warning: '', shouldStop: false };
@@ -3756,79 +3804,140 @@ app.get('/api/chats/search', checkAuth, async (req, res) => {
   const pageData = usersDB[req.userId]?.pages[req.query.pageId];
   if (!pageData) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
   const cfg = pageData.config;
-  if (!cfg.pageAccessToken) return res.json({ success: false, error: 'เพจนี้ยังไม่มี Page Access Token' });
+  const token = cfg.pageAccessToken;
+  if (!token) return res.json({ success: false, error: 'เพจนี้ยังไม่มี Page Access Token' });
   if (!thaiAddrDb) loadThaiAddressDb();
 
   const from = Number(req.query.from) || (Date.now() - 30 * 86400000);
   const to = Number(req.query.to) || Date.now();
   const qRaw = String(req.query.q || '').trim();
-  const q = compactTh(qRaw);
+  const qTokens = qRaw.split(/\s+/).map(compactTh).filter(Boolean);   // ทุกคำต้องเจอ (ไม่สนลำดับ/เว้นวรรค)
   const qDigits = qRaw.replace(/\D/g, '');
   const onlyAddr = req.query.onlyAddr === '1';
   const pageId = cfg.pageId || req.query.pageId;
   const started = Date.now();
-
-  const results = [];
-  let scanned = 0, truncated = false, reachedEnd = false;
-  let url = 'https://graph.facebook.com/v19.0/' + encodeURIComponent(pageId) + '/conversations';
-  let params = {
-    platform: 'messenger', limit: 50, access_token: cfg.pageAccessToken,
-    fields: 'participants,updated_time,snippet,messages.limit(25){message,from,created_time}'
+  const textHit = (t) => {
+    const c = compactTh(t);
+    if (qTokens.length && qTokens.every(k => c.includes(k))) return true;
+    return qDigits.length >= 4 && String(t || '').replace(/\D/g, '').includes(qDigits);
   };
 
+  // ขั้นที่ 1: ดึงรายชื่อแชททั้งหมดในช่วงวันที่ (เบา เร็ว)
+  const convs = [];
+  let listed = 0, oldestSeen = null, endReason = 'end';
+  let url = 'https://graph.facebook.com/v19.0/' + encodeURIComponent(pageId) + '/conversations';
+  let params = { platform: 'messenger', limit: 100, fields: 'participants,updated_time,snippet', access_token: token };
   try {
-    for (let pageNo = 0; url && pageNo < 40; pageNo++) {
-      if (Date.now() - started > 45000) { truncated = true; break; }
+    for (let pageNo = 0; url; pageNo++) {
+      if (pageNo >= 80) { endReason = 'maxpages'; break; }
+      if (Date.now() - started > 30000) { endReason = 'time'; break; }
       const r = await axios.get(url, { params, timeout: 20000 });
       const list = r.data.data || [];
+      let stop = false;
       for (const conv of list) {
+        listed++;
         const updated = fbTime(conv.updated_time);
-        if (updated < from) { reachedEnd = true; break; }   // เรียงจากใหม่ไปเก่า เลยช่วงแล้วหยุด
+        oldestSeen = updated;
+        if (updated < from) { stop = true; endReason = 'range'; break; }
         if (updated > to) continue;
-        scanned++;
         const person = (conv.participants?.data || []).find(p => String(p.id) !== String(pageId));
         if (!person) continue;
-        const msgs = (conv.messages?.data || []).map(m => ({
-          text: m.message || '', fromId: String(m.from?.id || ''), time: fbTime(m.created_time)
-        }));
-        const customerMsgs = msgs.filter(m => m.fromId === String(person.id));
-
-        // ค้นหา: ชื่อเฟสบุ๊ค หรือข้อความในแชท (ที่อยู่ ชื่อ เบอร์)
-        let matchedText = '';
-        if (q || qDigits) {
-          const nameHit = q && compactTh(person.name).includes(q);
-          let hitMsg = null;
-          for (const m of msgs) {
-            const t = m.text || '';
-            if ((q && compactTh(t).includes(q)) || (qDigits.length >= 4 && t.replace(/\D/g, '').includes(qDigits))) { hitMsg = m; break; }
-          }
-          if (!nameHit && !hitMsg) continue;
-          matchedText = hitMsg ? hitMsg.text.slice(0, 160) : '';
-        }
-
-        const info = extractAddressInfo(customerMsgs.map(m => ({ text: m.text, time: m.time })));
-        if (onlyAddr && !info) continue;
-        let addressPreview = '';
-        if (info) {
-          const fx = smartThaiAddress(info.address, info.postcode);
-          addressPreview = (fx.ok && fx.formatted) ? fx.formatted : info.address;
-        }
-        results.push({
-          psid: String(person.id), name: person.name || '',
-          updatedTime: updated, snippet: String(conv.snippet || '').slice(0, 120),
-          matchedText, hasAddress: !!info,
-          recipientName: info?.recipientName || '', phone: info?.phone || '', addressPreview
-        });
-        if (results.length >= 500) { truncated = true; break; }
+        convs.push({ id: conv.id, psid: String(person.id), name: person.name || '', updated, snippet: String(conv.snippet || '') });
       }
-      if (reachedEnd || truncated) break;
+      if (stop) break;
       url = r.data.paging?.next || null;
       params = undefined;
     }
   } catch (e) {
-    return res.json({ success: false, error: 'ค้นหาแชทไม่สำเร็จ: ' + graphErrorMessage(e) });
+    return res.json({ success: false, error: 'ดึงรายการแชทไม่สำเร็จ: ' + graphErrorMessage(e) });
   }
-  res.json({ success: true, results, scanned, truncated });
+
+  // ขั้นที่ 2: เลือกแชทที่ต้องอ่านข้อความ
+  const hasQuery = qTokens.length > 0 || qDigits.length >= 4;
+  const nameHits = new Set();
+  if (hasQuery) convs.forEach(c => { if (textHit(c.name)) nameHits.add(c.id); });
+  const MAX_READ = 400;
+  let toRead = hasQuery
+    ? convs.filter(c => nameHits.has(c.id)).concat(convs.filter(c => !nameHits.has(c.id)))
+    : convs.slice();
+  const readLimited = toRead.length > MAX_READ;
+  toRead = toRead.slice(0, MAX_READ);
+
+  const msgsById = new Map();
+  let idx = 0;
+  const worker = async () => {
+    while (idx < toRead.length && Date.now() - started < 55000) {
+      const c = toRead[idx++];
+      try {
+        const r = await axios.get('https://graph.facebook.com/v19.0/' + encodeURIComponent(c.id), {
+          params: { fields: 'messages.limit(40){message,from,created_time}', access_token: token }, timeout: 15000
+        });
+        msgsById.set(c.id, (r.data.messages?.data || []).map(m => ({
+          text: m.message || '', fromId: String(m.from?.id || ''), time: fbTime(m.created_time)
+        })));
+      } catch (e) { msgsById.set(c.id, []); }
+    }
+  };
+  await Promise.all(Array.from({ length: 6 }, worker));
+  const timeCut = idx < toRead.length;
+
+  // ขั้นที่ 3: จับคู่คำค้นหา + อ่านที่อยู่
+  const results = [];
+  for (const c of convs) {
+    const msgs = msgsById.get(c.id);
+    let matchedText = '';
+    if (hasQuery) {
+      const byName = nameHits.has(c.id);
+      let hit = byName;
+      if (!hit && textHit(c.snippet)) { hit = true; matchedText = c.snippet; }
+      if (!hit && msgs) {
+        const m = msgs.find(x => textHit(x.text));
+        if (m) { hit = true; matchedText = m.text; }
+      }
+      if (!hit) continue;
+    }
+    const customerMsgs = (msgs || []).filter(m => m.fromId === c.psid);
+    const info = customerMsgs.length ? extractAddressInfo(customerMsgs.map(m => ({ text: m.text, time: m.time }))) : null;
+    if (onlyAddr && !info) continue;
+    let addressPreview = '';
+    if (info) {
+      const fx = smartThaiAddress(info.address, info.postcode);
+      addressPreview = (fx.ok && fx.formatted) ? fx.formatted : info.address;
+    }
+    results.push({
+      psid: c.psid, name: c.name, updatedTime: c.updated, snippet: c.snippet.slice(0, 120),
+      matchedText: String(matchedText || '').slice(0, 160), hasAddress: !!info,
+      recipientName: info?.recipientName || '', phone: info?.phone || '', addressPreview,
+      messagesRead: !!msgs
+    });
+    if (results.length >= 500) break;
+  }
+  // ชื่อตรงขึ้นก่อน
+  results.sort((a, b) => (textHit(b.name) ? 1 : 0) - (textHit(a.name) ? 1 : 0) || b.updatedTime - a.updatedTime);
+
+  res.json({
+    success: true, results,
+    scanned: convs.length, listed, oldestSeen, endReason,
+    readCount: msgsById.size, readLimited: readLimited || timeCut
+  });
+});
+
+// 🗑️ ลบรายชื่อลูกค้าออกจากตาราง (ไม่ยกเลิกพัสดุใน Bee Move)
+app.post('/api/live/buyers/delete', checkAuth, (req, res) => {
+  const ctx = getLiveContext(req, res);
+  if (!ctx) return;
+  const s = ctx.live;
+  if (!s || !s.buyers) return res.json({ success: false, error: 'ไม่พบ session นี้' });
+  if (s.buyersJob && s.buyersJob.running) return res.json({ success: false, error: 'กำลังค้นหาที่อยู่อยู่ กรุณารอให้เสร็จก่อน' });
+  if (s.shipJob && s.shipJob.running) return res.json({ success: false, error: 'กำลังสร้างพัสดุอยู่ กรุณารอให้เสร็จก่อน' });
+  if (!s.buyersRemoved) s.buyersRemoved = new Set();
+  const ids = (Array.isArray(req.body.userIds) ? req.body.userIds : []).map(String);
+  let removed = 0;
+  for (const id of ids) {
+    if (s.buyers.delete(id)) removed++;
+    s.buyersRemoved.add(id); // กด "ดึงรายชื่อ" ใหม่จะไม่ดึงคนนี้กลับมา
+  }
+  res.json({ success: true, removed });
 });
 
 // ➕ เพิ่มคนที่เลือกจากผลค้นหาแชท เข้าตารางรายชื่อลูกค้าของ session แล้วค้นหาที่อยู่ให้ทันที
@@ -3857,6 +3966,7 @@ app.post('/api/live/buyers/add-from-chat', checkAuth, (req, res) => {
     return [psid, { name: String(p.name || ''), lastKeyword: '', matchedCount: 0, lastMessage: '(เพิ่มจากแชท)', psid, source: 'chat' }];
   });
 
+  if (s.buyersRemoved) entries.forEach(([uid]) => s.buyersRemoved.delete(uid)); // เพิ่มกลับเองได้
   s.buyersJob = { running: true, total: entries.length, done: 0, found: 0, message: 'กำลังค้นหาที่อยู่จากแชท...', warning: '', shouldStop: false };
   res.json({ success: true, total: entries.length });
   runBuyersJob(ctx.pageData, s, entries).catch(e => {
