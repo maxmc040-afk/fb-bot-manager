@@ -350,7 +350,7 @@ const defaultBeemoveConfig = {
   accountId: '',               // กรณีมีหลายร้าน (บัญชีย่อย) ระบุ ID ร้าน
   apiKey: '',
   baseUrl: 'https://api.beemove.co.th',
-  partnerKeyword: 'ไปรษณีย์',   // เลือกขนส่งที่ชื่อมีคำนี้ (เช่น ไปรษณีย์ / Thailand Post / EMS / Flash)
+  partnerKeyword: 'ไปรษณีย์, Thailand Post',   // เลือกขนส่งที่ชื่อมีคำนี้ (เช่น ไปรษณีย์ / Thailand Post / EMS / Flash)
   partnerId: '',               // ถ้าระบุ จะใช้ขนส่งนี้เสมอ
   pickupPointId: '',
   senderName: '', senderPhone: '', senderAddress: '',
@@ -549,9 +549,19 @@ function pickPartner(bm, prices) {
   const ok = (prices || []).filter(p => !(p.errors && p.errors.length) && p.partner);
   if (bm.partnerId) return ok.find(p => String(p.partner.id) === String(bm.partnerId)) || null;
   const kws = String(bm.partnerKeyword || '').split(',').map(k => k.trim().toLowerCase()).filter(Boolean);
+  // ชื่อเรียกเดียวกันของขนส่งแต่ละเจ้า (Bee Move ใช้ชื่ออังกฤษ เช่น "Thailand Post")
+  const ALIASES = [
+    /ไปรษณีย์|ปณ|thai\s*post|thailand\s*post|ems|ems\s*thai|thp/i,
+    /แฟลช|flash/i, /เคอรี่|kerry|kex/i, /เจแอนด์ที|j\s*&?\s*t/i, /เบส|best/i,
+    /นินจา|ninja/i, /ช้อปปี้|shopee|spx/i, /ลาซาด้า|lazada|lex/i, /ดีเอชแอล|dhl/i, /ไปรษณีย์ด่วน|scg|nim/i
+  ];
+  const nameOf = p => String(p.partner.partner_name || '') + ' ' + String(p.partner.partner_code || '');
   for (const kw of kws) {
-    const found = ok.find(p => String(p.partner.partner_name || '').toLowerCase().includes(kw) ||
-      String(p.partner.partner_code || '').toLowerCase().includes(kw));
+    let found = ok.find(p => nameOf(p).toLowerCase().includes(kw));
+    if (!found) {
+      const group = ALIASES.find(re => re.test(kw));
+      if (group) found = ok.find(p => group.test(nameOf(p)));
+    }
     if (found) return found;
   }
   return kws.length ? null : (ok[0] || null);
