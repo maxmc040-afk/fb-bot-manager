@@ -752,10 +752,33 @@ const RANK_MASK_RE = new RegExp(String.raw`(^|\s)` + RANK_SRC + String.raw`\s*[^
 
 function stripPhones(t) { return String(t || '').replace(PHONE_RE_G, ' '); }
 
+// ตัวเลข 5 หลักที่เป็นจำนวนเงิน (เช่น "20000 บาท", "ยอด 15000", "15,000") ไม่ใช่รหัสไปรษณีย์
+const MONEY_NUM_RE = /(?:ยอด|โอน|จ่าย|ค่า[^\s\d]{0,12}|ราคา|เงิน|มัดจำ|ผ่อน|ยืม|หนี้)\s*\d{4,6}|(?<!\d)\d{1,3}(?:,\d{3})+(?!\d)|(?<!\d)\d{4,6}\s*(?:บาท|฿|บ\.|\.-|-\.|k\b|K\b)/g;
+function stripMoney(t) { return String(t || '').replace(MONEY_NUM_RE, ' '); }
+function postcodesIn(t) { return stripMoney(stripPhones(t)).match(POSTCODE_RE) || []; }
+
+// มีหลักฐานว่าเป็นที่อยู่จริงไหม (ไม่ใช่แค่มีตัวเลข 5 หลัก)
+// ต้องมีอย่างใดอย่างหนึ่ง: คำบอกที่อยู่ (ต./อ./จ./ม./ถนน/ซอย/บ้านเลขที่/เลข 12/3)
+// หรือ ชื่อตำบล/อำเภอ/จังหวัด ที่ตรงกับรหัสไปรษณีย์ในข้อความ
+function hasAddressEvidence(t) {
+  const text = String(t || '');
+  if (ADDR_PATTERNS.some(re => re.test(text))) return true;
+  const zips = postcodesIn(text);
+  if (!zips.length) return false;
+  if (typeof thaiAddrDb === 'undefined' || !thaiAddrDb) return PHONE_RE.test(text); // ยังไม่มีฐานข้อมูลที่อยู่: ต้องมีเบอร์โทรด้วย
+  const c = compactTh(text);
+  for (const z of zips) {
+    for (const row of thaiAddrByZip.get(z) || []) {
+      if ((row.dn && row.dn.length >= 2 && c.includes(row.dn)) || (row.an && row.an.length >= 2 && c.includes(row.an)) || (row.pn && c.includes(row.pn))) return true;
+    }
+  }
+  return false;
+}
+
 function hasAddressSignal(t) {
   const text = String(t || '');
   if (PHONE_RE.test(text)) return true;
-  if ((stripPhones(text).match(POSTCODE_RE) || []).length) return true;
+  if (postcodesIn(text).length) return true;
   return ADDR_PATTERNS.some(re => re.test(text));
 }
 
@@ -764,7 +787,7 @@ function scoreAddressText(t) {
   if (!text.trim()) return 0;
   let score = 0;
   if (PHONE_RE.test(text)) score += 2;
-  if ((stripPhones(text).match(POSTCODE_RE) || []).length) score += 3;
+  if (postcodesIn(text).length) score += 3;
   for (const re of ADDR_PATTERNS) if (re.test(text)) score++;
   if (text.length >= 25) score++;
   return score;
@@ -899,7 +922,8 @@ function extractAddressInfo(msgs) {
     b.forEach((m, i) => { if (hasAddressSignal(m.text)) keptIdx.push(i); });
     if (!keptIdx.length) continue;
     const text = keptIdx.map(i => b[i].text).join('\n');
-    if (scoreAddressText(text) >= 4) best = { block: b, keptIdx };
+    // ต้องได้คะแนนพอ และต้องมีหลักฐานว่าเป็นที่อยู่จริง (กันข้อความคุยทั่วไปที่มีตัวเลข 5 หลัก เช่น "20000เลยนี้ ช่วยพี่หน่อยนะ")
+    if (scoreAddressText(text) >= 4 && hasAddressEvidence(text)) best = { block: b, keptIdx };
   }
   if (!best) return null;
 
@@ -907,7 +931,7 @@ function extractAddressInfo(msgs) {
   // กันข้อความอื่นในช่วงเดียวกัน (เช่น ชื่อร้าน + เบอร์อีกเบอร์) มาปนในที่อยู่
   const complete = best.keptIdx.filter(i => {
     const t = best.block[i].text;
-    return (stripPhones(t).match(POSTCODE_RE) || []).length > 0 && scoreAddressText(t) >= 6;
+    return postcodesIn(t).length > 0 && scoreAddressText(t) >= 6 && hasAddressEvidence(t);
   });
   if (complete.length) {
     const i = complete[complete.length - 1];
