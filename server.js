@@ -503,7 +503,8 @@ const defaultPageConfig = {
   pageId: '',
   pageName: '',
   easySlipApiKey: '47f197e2-8c05-42bb-b9ad-9186f84faa82', // EasySlip API Key (สำรอง)
-  slipProvider: 'zwiz',   // ผู้ให้บริการตรวจสลิป: 'zwiz' (หลัก) หรือ 'easyslip'
+  slipProvider: 'zwiz',
+  enableCommentBot: true, // สวิตช์หลัก เปิด/ปิด บอตตอบกลับคอมเมนต์ (โพสต์ทั่วไป)   // ผู้ให้บริการตรวจสลิป: 'zwiz' (หลัก) หรือ 'easyslip'
   zwizApiKey: process.env.ZWIZ_API_KEY || '', // ZWIZ.AI Slip Verification API Key
   
   matchType: 'contains',
@@ -1873,6 +1874,17 @@ app.get('/', (req, res) => {
 
             <main class="flex-1 overflow-y-auto p-6">
                 <div id="tab-dashboard" class="space-y-6">
+                    <div id="bot-switch-card" class="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                            <h3 class="text-base font-bold text-slate-800">🤖 บอตตอบกลับคอมเมนต์อัตโนมัติ</h3>
+                            <p id="bot-switch-desc" class="text-xs text-slate-500 mt-1">เปิด = กดไลก์ / ตอบใต้คอมเมนต์ / ส่งเข้าแชท ตามที่ตั้งไว้ด้านล่าง · ปิด = หยุดตอบทั้งหมด (มีผลทันที ไม่ต้องกดบันทึก)</p>
+                        </div>
+                        <label class="flex items-center cursor-pointer">
+                            <input type="checkbox" id="enable-comment-bot" class="sr-only peer" onchange="toggleCommentBot(this)">
+                            <div class="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-500 relative"></div>
+                            <span id="bot-switch-label" class="ml-3 text-sm font-semibold text-slate-700">เปิดใช้งาน</span>
+                        </label>
+                    </div>
                     <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
                         <label class="text-sm font-semibold text-slate-700 block mb-2">คำดัก: หากคอมเมนต์ของลูกเพจ :</label>
                         <div class="flex gap-2 mb-4">
@@ -1944,7 +1956,7 @@ app.get('/', (req, res) => {
                     <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-6">
                         <div class="flex items-center justify-between border-b border-slate-100 pb-4">
                             <div>
-                                <h3 class="text-base font-bold text-slate-800">🧾 ตั้งค่าตรวจสลิปอัตโนมัติ (EasySlip API)</h3>
+                                <h3 class="text-base font-bold text-slate-800">🧾 ตั้งค่าตรวจสลิปอัตโนมัติ (ZWIZ.AI / EasySlip)</h3>
                                 <p class="text-xs text-slate-500 mt-1">เมื่อลูกค้าส่งรูปสลิปเข้ามาในแชท ระบบจะตรวจยอดเงิน เลขบัญชีผู้รับ และเช็คสลิปซ้ำให้อัตโนมัติ</p>
                             </div>
                             <label class="flex items-center cursor-pointer">
@@ -2734,6 +2746,7 @@ app.get('/', (req, res) => {
             document.getElementById('enable-inbox').checked = !!currentConfig.enableInbox;
             document.getElementById('enable-auto-like').checked = !!currentConfig.enableAutoLike;
             document.getElementById('reply-cooldown').value = currentConfig.replyCooldownMin || 0;
+            renderBotSwitch();
             if (!Array.isArray(currentConfig.keywordLabels)) currentConfig.keywordLabels = [];
             if (!Array.isArray(currentConfig.keywordRemoveLabels)) currentConfig.keywordRemoveLabels = [];
             renderPgKwLabels();
@@ -2925,6 +2938,7 @@ app.get('/', (req, res) => {
             currentConfig.enableInbox = document.getElementById('enable-inbox').checked;
             currentConfig.enableAutoLike = document.getElementById('enable-auto-like').checked;
             currentConfig.replyCooldownMin = Math.min(1440, Math.max(0, parseInt(document.getElementById('reply-cooldown').value, 10) || 0));
+            currentConfig.enableCommentBot = document.getElementById('enable-comment-bot').checked;
             // currentConfig.keywordLabels / keywordRemoveLabels แก้สดจากปุ่มเพิ่ม/ลบป้ายแล้ว
             
             currentConfig.verifyToken = document.getElementById('conf-verify-token').value.trim();
@@ -3511,6 +3525,30 @@ app.get('/', (req, res) => {
                 html += '</select>';
                 box.innerHTML = html;
             });
+        }
+
+        // ===== 🤖 สวิตช์หลัก เปิด/ปิด บอตตอบกลับคอมเมนต์ =====
+        function renderBotSwitch() {
+            const on = currentConfig.enableCommentBot !== false;
+            document.getElementById('enable-comment-bot').checked = on;
+            document.getElementById('bot-switch-label').innerText = on ? 'เปิดใช้งาน' : 'ปิดอยู่';
+            document.getElementById('bot-switch-label').className = 'ml-3 text-sm font-semibold ' + (on ? 'text-emerald-600' : 'text-rose-600');
+            document.getElementById('bot-switch-card').className = 'rounded-2xl shadow-sm border p-5 flex flex-wrap items-center justify-between gap-3 ' + (on ? 'bg-white border-slate-200' : 'bg-rose-50 border-rose-200');
+        }
+        async function toggleCommentBot(cb) {
+            if (!currentActivePageId) { cb.checked = !cb.checked; return alert('กรุณาเลือกเพจก่อน'); }
+            const on = cb.checked;
+            try {
+                const r = await (await fetch('/api/config?token=' + authToken + '&pageId=' + currentActivePageId, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enableCommentBot: on })
+                })).json();
+                if (!r.success) throw new Error(r.error || 'บันทึกไม่สำเร็จ');
+                currentConfig.enableCommentBot = on;
+            } catch (e) {
+                cb.checked = !on;
+                alert('❌ ' + e.message);
+            }
+            renderBotSwitch();
         }
 
         // ===== 🏷️ ป้ายคำดัก ระดับเพจ (เมนูตอบกลับคอมเมนต์) =====
@@ -6452,7 +6490,9 @@ app.post('/webhook', async (req, res) => {
             if (inCooldown) console.log('⏱️ [Comment] ข้าม ' + (comment.from?.name || senderId) + ' (เพิ่งตอบไปไม่ถึง ' + cfg.replyCooldownMin + ' นาที)');
             if (isMatched && cRec && !inCooldown) cRec.lastRepliedAt = Date.now();
 
-            if (isMatched && cfg.pageAccessToken && !inCooldown) {
+            // สวิตช์หลักในเมนู "ตอบกลับคอมเมนต์" ปิดอยู่ -> ไม่ตอบคอมเมนต์ในโพสต์ทั่วไป (Live Session ใช้สวิตช์ของ session เอง)
+            const botOff = !liveSession && configStore.enableCommentBot === false;
+            if (isMatched && cfg.pageAccessToken && !inCooldown && !botOff) {
               const token = cfg.pageAccessToken;
               const commentId = comment.comment_id;
               const pageDataRef = targetRecord.pageData;
@@ -6504,7 +6544,7 @@ app.post('/webhook', async (req, res) => {
                   if (known) labelKeywordCommenter(pageDataRef, pageCommenterRec(pageDataRef, senderId), String(known), cfg);
                 }
               }), 'comment');
-              if (cfg.enableAutoLike) {
+              if (cfg.enableAutoLike && !botOff) {
                 runTask(() => fbLimit(pageId + ':like', () => axios.post('https://graph.facebook.com/v19.0/' + commentId + '/likes', {}, {
                   params: { access_token: token }, timeout: 15000
                 }).catch(() => {})), 'like');
