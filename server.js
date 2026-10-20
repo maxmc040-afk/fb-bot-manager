@@ -2183,6 +2183,7 @@ app.get('/', (req, res) => {
                                     </select>
                                     <span id="lv-cm-summary"></span>
                                 </div>
+                                <div id="pager-cm" class="pager-bar flex flex-wrap items-center gap-2 text-xs text-slate-600 mb-2"></div>
                                 <div class="overflow-auto max-h-96">
                                     <table class="w-full text-xs">
                                         <thead class="text-left text-slate-500 border-b border-slate-200"><tr><th class="py-2 pr-2">✓</th><th class="py-2 pr-2">ชื่อ</th><th class="py-2 pr-2">ครั้ง</th><th class="py-2 pr-2">ตรงคำดัก</th><th class="py-2 pr-2">สถานะโอน</th><th class="py-2 pr-2">คอมเมนต์ล่าสุด</th><th class="py-2">เวลา</th></tr></thead>
@@ -2192,6 +2193,7 @@ app.get('/', (req, res) => {
                             </div>
                             <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
                                 <h3 class="text-base font-bold text-slate-700 mb-3">🧾 สลิปที่ตรวจผ่านใน session นี้</h3>
+                                <div id="pager-slips" class="pager-bar flex flex-wrap items-center gap-2 text-xs text-slate-600 mb-2"></div>
                                 <div class="overflow-auto max-h-96">
                                     <table class="w-full text-xs">
                                         <thead class="text-left text-slate-500 border-b border-slate-200"><tr><th class="py-2 pr-2">เวลา</th><th class="py-2 pr-2">ลูกค้า</th><th class="py-2 pr-2 text-right">ยอด (บาท)</th><th class="py-2">เลขอ้างอิง</th></tr></thead>
@@ -2233,6 +2235,7 @@ app.get('/', (req, res) => {
                                     <label class="flex items-center gap-2 cursor-pointer text-xs text-slate-600"><input type="checkbox" id="lv-chat-all" onchange="toggleAllChats(this.checked)" class="w-4 h-4 rounded"> เลือกทั้งหมด <span id="lv-chat-count"></span></label>
                                     <button type="button" onclick="addChatsToBuyers()" class="px-4 py-2 text-xs font-semibold rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm">➕ เพิ่มที่เลือกเข้ารายชื่อลูกค้า</button>
                                 </div>
+                                <div id="pager-chat" class="pager-bar flex flex-wrap items-center gap-2 text-xs text-slate-600 mb-2"></div>
                                 <div class="overflow-auto max-h-96">
                                     <table class="w-full text-xs">
                                         <thead class="text-left text-slate-500 border-b border-slate-200"><tr>
@@ -2281,6 +2284,7 @@ app.get('/', (req, res) => {
                                 <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" id="lv-buyers-all" onchange="toggleAllBuyers(this.checked)" class="w-4 h-4 rounded"> เลือกทั้งหมด</label>
                                 <span id="lv-buyers-summary"></span>
                             </div>
+                            <div id="pager-buyers" class="pager-bar flex flex-wrap items-center gap-2 text-xs text-slate-600 mb-2"></div>
                             <div class="overflow-auto max-h-[36rem]">
                                 <table class="w-full text-xs">
                                     <thead class="text-left text-slate-500 border-b border-slate-200"><tr>
@@ -3206,14 +3210,8 @@ app.get('/', (req, res) => {
             commenterList = d.commenters || [];
             renderCommenters();
 
-            let sh = '';
-            d.slips.forEach(function(x) {
-                sh += '<tr class="border-b border-slate-100"><td class="py-1.5 pr-2 text-slate-500">' + fmtTime(x.time) + '</td>'
-                    + '<td class="py-1.5 pr-2 font-medium text-slate-700">' + escapeHtml(x.senderName || x.senderId) + '</td>'
-                    + '<td class="py-1.5 pr-2 text-right text-emerald-600 font-semibold">' + fmtMoney(x.amount) + '</td>'
-                    + '<td class="py-1.5 text-slate-500">' + escapeHtml(x.transRef) + '</td></tr>';
-            });
-            document.getElementById('lv-slips').innerHTML = sh || '<tr><td colspan="4" class="py-3 text-slate-400">ยังไม่มีสลิป</td></tr>';
+            slipsList = d.slips || [];
+            renderSlips();
 
             const bc = d.broadcastStatus;
             const area = document.getElementById('lv-bc-progress');
@@ -3233,11 +3231,94 @@ app.get('/', (req, res) => {
             document.getElementById('lv-btn-bc-stop').classList.toggle('hidden', !bc.isBroadcasting);
         }
 
+        // ===== 📄 แบ่งหน้าตาราง (รายการต่อหน้า 10/20/50/100) =====
+        const PAGER_SIZES = [10, 20, 50, 100];
+        const pagers = {};
+        const PAGER_RENDER = {
+            buyers: function() { renderBuyers(); },
+            chat: function() { renderChatResults(); },
+            slips: function() { renderSlips(); },
+            cm: function() { renderCommenters(); }
+        };
+        function pagerState(key) {
+            if (!pagers[key]) {
+                let size = 10;
+                try { const v = parseInt(localStorage.getItem('pager_' + key), 10); if (PAGER_SIZES.indexOf(v) >= 0) size = v; } catch (e) {}
+                pagers[key] = { page: 1, size: size };
+            }
+            return pagers[key];
+        }
+        // ตัดรายการเฉพาะหน้าปัจจุบัน + วาดแถบเลือกหน้า
+        function pageSlice(key, list) {
+            const st = pagerState(key);
+            const total = list.length;
+            const pages = Math.max(1, Math.ceil(total / st.size));
+            if (st.page > pages) st.page = pages;
+            if (st.page < 1) st.page = 1;
+            renderPagerBar(key, total, pages);
+            return list.slice((st.page - 1) * st.size, st.page * st.size);
+        }
+        function renderPagerBar(key, total, pages) {
+            const box = document.getElementById('pager-' + key);
+            if (!box) return;
+            const st = pagerState(key);
+            const from = total ? (st.page - 1) * st.size + 1 : 0;
+            const to = Math.min(total, st.page * st.size);
+            let opts = '';
+            PAGER_SIZES.forEach(function(n) { opts += '<option value="' + n + '"' + (n === st.size ? ' selected' : '') + '>' + n + '</option>'; });
+            const btn = 'px-2 py-1 rounded-md border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed';
+            box.innerHTML = '<span>รายการต่อหน้า</span>'
+                + '<select class="px-2 py-1 border border-slate-300 rounded-md bg-white text-xs" data-key="' + key + '" onchange="pagerSetSize(this)">' + opts + '</select>'
+                + '<span class="text-slate-400">' + from + '-' + to + ' จาก ' + total + '</span>'
+                + (pages > 1
+                    ? '<span class="ml-auto flex items-center gap-1">'
+                        + '<button type="button" class="' + btn + '" data-key="' + key + '" data-go="first" onclick="pagerGo(this)"' + (st.page <= 1 ? ' disabled' : '') + '>«</button>'
+                        + '<button type="button" class="' + btn + '" data-key="' + key + '" data-go="prev" onclick="pagerGo(this)"' + (st.page <= 1 ? ' disabled' : '') + '>‹</button>'
+                        + '<span class="px-2">หน้า ' + st.page + ' / ' + pages + '</span>'
+                        + '<button type="button" class="' + btn + '" data-key="' + key + '" data-go="next" onclick="pagerGo(this)"' + (st.page >= pages ? ' disabled' : '') + '>›</button>'
+                        + '<button type="button" class="' + btn + '" data-key="' + key + '" data-go="last" onclick="pagerGo(this)"' + (st.page >= pages ? ' disabled' : '') + '>»</button>'
+                      + '</span>'
+                    : '');
+        }
+        function pagerSetSize(sel) {
+            const key = sel.getAttribute('data-key');
+            const st = pagerState(key);
+            st.size = parseInt(sel.value, 10) || 10;
+            st.page = 1;
+            try { localStorage.setItem('pager_' + key, String(st.size)); } catch (e) {}
+            PAGER_RENDER[key]();
+        }
+        function pagerGo(btn) {
+            const key = btn.getAttribute('data-key');
+            const st = pagerState(key);
+            const go = btn.getAttribute('data-go');
+            if (go === 'first') st.page = 1;
+            else if (go === 'prev') st.page = st.page - 1;
+            else if (go === 'next') st.page = st.page + 1;
+            else if (go === 'last') st.page = 999999;
+            PAGER_RENDER[key]();
+        }
+
+        // ===== ตารางสลิปที่ตรวจผ่าน =====
+        let slipsList = [];
+        function renderSlips() {
+            let sh = '';
+            pageSlice('slips', slipsList).forEach(function(x) {
+                sh += '<tr class="border-b border-slate-100"><td class="py-1.5 pr-2 text-slate-500">' + fmtTime(x.time) + '</td>'
+                    + '<td class="py-1.5 pr-2 font-medium text-slate-700">' + escapeHtml(x.senderName || x.senderId) + '</td>'
+                    + '<td class="py-1.5 pr-2 text-right text-emerald-600 font-semibold">' + fmtMoney(x.amount) + '</td>'
+                    + '<td class="py-1.5 text-slate-500">' + escapeHtml(x.transRef) + '</td></tr>';
+            });
+            document.getElementById('lv-slips').innerHTML = sh || '<tr><td colspan="4" class="py-3 text-slate-400">ยังไม่มีสลิป</td></tr>';
+        }
+
         // ===== ตารางคนคอมเมนต์: ติ๊กเลือก + สถานะโอน + ดึงข้อมูลรายคน =====
         let commenterList = [];
         let commenterSel = new Set();
 
         function filteredCommenters() {
+            const fEl = document.getElementById('lv-cm-filter');
+            if (fEl && fEl.getAttribute('data-last') !== fEl.value) { fEl.setAttribute('data-last', fEl.value); pagerState('cm').page = 1; }
             const f = document.getElementById('lv-cm-filter').value;
             return commenterList.filter(function(c) {
                 if(f === 'all') return true;
@@ -3251,7 +3332,7 @@ app.get('/', (req, res) => {
         function renderCommenters() {
             const list = filteredCommenters();
             let ch = '';
-            list.forEach(function(c) {
+            pageSlice('cm', list).forEach(function(c) {
                 const pay = c.matchedCount > 0
                     ? (c.paid
                         ? '<span class="inline-block px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-semibold whitespace-nowrap">✅ โอนแล้ว ' + fmtMoney(c.paidTotal) + ' ฿</span>' + (c.slipCount > 1 ? '<div class="text-[10px] text-slate-400">' + c.slipCount + ' สลิป</div>' : '')
@@ -3600,11 +3681,12 @@ app.get('/', (req, res) => {
             const tbody = document.getElementById('lv-buyers');
             if(!buyersList.length) {
                 tbody.innerHTML = '<tr><td colspan="10" class="py-3 text-slate-400">ยังไม่มีข้อมูล กด "ดึงรายชื่อ + ค้นหาที่อยู่"</td></tr>';
+                renderPagerBar('buyers', 0, 1);
                 updateBuyersSummary();
                 return;
             }
             let html = '';
-            buyersList.forEach(function(b) {
+            pageSlice('buyers', buyersList).forEach(function(b) {
                 const st = BUYER_STATUS[b.status] || BUYER_STATUS.pending;
                 const inp = 'w-full p-1.5 text-xs border border-slate-200 rounded-md focus:outline-none focus:border-indigo-400';
                 html += '<tr data-uid="' + escapeHtml(b.userId) + '" class="border-b border-slate-100 align-top">'
@@ -3782,6 +3864,7 @@ app.get('/', (req, res) => {
                 const d = await res.json();
                 if(!d.success) { st.innerText = '❌ ' + d.error; return; }
                 chatResults = d.results || [];
+                pagerState('chat').page = 1; // ค้นหาใหม่ เริ่มหน้า 1
                 chatSel = new Set(chatResults.filter(function(r) { return r.hasAddress; }).map(function(r) { return r.psid; }));
                 let info = 'พบ ' + chatResults.length + ' แชท · ตรวจ ' + d.scanned + ' แชทในช่วงวันที่ (อ่านข้อความ ' + d.readCount + ' แชท)';
                 if(d.oldestSeen) info += ' · ย้อนไปถึง ' + new Date(d.oldestSeen).toLocaleDateString('th-TH', { dateStyle: 'medium' });
@@ -3802,7 +3885,7 @@ app.get('/', (req, res) => {
             const tbody = document.getElementById('lv-chat-results');
             box.classList.toggle('hidden', !chatResults.length);
             const inList = new Set(buyersList.map(function(b) { return b.psid; }).filter(Boolean));
-            tbody.innerHTML = chatResults.map(function(r) {
+            tbody.innerHTML = pageSlice('chat', chatResults).map(function(r) {
                 const added = inList.has(r.psid);
                 return '<tr data-psid="' + escapeHtml(r.psid) + '" class="border-b border-slate-100 align-top">'
                     + '<td class="py-2 pr-2"><input type="checkbox" class="cs-sel w-4 h-4 rounded"' + (chatSel.has(r.psid) ? ' checked' : '') + '></td>'
@@ -3948,15 +4031,13 @@ app.get('/', (req, res) => {
             } catch(err) { console.error(err); }
         });
 
+        // รวมคนที่ติ๊กไว้ "ทุกหน้า" (แถวที่แสดงอยู่ใช้ค่าที่แก้ในช่องล่าสุด หน้าอื่นใช้ค่าที่บันทึกไว้)
         function getSelectedBuyers() {
-            const out = [];
-            document.querySelectorAll('#lv-buyers tr[data-uid]').forEach(function(tr) {
-                const uid = tr.getAttribute('data-uid');
-                if(!buyersSelected.has(uid)) return;
-                const b = buyersList.find(function(x) { return x.userId === uid; }) || {};
-                out.push(Object.assign({}, b, readBuyerRow(tr)));
+            const rows = {};
+            document.querySelectorAll('#lv-buyers tr[data-uid]').forEach(function(tr) { rows[tr.getAttribute('data-uid')] = tr; });
+            return buyersList.filter(function(b) { return buyersSelected.has(b.userId); }).map(function(b) {
+                return rows[b.userId] ? Object.assign({}, b, readBuyerRow(rows[b.userId])) : Object.assign({}, b);
             });
-            return out;
         }
 
         async function notifyBuyers(ids) {
