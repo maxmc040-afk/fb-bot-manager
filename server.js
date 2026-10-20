@@ -195,24 +195,54 @@ function pageCommenterRec(pageData, senderId) {
 // ติด / ลบป้ายให้คนที่คอมเมนต์ตรงคำดัก (ทำครั้งเดียวต่อคนต่อ session)
 // labels = ป้ายที่จะติด (array) หรือ config ของ session ({ keywordLabels, keywordRemoveLabels })
 function labelKeywordCommenter(pageData, commenter, psid, labels) {
-  const addList = Array.isArray(labels) ? labels : (labels && labels.keywordLabels) || [];
-  const removeList = (!Array.isArray(labels) && labels && labels.keywordRemoveLabels) || [];
-  if (!psid || !commenter || commenter.kwLabeled || (!addList.length && !removeList.length) || !pageData.config.pageAccessToken) return;
-  commenter.kwLabeled = true;
-  commenter.kwLabeledAt = Date.now();
+  const addList = (Array.isArray(labels) ? labels : (labels && labels.keywordLabels) || []).filter(l => l && l.id);
+  const removeList = ((!Array.isArray(labels) && labels && labels.keywordRemoveLabels) || []).filter(l => l && l.id);
+  if (!commenter || (!addList.length && !removeList.length)) return;
+  if (!pageData.config.pageAccessToken) { commenter.kwLabelStatus = '❌ เพจไม่มี Token'; return; }
+  if (!psid) { commenter.kwLabelStatus = '⏳ รอ ID แชทของลูกค้า (ต้องเปิดส่งข้อความเข้าแชท)'; return; }
+  if (commenter.kwLabeled || commenter.kwLabelBusy) return;
+  commenter.kwLabelBusy = true;
   runTask(async () => {
+    const errors = [];
+    const done = [];
     for (const l of addList) {
-      if (!l || !l.id) continue;
-      try { await setInboxLabelById(pageData, psid, l.id); console.log('🏷️ [Label] คำดัก: ติดป้าย "' + l.name + '" ให้ ' + psid); }
-      catch (e) { pageData.lastLabelError = '"' + l.name + '": ' + graphErrorMessage(e); console.error('❌ [Label Error]', pageData.lastLabelError); commenter.kwLabeled = false; }
+      // ป้ายชื่อเดียวกันในเพจอาจมีหลาย ID (เช่น สร้างใน Business Suite + สร้างผ่าน API) -> ติดให้ครบทุก ID
+      // เพื่อให้ป้ายขึ้นในหน้า Meta Business Suite แน่นอน
+      const ids = await sameNameLabelIds(pageData, l.id).catch(() => [l.id]);
+      let okCount = 0, lastErr = null;
+      for (const id of ids) {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try { await setInboxLabelById(pageData, psid, id); okCount++; break; }
+          catch (e) { lastErr = e; if (attempt === 1 || !isTransientFbError(e)) break; await sleep(800); }
+        }
+      }
+      if (okCount) { done.push('+' + l.name); console.log('🏷️ [Label] คำดัก: ติดป้าย "' + l.name + '" ให้ ' + psid + ' (' + okCount + '/' + ids.length + ' ID)'); }
+      else errors.push('ติด "' + l.name + '": ' + graphErrorMessage(lastErr));
     }
     for (const l of removeList) {
-      if (!l || !l.id) continue;
-      try {
-        for (const id of await sameNameLabelIds(pageData, l.id)) { try { await setInboxLabelById(pageData, psid, id, true); } catch (e) {} }
-        console.log('🏷️ [Label] คำดัก: ลบป้าย "' + l.name + '" ของ ' + psid);
+      for (const id of await sameNameLabelIds(pageData, l.id).catch(() => [l.id])) {
+        try { await setInboxLabelById(pageData, psid, id, true); }
+        catch (e) {
+          const code = e.response?.data?.error?.code;
+          // ลูกค้าไม่มีป้ายนี้อยู่แล้ว (code 100) ไม่ถือว่าผิดพลาด
+          if (code !== 100) errors.push('ลบ "' + l.name + '": ' + graphErrorMessage(e));
+        }
       }
-      catch (e) { /* ลูกค้าไม่มีป้ายนี้อยู่แล้ว ไม่เป็นไร */ }
+      done.push('-' + l.name);
+    }
+    commenter.kwLabelBusy = false;
+    commenter.kwLabelAt = Date.now();
+    commenter.kwLabeledAt = Date.now();
+    if (errors.length) {
+      commenter.kwLabeled = false; // ให้ลองใหม่ได้ (เช่น ตอนลูกค้าทักแชท หรือคอมเมนต์อีกครั้ง)
+      commenter.kwLabelStatus = '❌ ' + errors.join(' · ').slice(0, 300);
+      pageData.lastLabelError = errors[0];
+      pageData.lastLabelErrorAt = Date.now();
+      console.error('❌ [Label Error]', errors.join(' | '));
+    } else {
+      commenter.kwLabeled = true;
+      commenter.kwLabelStatus = '✅ ' + done.join(' ');
+      pageData.lastLabelError = ''; // ติดป้ายสำเร็จแล้ว ล้างคำเตือนเดิม
     }
   }, 'kw-label');
 }
@@ -226,8 +256,11 @@ function labelSlipResult(pageData, psid, result) {
   if (!psid || !cfg.pageAccessToken || (!add.length && !remove.length)) return;
   runTask(async () => {
     for (const l of add) {
-      try { await setInboxLabelById(pageData, psid, l.id); console.log('🏷️ [Label] ติดป้าย "' + l.name + '" ให้ ' + psid); }
-      catch (e) { pageData.lastLabelError = '"' + l.name + '": ' + graphErrorMessage(e); console.error('❌ [Label Error]', pageData.lastLabelError); }
+      const ids = await sameNameLabelIds(pageData, l.id).catch(() => [l.id]);
+      let okCount = 0, lastErr = null;
+      for (const id of ids) { try { await setInboxLabelById(pageData, psid, id); okCount++; } catch (e) { lastErr = e; } }
+      if (okCount) console.log('🏷️ [Label] ติดป้าย "' + l.name + '" ให้ ' + psid + ' (' + okCount + '/' + ids.length + ' ID)');
+      else { pageData.lastLabelError = '"' + l.name + '": ' + graphErrorMessage(lastErr); pageData.lastLabelErrorAt = Date.now(); console.error('❌ [Label Error]', pageData.lastLabelError); }
     }
     for (const l of remove) {
       try {
@@ -2216,6 +2249,7 @@ app.get('/', (req, res) => {
                                 <div id="lv-kw-labels" class="flex flex-wrap items-center gap-2"></div>
                                 <div class="text-xs font-semibold text-slate-600 pt-1">ลบป้ายกำกับ <span class="font-normal text-slate-400">(เช่น ลบ "โอนแล้ว" ที่ค้างจากไลฟ์ก่อน เมื่อลูกค้ากด 1 ในไลฟ์นี้)</span></div>
                                 <div id="lv-kw-remove-labels" class="flex flex-wrap items-center gap-2"></div>
+                                <div id="lv-kw-status" class="hidden text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2"></div>
                                 <div class="text-xs text-slate-400">เคล็ดลับ: ที่หน้าตั้งค่าสลิป แท็บ "สลิปถูกต้อง" ให้ติดป้าย "โอนแล้ว" และลบป้าย "ยังไม่โอน" ป้ายจะเปลี่ยนเองเมื่อลูกค้าโอน</div>
                             </div>
                             <div class="flex justify-end">
@@ -3260,6 +3294,8 @@ app.get('/', (req, res) => {
 
         function renderLiveStats(d) {
             const s = d.session;
+            const kwSt = document.getElementById('lv-kw-status');
+            if (kwSt) { kwSt.innerText = d.labelError ? ('⚠️ ติดป้ายล่าสุดไม่สำเร็จ: ' + d.labelError) : ''; kwSt.classList.toggle('hidden', !d.labelError); }
             const warn = document.getElementById('lv-reply-warn');
             if (warn) { warn.innerText = d.replyWarning || ''; warn.classList.toggle('hidden', !d.replyWarning); }
             currentLiveStatus = s.status;
@@ -3409,7 +3445,8 @@ app.get('/', (req, res) => {
                     : '<span class="text-slate-300">-</span>';
                 ch += '<tr data-cid="' + escapeHtml(c.userId) + '" class="border-b border-slate-100">'
                     + '<td class="py-1.5 pr-2"><input type="checkbox" class="cm-sel w-4 h-4 rounded"' + (commenterSel.has(c.userId) ? ' checked' : '') + '></td>'
-                    + '<td class="py-1.5 pr-2 font-medium text-slate-700">' + escapeHtml(c.name || c.userId) + (c.inBuyers ? '<div class="text-[10px] text-indigo-500 font-normal">อยู่ในรายชื่อลูกค้าแล้ว</div>' : '') + '</td>'
+                    + '<td class="py-1.5 pr-2 font-medium text-slate-700">' + escapeHtml(c.name || c.userId) + (c.inBuyers ? '<div class="text-[10px] text-indigo-500 font-normal">อยู่ในรายชื่อลูกค้าแล้ว</div>' : '')
+                        + (c.kwLabelStatus ? '<div class="text-[10px] font-normal ' + (c.kwLabelStatus.charAt(0) === '❌' ? 'text-rose-600' : (c.kwLabelStatus.charAt(0) === '⏳' ? 'text-amber-600' : 'text-pink-600')) + '">🏷️ ' + escapeHtml(c.kwLabelStatus) + '</div>' : '') + '</td>'
                     + '<td class="py-1.5 pr-2">' + c.count + '</td>'
                     + '<td class="py-1.5 pr-2">' + (c.matchedCount > 0 ? '<span class="text-blue-600 font-semibold">' + c.matchedCount + ' (' + escapeHtml(c.lastKeyword) + ')</span>' : '-') + '</td>'
                     + '<td class="py-1.5 pr-2">' + pay + '</td>'
@@ -5296,7 +5333,7 @@ app.get('/api/live/detail', checkAuth, (req, res) => {
   const psidMap = getPsidMap(ctx.pageData);
   const commenters = Array.from(s.commenters.entries())
     .map(([userId, c]) => {
-      const { pendingComments, kwLabeled, ...pub } = c; // ข้อมูลภายใน ไม่ต้องส่งไปหน้าเว็บ
+      const { pendingComments, kwLabeled, kwLabelBusy, ...pub } = c; // ข้อมูลภายใน ไม่ต้องส่งไปหน้าเว็บ
       return {
         userId, ...pub,
         ...paymentStatusFromIndex(slipIdx, userId, c.psid || psidMap.get(userId)),
@@ -5313,7 +5350,8 @@ app.get('/api/live/detail', checkAuth, (req, res) => {
     commenters,
     slips: s.slips.slice(-200).reverse(),
     broadcastStatus: s.broadcastStatus,
-    replyWarning: fbPauseWarning(ctx.pageData)
+    replyWarning: fbPauseWarning(ctx.pageData),
+    labelError: ctx.pageData.lastLabelError && Date.now() - (ctx.pageData.lastLabelErrorAt || 0) < 6 * 3600000 ? ctx.pageData.lastLabelError : ''
   });
 });
 
@@ -6342,6 +6380,12 @@ app.post('/webhook', async (req, res) => {
           // 📦 เก็บข้อความตัวอักษรของลูกค้าไว้ ใช้ค้นหาชื่อที่อยู่สำหรับใบแปะหน้า
           if (senderId && msgEvent.message && msgEvent.message.text) {
             logInboxText(targetRecord.pageData, senderId, msgEvent.message.text);
+            // ลูกค้าทักแชท: ถ้าเคยติดป้ายคำดักไม่สำเร็จ ลองใหม่ (ไลฟ์ที่เปิดอยู่)
+            for (const ls of Object.values(targetRecord.pageData.liveSessions || {})) {
+              if (ls.status !== 'active') continue;
+              const cm = findCommenterBySender(ls, senderId);
+              if (cm && cm.matchedCount > 0 && !cm.kwLabeled) labelKeywordCommenter(targetRecord.pageData, cm, String(senderId), ls.config);
+            }
           }
 
           if (msgEvent.message && msgEvent.message.attachments) {
