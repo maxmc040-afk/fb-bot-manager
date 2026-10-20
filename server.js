@@ -140,18 +140,28 @@ async function listPageLabels(pageData) {
   }
   const out = Array.from(groups.values()).sort((x, y) => x.name.localeCompare(y.name, 'th'));
   // จำไว้ใช้ตอน "ลบป้าย" / "กรองป้าย" ให้ครอบคลุมทุก ID ที่ชื่อเดียวกัน
-  pageData.labelGroups = { byId: new Map(), at: Date.now() };
-  for (const g of out) for (const id of g.ids) pageData.labelGroups.byId.set(id, g.ids);
+  pageData.labelGroups = { byId: new Map(), byName: new Map(), at: Date.now() };
+  for (const g of out) {
+    for (const id of g.ids) pageData.labelGroups.byId.set(id, g.ids);
+    pageData.labelGroups.byName.set(g.name.trim().toLowerCase(), g.ids);
+  }
   return out;
 }
 
 // ID ทั้งหมดที่เป็นป้ายชื่อเดียวกับ id นี้ (ถ้ายังไม่เคยโหลดรายชื่อป้าย จะโหลดก่อน 1 ครั้ง)
-async function sameNameLabelIds(pageData, id) {
+// name (ถ้าส่งมา): ถ้า ID เดิมถูกลบไปแล้ว แต่มีป้าย "ชื่อเดียวกัน" สร้างใหม่ -> ใช้ป้ายใหม่นั้นให้อัตโนมัติ
+async function sameNameLabelIds(pageData, id, name) {
   id = String(id);
-  if (!pageData.labelGroups || Date.now() - pageData.labelGroups.at > 10 * 60 * 1000) {
+  const stale = !pageData.labelGroups || Date.now() - pageData.labelGroups.at > 60 * 1000; // รายชื่อป้ายเก่ากว่า 1 นาที -> โหลดใหม่
+  const unknown = pageData.labelGroups && !pageData.labelGroups.byId.has(id);
+  // ไม่รู้จัก ID นี้ (เพิ่งลบ/สร้างป้ายใหม่) -> โหลดรายชื่อป้ายใหม่ (ไม่เกินทุก 30 วินาที)
+  if (stale || (unknown && Date.now() - pageData.labelGroups.at > 30 * 1000)) {
     try { await listPageLabels(pageData); } catch (e) { /* ใช้ id เดิม */ }
   }
-  return (pageData.labelGroups && pageData.labelGroups.byId.get(id)) || [id];
+  const g = pageData.labelGroups;
+  if (g && g.byId.has(id)) return g.byId.get(id);
+  if (g && name && g.byName.has(String(name).trim().toLowerCase())) return g.byName.get(String(name).trim().toLowerCase());
+  return [id];
 }
 
 // ป้ายกำกับทั้งหมดของลูกค้า 1 คน (คืนค่าเป็น Set ของ label id)
@@ -208,19 +218,29 @@ function labelKeywordCommenter(pageData, commenter, psid, labels) {
     for (const l of addList) {
       // ป้ายชื่อเดียวกันในเพจอาจมีหลาย ID (เช่น สร้างใน Business Suite + สร้างผ่าน API) -> ติดให้ครบทุก ID
       // เพื่อให้ป้ายขึ้นในหน้า Meta Business Suite แน่นอน
-      const ids = await sameNameLabelIds(pageData, l.id).catch(() => [l.id]);
+      let ids = await sameNameLabelIds(pageData, l.id, l.name).catch(() => [l.id]);
       let okCount = 0, lastErr = null;
-      for (const id of ids) {
-        for (let attempt = 0; attempt < 2; attempt++) {
-          try { await setInboxLabelById(pageData, psid, id); okCount++; break; }
-          catch (e) { lastErr = e; if (attempt === 1 || !isTransientFbError(e)) break; await sleep(800); }
+      for (let round = 0; round < 2 && !okCount; round++) {
+        if (round === 1) {
+          // ป้ายเดิมถูกลบ (Facebook ตอบว่าไม่มีป้ายนี้) -> โหลดรายชื่อป้ายใหม่ แล้วหาจากชื่อ
+          if (lastErr?.response?.data?.error?.code !== 100) break;
+          pageData.labelGroups = null;
+          const again = await sameNameLabelIds(pageData, l.id, l.name).catch(() => ids);
+          if (again.join() === ids.join()) break;
+          ids = again;
+        }
+        for (const id of ids) {
+          for (let attempt = 0; attempt < 2; attempt++) {
+            try { await setInboxLabelById(pageData, psid, id); okCount++; break; }
+            catch (e) { lastErr = e; if (attempt === 1 || !isTransientFbError(e)) break; await sleep(800); }
+          }
         }
       }
       if (okCount) { done.push('+' + l.name); console.log('🏷️ [Label] คำดัก: ติดป้าย "' + l.name + '" ให้ ' + psid + ' (' + okCount + '/' + ids.length + ' ID)'); }
       else errors.push('ติด "' + l.name + '": ' + graphErrorMessage(lastErr));
     }
     for (const l of removeList) {
-      for (const id of await sameNameLabelIds(pageData, l.id).catch(() => [l.id])) {
+      for (const id of await sameNameLabelIds(pageData, l.id, l.name).catch(() => [l.id])) {
         try { await setInboxLabelById(pageData, psid, id, true); }
         catch (e) {
           const code = e.response?.data?.error?.code;
@@ -256,15 +276,21 @@ function labelSlipResult(pageData, psid, result) {
   if (!psid || !cfg.pageAccessToken || (!add.length && !remove.length)) return;
   runTask(async () => {
     for (const l of add) {
-      const ids = await sameNameLabelIds(pageData, l.id).catch(() => [l.id]);
+      let ids = await sameNameLabelIds(pageData, l.id, l.name).catch(() => [l.id]);
       let okCount = 0, lastErr = null;
       for (const id of ids) { try { await setInboxLabelById(pageData, psid, id); okCount++; } catch (e) { lastErr = e; } }
+      if (!okCount && lastErr?.response?.data?.error?.code === 100) {
+        // ป้ายเดิมถูกลบ -> โหลดใหม่แล้วหาจากชื่อ
+        pageData.labelGroups = null;
+        ids = await sameNameLabelIds(pageData, l.id, l.name).catch(() => []);
+        for (const id of ids) { try { await setInboxLabelById(pageData, psid, id); okCount++; } catch (e) { lastErr = e; } }
+      }
       if (okCount) console.log('🏷️ [Label] ติดป้าย "' + l.name + '" ให้ ' + psid + ' (' + okCount + '/' + ids.length + ' ID)');
       else { pageData.lastLabelError = '"' + l.name + '": ' + graphErrorMessage(lastErr); pageData.lastLabelErrorAt = Date.now(); console.error('❌ [Label Error]', pageData.lastLabelError); }
     }
     for (const l of remove) {
       try {
-        for (const id of await sameNameLabelIds(pageData, l.id)) { try { await setInboxLabelById(pageData, psid, id, true); } catch (e) {} }
+        for (const id of await sameNameLabelIds(pageData, l.id, l.name)) { try { await setInboxLabelById(pageData, psid, id, true); } catch (e) {} }
         console.log('🏷️ [Label] ลบป้าย "' + l.name + '" ของ ' + psid);
       }
       catch (e) { /* ลูกค้าไม่มีป้ายนี้อยู่แล้ว ไม่เป็นไร */ }
