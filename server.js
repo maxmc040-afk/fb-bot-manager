@@ -2495,8 +2495,9 @@ app.get('/', (req, res) => {
                         </details>
                     </div>
 
-<div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
-                        <h3 class="text-base font-bold text-slate-700">⚙️ ตั้งค่า Webhook สำหรับ Meta for Developers</h3>
+<details class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 group">
+                        <summary class="cursor-pointer select-none text-sm font-semibold text-slate-500 hover:text-slate-700">⚙️ ตั้งค่าขั้นสูง: Webhook สำหรับ Meta for Developers <span class="font-normal text-xs text-slate-400">(ระบบตั้งให้อัตโนมัติตอนเพิ่มเพจ ปกติไม่ต้องแก้)</span></summary>
+                        <div class="space-y-4 mt-4">
                         <div>
                             <label class="text-xs font-semibold text-slate-500 block mb-1">Callback URL:</label>
                             <input type="text" id="webhook-url-display" readonly class="w-full p-2.5 text-sm bg-slate-50 border border-slate-200 rounded-lg text-slate-600">
@@ -2516,7 +2517,8 @@ app.get('/', (req, res) => {
                         <div class="pt-4 flex justify-end">
                             <button type="button" onclick="saveConfig()" class="px-6 py-2.5 bg-emerald-600 text-white font-medium rounded-xl hover:bg-emerald-700 shadow-sm">บันทึกตั้งค่า Webhook</button>
                         </div>
-                    </div>
+                        </div>
+                    </details>
                 </div>
             </main>
         </div>
