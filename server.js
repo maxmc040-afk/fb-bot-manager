@@ -2108,6 +2108,24 @@ app.get('/', (req, res) => {
                             <span id="label-load-status" class="text-slate-500">ป้ายกำกับเลือกจากที่มีในเพจ (สร้างป้ายใหม่ได้ที่ Meta Business Suite → จัดการป้ายกำกับ)</span>
                         </div>
 
+                        <details id="dup-tool" class="bg-amber-50/50 border border-amber-200 rounded-2xl p-4">
+                            <summary class="cursor-pointer select-none text-sm font-semibold text-amber-800">🧹 เครื่องมือป้ายชื่อซ้ำ <span class="font-normal text-xs text-amber-700">(ป้ายชื่อเดียวกันหลาย ID · ทดสอบหาตัวที่ซ่อนอยู่ แล้วลบ)</span></summary>
+                            <div class="mt-3 space-y-3 text-xs">
+                                <ol class="list-decimal pl-5 text-slate-600 space-y-0.5">
+                                    <li>กด "ค้นหาป้ายซ้ำ" แล้วเลือกบัญชีทดสอบ (บัญชีของคุณที่เคยคอมเมนต์ในไลฟ์)</li>
+                                    <li>กด "ทดสอบติด" ทีละ ID แล้วรีเฟรชแชทของบัญชีนั้นใน Meta Business Suite ดูว่าป้ายขึ้นไหม (กด "ถอดออก" ก่อนทดสอบ ID ถัดไป)</li>
+                                    <li>ID ที่ติดแล้ว "ไม่ขึ้น" ใน Business Suite = ตัวที่ซ่อนอยู่ → กด "ลบ"</li>
+                                </ol>
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <button type="button" onclick="loadDupLabels()" class="px-3 py-1.5 font-medium bg-white border border-amber-300 text-amber-800 rounded-lg hover:bg-amber-100">🔍 ค้นหาป้ายซ้ำ</button>
+                                    <span>บัญชีทดสอบ:</span>
+                                    <select id="dup-test-psid" class="px-2 py-1.5 border border-slate-300 rounded-lg bg-white max-w-xs"><option value="">-- กดค้นหาป้ายซ้ำก่อน --</option></select>
+                                    <span id="dup-status" class="text-slate-500"></span>
+                                </div>
+                                <div id="dup-list" class="space-y-2"></div>
+                            </div>
+                        </details>
+
                         <div class="flex justify-end pt-2">
                             <button type="button" onclick="saveConfig()" class="px-6 py-2.5 bg-emerald-600 text-white font-medium rounded-xl hover:bg-emerald-700 shadow-sm">บันทึกการตั้งค่าสลิป</button>
                         </div>
@@ -3027,6 +3045,66 @@ app.get('/', (req, res) => {
         }
         setInterval(loadDbStatus, 30000);
         setTimeout(loadDbStatus, 1500);
+
+        // ===== 🧹 เครื่องมือป้ายชื่อซ้ำ =====
+        async function loadDupLabels() {
+            if (!currentActivePageId) return alert('กรุณาเลือกเพจก่อน');
+            const st = document.getElementById('dup-status');
+            st.innerText = '⏳ กำลังค้นหา...';
+            try {
+                const r = await (await fetch('/api/labels/duplicates?token=' + authToken + '&pageId=' + currentActivePageId)).json();
+                if (!r.success) { st.innerText = '❌ ' + r.error; return; }
+                const sel = document.getElementById('dup-test-psid');
+                const prev = sel.value;
+                let opts = '<option value="">-- เลือกบัญชีทดสอบ --</option>';
+                (r.people || []).forEach(function(p) { opts += '<option value="' + escapeHtml(p.psid) + '">' + escapeHtml(p.name) + '</option>'; });
+                sel.innerHTML = opts;
+                if (prev) sel.value = prev;
+                st.innerText = r.duplicates.length ? ('พบป้ายชื่อซ้ำ ' + r.duplicates.length + ' ชื่อ') : '✅ ไม่มีป้ายชื่อซ้ำแล้ว';
+                let html = '';
+                r.duplicates.forEach(function(g) {
+                    html += '<div class="bg-white border border-amber-200 rounded-xl p-3"><div class="font-bold text-slate-700 mb-2">🏷️ ' + escapeHtml(g.name) + ' <span class="font-normal text-slate-400">(' + g.ids.length + ' ID)</span></div>';
+                    g.ids.forEach(function(id, i) {
+                        const b = 'px-2 py-1 rounded-md border text-xs ';
+                        html += '<div class="flex flex-wrap items-center gap-2 py-1 border-t border-slate-100">'
+                            + '<span class="font-mono text-slate-600 min-w-[11rem]">#' + (i + 1) + ' ID ' + escapeHtml(id) + '</span>'
+                            + '<button type="button" class="' + b + 'border-pink-300 text-pink-700 bg-white hover:bg-pink-50" data-id="' + escapeHtml(id) + '" data-act="add" onclick="dupTest(this)">ทดสอบติด</button>'
+                            + '<button type="button" class="' + b + 'border-slate-300 text-slate-600 bg-white hover:bg-slate-50" data-id="' + escapeHtml(id) + '" data-act="remove" onclick="dupTest(this)">ถอดออก</button>'
+                            + '<button type="button" class="' + b + 'border-rose-300 text-rose-700 bg-white hover:bg-rose-50" data-id="' + escapeHtml(id) + '" data-name="' + escapeHtml(g.name) + '" onclick="dupDelete(this)">🗑️ ลบ ID นี้</button>'
+                            + '<span class="dup-res text-slate-500" data-for="' + escapeHtml(id) + '"></span></div>';
+                    });
+                    html += '</div>';
+                });
+                document.getElementById('dup-list').innerHTML = html;
+            } catch (e) { st.innerText = '❌ ' + e.message; }
+        }
+        function dupResult(id, text) {
+            document.querySelectorAll('.dup-res').forEach(function(el) { if (el.getAttribute('data-for') === id) el.innerText = text; });
+        }
+        async function dupTest(btn) {
+            const id = btn.getAttribute('data-id');
+            const remove = btn.getAttribute('data-act') === 'remove';
+            const psid = document.getElementById('dup-test-psid').value;
+            if (!psid) return alert('กรุณาเลือกบัญชีทดสอบก่อน');
+            dupResult(id, '⏳ ...');
+            const r = await (await fetch('/api/labels/test?token=' + authToken + '&pageId=' + currentActivePageId, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ labelId: id, psid: psid, remove: remove })
+            })).json();
+            dupResult(id, r.success ? (remove ? '✅ ถอดออกแล้ว' : '✅ ติดแล้ว → รีเฟรชแชทใน Business Suite ดูว่าป้ายขึ้นไหม') : ('❌ ' + r.error));
+        }
+        async function dupDelete(btn) {
+            const id = btn.getAttribute('data-id');
+            const name = btn.getAttribute('data-name');
+            if (!confirm('ลบป้าย "' + name + '" ID ' + id + ' ถาวร?' + NL + NL + 'ลบเฉพาะตัวที่ทดสอบแล้ว "ไม่ขึ้น" ใน Business Suite เท่านั้น' + NL + 'ลูกค้าที่ติดป้าย ID นี้ไว้จะหลุดป้ายนี้ และกู้คืนไม่ได้')) return;
+            dupResult(id, '⏳ กำลังลบ...');
+            const r = await (await fetch('/api/labels/delete?token=' + authToken + '&pageId=' + currentActivePageId, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ labelId: id })
+            })).json();
+            if (!r.success) { dupResult(id, '❌ ' + r.error); return; }
+            alert('✅ ลบป้าย "' + r.name + '" ID ' + id + ' แล้ว' + NL + 'การตั้งค่าที่เคยเลือก ID นี้ ถูกเปลี่ยนเป็น ID ' + r.kept + ' ให้อัตโนมัติ');
+            loadDupLabels();
+            loadPageLabels();
+        }
 
         // ===== 🧾 ผู้ให้บริการตรวจสลิป =====
         function toggleSlipProvider() {
@@ -4967,6 +5045,67 @@ app.get('/api/slip/status', checkAuth, (req, res) => {
 });
 
 // 🏷️ รายชื่อป้ายกำกับที่มีอยู่ในเพจ (ตัวเลือกในหน้าตั้งค่าสลิป)
+// 🧹 เครื่องมือป้ายซ้ำ: ป้ายชื่อเดียวกันที่มีหลาย ID + รายชื่อลูกค้าที่ใช้ทดสอบได้
+app.get('/api/labels/duplicates', checkAuth, async (req, res) => {
+  const pageData = usersDB[req.userId]?.pages[req.query.pageId];
+  if (!pageData) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
+  try {
+    const labels = await listPageLabels(pageData);
+    const dups = labels.filter(l => l.ids.length > 1).map(l => ({ name: l.name, ids: l.ids }));
+    // คนที่ใช้ทดสอบได้ (มี ID แชท): จากคนคอมเมนต์ในไลฟ์ (ล่าสุดก่อน)
+    const people = new Map();
+    for (const ls of Object.values(pageData.liveSessions || {})) {
+      for (const c of ls.commenters.values()) if (c.psid) people.set(c.psid, { psid: c.psid, name: c.name || c.psid, time: c.lastTime || 0 });
+      for (const b of (ls.buyers || new Map()).values()) if (b.psid && !people.has(b.psid)) people.set(b.psid, { psid: b.psid, name: b.fbName || b.psid, time: 0 });
+    }
+    res.json({ success: true, duplicates: dups, people: Array.from(people.values()).sort((a, b) => b.time - a.time).slice(0, 100) });
+  } catch (e) {
+    res.json({ success: false, error: graphErrorMessage(e) });
+  }
+});
+
+// ทดสอบ: ติด / ถอด ป้าย "ID เดียว" กับบัญชีที่เลือก (ไม่ขยายไปป้ายชื่อเดียวกัน)
+app.post('/api/labels/test', checkAuth, async (req, res) => {
+  const pageData = usersDB[req.userId]?.pages[req.query.pageId];
+  if (!pageData) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
+  const labelId = String(req.body.labelId || '');
+  const psid = String(req.body.psid || '').trim();
+  if (!labelId || !psid) return res.json({ success: false, error: 'กรุณาเลือกบัญชีทดสอบ' });
+  try {
+    await setInboxLabelById(pageData, psid, labelId, !!req.body.remove);
+    res.json({ success: true });
+  } catch (e) {
+    res.json({ success: false, error: graphErrorMessage(e) });
+  }
+});
+
+// ลบป้าย 1 ID (อนุญาตเฉพาะป้ายที่ยังมีชื่อเดียวกันเหลืออยู่ กันลบป้ายสุดท้าย)
+app.post('/api/labels/delete', checkAuth, async (req, res) => {
+  const pageData = usersDB[req.userId]?.pages[req.query.pageId];
+  if (!pageData) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
+  const labelId = String(req.body.labelId || '');
+  try {
+    const labels = await listPageLabels(pageData);
+    const group = labels.find(l => l.ids.includes(labelId));
+    if (!group) return res.json({ success: false, error: 'ไม่พบป้ายนี้ในเพจ (อาจถูกลบไปแล้ว)' });
+    if (group.ids.length < 2) return res.json({ success: false, error: 'ป้าย "' + group.name + '" เหลืออันเดียวแล้ว ไม่อนุญาตให้ลบจากที่นี่' });
+    await axios.delete('https://graph.facebook.com/v19.0/' + encodeURIComponent(labelId), {
+      params: { access_token: pageData.config.pageAccessToken }, timeout: 15000
+    });
+    // เปลี่ยน ID ที่ถูกลบในการตั้งค่า -> เป็นป้ายชื่อเดียวกันที่เหลืออยู่
+    const keep = group.ids.find(id => id !== labelId);
+    const fix = (list) => (Array.isArray(list) ? list : []).forEach(l => { if (l && String(l.id) === labelId) l.id = keep; });
+    const cfg = pageData.config;
+    fix(cfg.keywordLabels); fix(cfg.keywordRemoveLabels);
+    for (const rule of Object.values(cfg.slipLabels || {})) { fix(rule && rule.add); fix(rule && rule.remove); }
+    for (const ls of Object.values(pageData.liveSessions || {})) { fix(ls.config.keywordLabels); fix(ls.config.keywordRemoveLabels); }
+    pageData.labelGroups = null; // โหลดรายชื่อป้ายใหม่ครั้งถัดไป
+    res.json({ success: true, name: group.name, kept: keep });
+  } catch (e) {
+    res.json({ success: false, error: graphErrorMessage(e) });
+  }
+});
+
 app.get('/api/labels', checkAuth, async (req, res) => {
   const pageData = usersDB[req.userId]?.pages[req.query.pageId];
   if (!pageData) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
