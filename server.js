@@ -9,6 +9,25 @@ const http = require('http');
 axios.defaults.httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 64, keepAliveMsecs: 30000 });
 axios.defaults.httpAgent = new http.Agent({ keepAlive: true, maxSockets: 64 });
 
+// ⚡ ยิง Facebook พร้อมลองใหม่อัตโนมัติเมื่อ Facebook ขัดข้องชั่วคราว (เน็ตสะดุด / 5xx / code 1,2 / is_transient)
+// ใช้กับ "ส่งเข้าแชทผ่านคอมเมนต์" ได้ปลอดภัย เพราะ Facebook บล็อกการส่งซ้ำต่อคอมเมนต์เดียวกันเองอยู่แล้ว
+function isTransientFbError(err) {
+  const e = err.response?.data?.error;
+  if (!err.response) return ['ECONNRESET', 'ETIMEDOUT', 'ECONNABORTED', 'EAI_AGAIN', 'ECONNREFUSED', 'EPIPE', 'ERR_SOCKET_CONNECTION_TIMEOUT'].includes(err.code);
+  if (err.response.status >= 500 && !e) return true;
+  return !!(e && (e.is_transient || e.code === 1 || e.code === 2));
+}
+async function fbPost(url, body, params, retries = 2) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await axios.post(url, body, { params, timeout: 15000 });
+    } catch (err) {
+      if (attempt >= retries || !isTransientFbError(err)) throw err;
+      await sleep(600 * (attempt + 1));
+    }
+  }
+}
+
 // ⚡ รันงานเบื้องหลังแบบไม่บล็อกกัน (คอมเมนต์ / สลิป แต่ละอันทำงานพร้อมกัน)
 // สติกเกอร์ ปุ่มไลก์ (👍) และ GIF ใน Messenger มาเป็น attachment ชนิด image -> ไม่ใช่สลิป
 function isStickerOrGif(message, att) {
@@ -25,7 +44,7 @@ function runTask(fn, label) {
   return Promise.resolve().then(fn).catch(e => console.error('❌ [Task Error]', label || '', e?.response?.data || e?.message || e));
 }
 // ⚡ จำกัดจำนวนงานยิง Facebook พร้อมกันต่อเพจ กันโดน rate limit ตอนไลฟ์คนคอมเมนต์รัว ๆ
-const FB_CONCURRENCY = 8;
+const FB_CONCURRENCY = 10;
 const fbQueues = {};
 function fbLimit(pageId, fn) {
   const q = fbQueues[pageId] || (fbQueues[pageId] = { active: 0, waiting: [] });
@@ -79,6 +98,19 @@ async function setInboxLabelById(pageData, psid, labelId, remove) {
     params: { user: psid, access_token: pageData.config.pageAccessToken },
     timeout: 15000
   });
+}
+
+// ติดป้ายให้คนที่คอมเมนต์ตรงคำดัก (ติดครั้งเดียวต่อคนต่อ session)
+function labelKeywordCommenter(pageData, commenter, psid, labels) {
+  if (!psid || !commenter || commenter.kwLabeled || !Array.isArray(labels) || !labels.length || !pageData.config.pageAccessToken) return;
+  commenter.kwLabeled = true;
+  runTask(async () => {
+    for (const l of labels) {
+      if (!l || !l.id) continue;
+      try { await setInboxLabelById(pageData, psid, l.id); console.log('🏷️ [Label] คำดัก: ติดป้าย "' + l.name + '" ให้ ' + psid); }
+      catch (e) { pageData.lastLabelError = '"' + l.name + '": ' + graphErrorMessage(e); console.error('❌ [Label Error]', pageData.lastLabelError); commenter.kwLabeled = false; }
+    }
+  }, 'kw-label');
 }
 
 // ติด/ลบป้ายตามที่แอดมินเลือกไว้ในแต่ละผลตรวจสลิป: result = 'valid' | 'invalid' | 'unreadable' | 'duplicate'
@@ -1668,6 +1700,14 @@ app.get('/', (req, res) => {
                                 <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" id="lv-enable-reply" class="w-4 h-4 rounded"><span class="text-sm text-slate-700">ตอบกลับคอมเมนต์</span></label>
                                 <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" id="lv-enable-inbox" class="w-4 h-4 rounded"><span class="text-sm text-slate-700">ส่งข้อความเข้าแชท</span></label>
                             </div>
+                            <div class="bg-pink-50/50 border border-pink-200 rounded-xl p-4 space-y-2">
+                                <div class="flex flex-wrap items-center justify-between gap-2">
+                                    <div class="text-xs font-bold text-pink-600">🏷️ ติดป้ายกำกับอัตโนมัติ เมื่อคอมเมนต์ตรงคำดัก <span class="font-normal text-slate-500">(เช่น "ยังไม่โอน" · ต้องเปิด "ส่งข้อความเข้าแชท")</span></div>
+                                    <button type="button" onclick="loadLiveBcLabels()" class="px-3 py-1 text-xs font-medium bg-white border border-pink-300 text-pink-600 rounded-lg hover:bg-pink-50">🔄 โหลดป้ายกำกับจากเพจ</button>
+                                </div>
+                                <div id="lv-kw-labels" class="flex flex-wrap items-center gap-2"></div>
+                                <div class="text-xs text-slate-400">เคล็ดลับ: ที่หน้าตั้งค่าสลิป แท็บ "สลิปถูกต้อง" ให้ติดป้าย "โอนแล้ว" และลบป้าย "ยังไม่โอน" ป้ายจะเปลี่ยนเองเมื่อลูกค้าโอน</div>
+                            </div>
                             <div class="flex justify-end">
                                 <button type="button" onclick="saveLiveConfig()" class="px-6 py-2.5 bg-emerald-600 text-white font-medium rounded-xl hover:bg-emerald-700 shadow-sm">บันทึกการตั้งค่า session นี้</button>
                             </div>
@@ -2598,7 +2638,9 @@ app.get('/', (req, res) => {
             document.getElementById('lv-enable-like').checked = !!liveCfg.enableAutoLike;
             document.getElementById('lv-enable-reply').checked = !!liveCfg.enableCommentReply;
             document.getElementById('lv-enable-inbox').checked = !!liveCfg.enableInbox;
+            if (!Array.isArray(liveCfg.keywordLabels)) liveCfg.keywordLabels = [];
             renderLiveKeywords();
+            renderKwLabels();
         }
 
         function renderLiveKeywords() {
@@ -2752,7 +2794,8 @@ app.get('/', (req, res) => {
                 inboxText: document.getElementById('lv-inbox-text').value,
                 enableAutoLike: document.getElementById('lv-enable-like').checked,
                 enableCommentReply: document.getElementById('lv-enable-reply').checked,
-                enableInbox: document.getElementById('lv-enable-inbox').checked
+                enableInbox: document.getElementById('lv-enable-inbox').checked,
+                keywordLabels: liveCfg.keywordLabels || []
             };
             const res = await fetch(liveUrl('/api/live/config', '&sid=' + currentLiveId), {
                 method: 'POST',
@@ -2816,6 +2859,39 @@ app.get('/', (req, res) => {
             });
         }
 
+        function renderKwLabels() {
+            const box = document.getElementById('lv-kw-labels');
+            if (!box) return;
+            const list = Array.isArray(liveCfg.keywordLabels) ? liveCfg.keywordLabels : (liveCfg.keywordLabels = []);
+            let html = '';
+            list.forEach(function(l, i) {
+                html += '<span class="inline-flex items-center rounded-full overflow-hidden text-xs font-semibold bg-pink-600 text-white">'
+                    + '<span class="px-3 py-1">' + escapeHtml(l.name) + '</span>'
+                    + '<button type="button" class="px-2 py-1 border-l border-white/30 hover:bg-black/20" data-idx="' + i + '" onclick="removeKwLabel(this)">✕</button></span>';
+            });
+            const used = {};
+            list.forEach(function(l) { used[l.id] = 1; });
+            html += '<select class="text-xs border border-pink-300 text-pink-600 rounded-full px-3 py-1 bg-white" onchange="addKwLabel(this)"><option value="">+ เพิ่มป้ายกำกับ</option>';
+            pageLabels.filter(function(l) { return !used[l.id]; }).forEach(function(l) {
+                html += '<option value="' + escapeHtml(l.id) + '">' + escapeHtml(l.name) + '</option>';
+            });
+            if (!pageLabels.length) html += '<option value="" disabled>(กดโหลดป้ายกำกับจากเพจก่อน)</option>';
+            html += '</select>';
+            if (list.length) html += '<span class="text-xs text-slate-500">กด "บันทึกการตั้งค่า session นี้" เพื่อใช้งาน</span>';
+            box.innerHTML = html;
+        }
+
+        function addKwLabel(sel) {
+            const l = pageLabels.find(function(x) { return x.id === sel.value; });
+            if (l) liveCfg.keywordLabels.push({ id: l.id, name: l.name });
+            renderKwLabels();
+        }
+
+        function removeKwLabel(btn) {
+            liveCfg.keywordLabels.splice(parseInt(btn.getAttribute('data-idx'), 10), 1);
+            renderKwLabels();
+        }
+
         function addLiveBcLabel(sel) {
             const l = pageLabels.find(function(x) { return x.id === sel.value; });
             if (l) lvBcLabels[sel.getAttribute('data-kind')].push({ id: l.id, name: l.name });
@@ -2841,6 +2917,7 @@ app.get('/', (req, res) => {
                 }
             } catch (e) { st.innerText = '❌ ' + e.message; }
             renderLiveBcLabels();
+            renderKwLabels();
         }
 
         async function startLiveBroadcast() {
@@ -3722,7 +3799,7 @@ app.get('/', (req, res) => {
             document.getElementById('tab-' + tabId).classList.remove('hidden');
             if(tabId === 'beemove') loadBeemove();
             if(tabId === 'broadcast') loadBroadcastInfo();
-            if(tabId === 'live') { loadLiveList(); startLivePolling(); if (!pageLabels.length) loadLiveBcLabels(); else renderLiveBcLabels(); } else { stopLivePolling(); }
+            if(tabId === 'live') { loadLiveList(); startLivePolling(); if (!pageLabels.length) loadLiveBcLabels(); else { renderLiveBcLabels(); renderKwLabels(); } } else { stopLivePolling(); }
             document.getElementById('nav-' + tabId).className = "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium bg-blue-50 text-blue-600";
         }
 
@@ -4242,7 +4319,10 @@ app.post('/api/broadcast/start', checkAuth, async (req, res) => {
     st.isBroadcasting = false;
     if (st.shouldStop) { if (!/Token/.test(st.statusMessage)) st.statusMessage = '⏹️ หยุดบรอดแคสแล้ว'; }
     else st.statusMessage = '✅ บรอดแคสเสร็จสิ้น';
-  })();
+  })().catch(e => {
+    pageData.broadcastStatus.isBroadcasting = false;
+    pageData.broadcastStatus.statusMessage = '❌ เกิดข้อผิดพลาด: ' + e.message;
+  });
 });
 
 app.post('/api/broadcast/stop', checkAuth, (req, res) => {
@@ -4430,7 +4510,9 @@ app.post('/api/live/create', checkAuth, (req, res) => {
       inboxText: c.inboxText || '',
       enableCommentReply: !!c.enableCommentReply,
       enableInbox: !!c.enableInbox,
-      enableAutoLike: !!c.enableAutoLike
+      enableAutoLike: !!c.enableAutoLike,
+      // 🏷️ ป้ายที่ติดให้อัตโนมัติเมื่อคอมเมนต์ตรงคำดัก (เลือกเองจากป้ายในเพจ)
+      keywordLabels: Array.isArray(c.keywordLabels) ? c.keywordLabels.slice() : []
     },
     stats: { comments: 0, matched: 0 },
     commenters: new Map(),
@@ -4452,7 +4534,7 @@ app.get('/api/live/detail', checkAuth, (req, res) => {
   const psidMap = getPsidMap(ctx.pageData);
   const commenters = Array.from(s.commenters.entries())
     .map(([userId, c]) => {
-      const { pendingComments, ...pub } = c; // ข้อมูลภายใน ไม่ต้องส่งไปหน้าเว็บ
+      const { pendingComments, kwLabeled, ...pub } = c; // ข้อมูลภายใน ไม่ต้องส่งไปหน้าเว็บ
       return {
         userId, ...pub,
         ...paymentStatusFromIndex(slipIdx, userId, c.psid || psidMap.get(userId)),
@@ -4487,6 +4569,12 @@ app.post('/api/live/config', checkAuth, (req, res) => {
   if (typeof b.enableCommentReply === 'boolean') s.config.enableCommentReply = b.enableCommentReply;
   if (typeof b.enableInbox === 'boolean') s.config.enableInbox = b.enableInbox;
   if (typeof b.enableAutoLike === 'boolean') s.config.enableAutoLike = b.enableAutoLike;
+  if (Array.isArray(b.keywordLabels)) {
+    s.config.keywordLabels = b.keywordLabels
+      .filter(l => l && l.id).map(l => ({ id: String(l.id), name: String(l.name || '') })).slice(0, 10);
+    // จำไว้เป็นค่าเริ่มต้นของ session ถัดไปด้วย
+    ctx.pageData.config.keywordLabels = s.config.keywordLabels.slice();
+  }
   res.json({ success: true });
 });
 
@@ -5345,7 +5433,10 @@ app.post('/api/live/broadcast/start', checkAuth, async (req, res) => {
 
   s.broadcastStatus = { isBroadcasting: true, total: targets.length, current: 0, success: 0, failed: 0, skipped, labelFiltered, viaComment: 0, errors: {}, statusMessage: 'กำลังเริ่มส่ง...', shouldStop: false };
   res.json({ success: true, total: targets.length, skipped, labelFiltered });
-  runLiveBroadcast(s, ctx.pageData, targets, String(message), delaySec, batchSize, pauseMin);
+  runLiveBroadcast(s, ctx.pageData, targets, String(message), delaySec, batchSize, pauseMin).catch(e => {
+    s.broadcastStatus.isBroadcasting = false;
+    s.broadcastStatus.statusMessage = '❌ เกิดข้อผิดพลาด: ' + e.message;
+  });
 });
 
 app.post('/api/live/broadcast/stop', checkAuth, (req, res) => {
@@ -5449,10 +5540,11 @@ app.post('/webhook', async (req, res) => {
                 const sendSlipReply = async (text) => {
                   if (!configStore.pageAccessToken) return;
                   try {
-                    await axios.post('https://graph.facebook.com/v19.0/me/messages', {
+                    await fbPost('https://graph.facebook.com/v19.0/me/messages', {
                       recipient: { id: senderId },
+                      messaging_type: 'RESPONSE',
                       message: { text }
-                    }, { params: { access_token: configStore.pageAccessToken }, timeout: 10000 });
+                    }, { access_token: configStore.pageAccessToken }, 1);
                   } catch (sendErr) {
                     console.error('❌ [Send Slip Reply Error]', sendErr.response?.data || sendErr.message);
                   }
@@ -5569,14 +5661,14 @@ app.post('/webhook', async (req, res) => {
               const commentId = comment.comment_id;
               const pageDataRef = targetRecord.pageData;
               const t0 = Date.now();
+              // ⚡ ส่งเข้าแชท + ตอบคอมเมนต์ ใช้คิวหลัก (สำคัญ) · กดไลก์แยกคิวรอง ไม่แย่งช่องของงานสำคัญ
               runTask(() => fbLimit(pageId, async () => {
                 const jobs = [];
-                // ส่งเข้าอินบ็อกซ์ (สำคัญสุด) + ตอบคอมเมนต์ + กดไลก์ ยิงพร้อมกัน ไม่ต้องรอกันทีละอัน
                 if (cfg.enableInbox) {
-                  jobs.push(axios.post('https://graph.facebook.com/v19.0/me/messages', {
+                  jobs.push(fbPost('https://graph.facebook.com/v19.0/me/messages', {
                     recipient: { comment_id: commentId },
                     message: { text: cfg.inboxText }
-                  }, { params: { access_token: token }, timeout: 15000 }).then(inboxRes => {
+                  }, { access_token: token }).then(inboxRes => {
                     // 📦 จับคู่ ID คนคอมเมนต์ กับ ID แชท (PSID) เพื่อใช้ค้นหาที่อยู่ในแชทภายหลัง
                     const psid = inboxRes.data?.recipient_id;
                     const c = senderId ? liveSession?.commenters.get(senderId) : null;
@@ -5584,23 +5676,30 @@ app.post('/webhook', async (req, res) => {
                     if (psid && senderId) {
                       getPsidMap(pageDataRef).set(senderId, String(psid));
                       if (c) c.psid = String(psid);
+                      if (c && liveSession) labelKeywordCommenter(pageDataRef, c, String(psid), liveSession.config.keywordLabels);
                     }
-                  }).catch(inbErr => console.error('❌ [Inbox Error]', inbErr.response?.data || inbErr.message)));
+                    console.log('⚡ [Inbox] ' + commentId + ' ส่งเข้าแชทใน ' + (Date.now() - t0) + ' ms');
+                  }).catch(inbErr => console.error('❌ [Inbox Error]', inbErr.response?.data?.error?.message || inbErr.message)));
                 }
                 if (cfg.enableCommentReply) {
-                  jobs.push(axios.post('https://graph.facebook.com/v19.0/' + commentId + '/comments', {
+                  jobs.push(fbPost('https://graph.facebook.com/v19.0/' + commentId + '/comments', {
                     message: cfg.replyCommentText
-                  }, { params: { access_token: token }, timeout: 15000 })
-                    .catch(repErr => console.error('❌ [Comment Reply Error]', repErr.response?.data || repErr.message)));
-                }
-                if (cfg.enableAutoLike) {
-                  jobs.push(axios.post('https://graph.facebook.com/v19.0/' + commentId + '/likes', {}, {
-                    params: { access_token: token }, timeout: 15000
-                  }).catch(() => {}));
+                  }, { access_token: token }, 1)
+                    .catch(repErr => console.error('❌ [Comment Reply Error]', repErr.response?.data?.error?.message || repErr.message)));
                 }
                 await Promise.all(jobs);
-                console.log('⚡ [Comment] ' + commentId + ' ตอบเสร็จใน ' + (Date.now() - t0) + ' ms');
+                // ยังไม่ได้ติดป้าย (เช่น ปิดส่งเข้าแชท) แต่รู้ ID แชทของคนนี้อยู่แล้ว -> ติดป้ายเลย
+                if (liveSession && senderId) {
+                  const c2 = liveSession.commenters.get(senderId);
+                  const known = c2 && (c2.psid || getPsidMap(pageDataRef).get(senderId));
+                  if (c2 && known) labelKeywordCommenter(pageDataRef, c2, String(known), liveSession.config.keywordLabels);
+                }
               }), 'comment');
+              if (cfg.enableAutoLike) {
+                runTask(() => fbLimit(pageId + ':like', () => axios.post('https://graph.facebook.com/v19.0/' + commentId + '/likes', {}, {
+                  params: { access_token: token }, timeout: 15000
+                }).catch(() => {})), 'like');
+              }
             }
           }
         }
@@ -5615,11 +5714,23 @@ app.post('/webhook', async (req, res) => {
 const PORT = process.env.PORT || 3000;
 const serverUrl = process.env.RENDER_EXTERNAL_URL || ('http://localhost:' + PORT);
 
-app.listen(PORT, () => {
+// ⚡ จุดเช็กสถานะเบา ๆ (ตัวปลุกเซิร์ฟเวอร์ใช้ตัวนี้ แทนการโหลดหน้าเว็บ 350KB)
+app.get('/healthz', (req, res) => res.type('text').send('ok'));
+
+// 🛡️ กันเซิร์ฟเวอร์ล่ม: error ที่หลุดจากงานเบื้องหลังจะถูกบันทึกไว้ ไม่ทำให้ข้อมูลในหน่วยความจำหายทั้งหมด
+process.on('unhandledRejection', (e) => console.error('⚠️ [Unhandled Rejection]', e?.response?.data || e?.message || e));
+process.on('uncaughtException', (e) => console.error('⚠️ [Uncaught Exception]', e?.stack || e));
+
+const server = app.listen(PORT, () => {
   console.log('Server is running on port ' + PORT);
   loadThaiAddressDb();
   setInterval(() => { if (!thaiAddrDb) loadThaiAddressDb(); }, 10 * 60 * 1000);
   setInterval(async () => {
-    try { await axios.get(serverUrl, { timeout: 5000 }); } catch (e) {}
+    try { await axios.get(serverUrl + '/healthz', { timeout: 5000 }); } catch (e) {}
   }, 10 * 60 * 1000);
 });
+// ⚡ ให้การเชื่อมต่อจาก Load Balancer ของ Render อยู่นานกว่า (ลด error 502 เป็นครั้งคราว)
+if (server) {
+  server.keepAliveTimeout = 65 * 1000;
+  server.headersTimeout = 66 * 1000;
+}
