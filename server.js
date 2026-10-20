@@ -272,7 +272,9 @@ const defaultPageConfig = {
   pageAccessToken: '',
   pageId: '',
   pageName: '',
-  easySlipApiKey: '47f197e2-8c05-42bb-b9ad-9186f84faa82', // EasySlip API Key
+  easySlipApiKey: '47f197e2-8c05-42bb-b9ad-9186f84faa82', // EasySlip API Key (สำรอง)
+  slipProvider: 'zwiz',   // ผู้ให้บริการตรวจสลิป: 'zwiz' (หลัก) หรือ 'easyslip'
+  zwizApiKey: process.env.ZWIZ_API_KEY || '', // ZWIZ.AI Slip Verification API Key
   
   matchType: 'contains',
   keywords: ['1', '11', '111', '11111', '111111', 'สนใจ', 'cf'],
@@ -396,6 +398,85 @@ function normalizeSlip(apiResponse) {
     isDuplicate: dataObj.isDuplicate === true,
     matchedAccount: dataObj.matchedAccount || null
   };
+}
+
+// ===================== 🧾 ZWIZ.AI Slip Verification API v2 =====================
+// POST https://api-sme-prod.zwiz.app/api/slips/v1/verify  (multipart: image, match_bank_account_list, requested_by)
+const ZWIZ_VERIFY_URL = 'https://api-sme-prod.zwiz.app/api/slips/v1/verify';
+const ZWIZ_BANK_CODES = { BBL: '002', KBANK: '004', KTB: '006', TTB: '011', SCB: '014', CIMB: '022', UOB: '024', BAY: '025', GSB: '030', GHB: '033', BAAC: '034', TISCO: '067', KKP: '069', LHB: '073', PROMPTPAY: 'promptpay' };
+
+function formatZwizDate(d, t) {
+  const m = String(d || '').match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (!m) return [d, t].filter(Boolean).join(' ');
+  const dt = new Date(m[1] + '-' + m[2] + '-' + m[3] + 'T' + (t || '00:00:00') + '+07:00');
+  return isNaN(dt.getTime()) ? (d + ' ' + (t || '')) : dt.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', dateStyle: 'medium', timeStyle: 'short' });
+}
+
+// คืนค่า { slip, errCode, quota } โดย slip อยู่ในรูปแบบเดียวกับ normalizeSlip() เพื่อใช้ต่อได้เลย
+async function verifySlipWithZwiz(imageUrl, cfg) {
+  const key = cfg.zwizApiKey || process.env.ZWIZ_API_KEY || '';
+  if (!key) return { slip: null, errCode: 'MISSING_API_KEY' };
+
+  // ZWIZ รับเฉพาะไฟล์รูป -> โหลดรูปจาก Facebook ก่อน
+  let img;
+  try {
+    img = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 20000 });
+  } catch (e) {
+    return { slip: null, errCode: 'IMAGE_DOWNLOAD_FAILED' };
+  }
+  const buf = Buffer.from(img.data);
+  if (buf.length > 5 * 1024 * 1024) return { slip: null, errCode: 'FILE_TOO_LARGE' };
+  let type = String(img.headers?.['content-type'] || 'image/jpeg').split(';')[0];
+  if (!/^image\/(jpe?g|png|webp)$/.test(type)) type = 'image/jpeg';
+
+  const fd = new FormData();
+  fd.append('image', new Blob([buf], { type }), 'slip.' + (type.split('/')[1] === 'jpeg' ? 'jpg' : type.split('/')[1]));
+  const acc = String(cfg.merchantAccount || '').replace(/[^0-9]/g, '');
+  const code = ZWIZ_BANK_CODES[String(cfg.merchantBank || '').toUpperCase()] || (acc.length === 10 && /^0/.test(acc) && !cfg.merchantBank ? 'promptpay' : '');
+  if (acc && code) fd.append('match_bank_account_list', JSON.stringify([{ account_no: acc, code }]));
+  fd.append('requested_by', String(cfg.pageName || cfg.pageId || 'FB Bot').slice(0, 100));
+
+  let r;
+  try {
+    r = await axios.post(ZWIZ_VERIFY_URL, fd, { headers: { 'x-api-key': key }, timeout: 30000 });
+  } catch (err) {
+    const e = err.response?.data?.error || {};
+    const errCode = e.code || e.error || (err.response ? 'HTTP_' + err.response.status : 'NETWORK_ERROR');
+    console.error('❌ [ZWIZ] ตรวจสลิปไม่สำเร็จ:', errCode, e.message || err.message);
+    return { slip: null, errCode };
+  }
+  const res = r.data?.result || {};
+  const vr = res.verification_result;
+  const data = res.verify?.data || {};
+  console.log('✅ [ZWIZ] ผลตรวจ:', vr, '| โควตาคงเหลือ', res.remaining_quota);
+  if (vr === 'unable_to_verify') return { slip: null, errCode: 'UNABLE_TO_VERIFY', quota: res.remaining_quota };
+
+  const rcvAcc = data.receiver?.account?.value;
+  const slip = {
+    transRef: String(data.transRef || ''),
+    amount: data.amount !== undefined ? (Number(data.amount) || 0) : 0,
+    dateText: formatZwizDate(data.transDate, data.transTime),
+    receiverAccounts: rcvAcc ? [String(rcvAcc)] : [],
+    receiverNameTh: data.receiver?.displayName || data.receiver?.name || '',
+    isDuplicate: vr === 'duplicated',
+    matchResult: vr, // matched | not_matched | duplicated | skipped
+    provider: 'zwiz'
+  };
+  if (!slip.transRef && !slip.isDuplicate) return { slip: null, errCode: 'NO_TRANS_REF', quota: res.remaining_quota };
+  if (!slip.transRef) slip.transRef = 'zwiz-dup-' + Date.now();
+  return { slip, errCode: '', quota: res.remaining_quota };
+}
+
+// ตัวเลือกผู้ให้บริการ: ZWIZ (หลัก) หรือ EasySlip (สำรอง)
+async function verifySlip(imageUrl, cfg, pageData) {
+  if ((cfg.slipProvider || 'zwiz') === 'zwiz') {
+    const out = await verifySlipWithZwiz(imageUrl, cfg);
+    if (pageData && out.quota !== undefined) pageData.slipQuota = { provider: 'zwiz', remaining: out.quota, at: Date.now() };
+    return out;
+  }
+  const r = await verifySlipByImageUrl(imageUrl, cfg.easySlipApiKey);
+  const slip = r && r.success ? normalizeSlip(r.data) : null;
+  return { slip, errCode: slip ? '' : (r?.error?.error?.code || r?.data?.error?.code || (r?.message === 'API Key missing' ? 'MISSING_API_KEY' : '')) };
 }
 
 // 🔧 เช็คเลขบัญชีผู้รับ (สลิปจะปิดเลขบางส่วน เช่น xxx-x-x9857-x) เทียบกับเลขบัญชีร้านค้า
@@ -1581,10 +1662,24 @@ app.get('/', (req, res) => {
                             </label>
                         </div>
 
-                        <div>
-                            <label class="text-xs font-semibold text-slate-600 block mb-1">EasySlip API Key:</label>
-                            <input type="text" id="easyslip-api-key" class="w-full p-2.5 text-sm bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-rose-400" placeholder="กรอก API Key จาก EasySlip...">
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <div>
+                                <label class="text-xs font-semibold text-slate-600 block mb-1">ผู้ให้บริการตรวจสลิป:</label>
+                                <select id="slip-provider" onchange="toggleSlipProvider()" class="w-full p-2.5 text-sm bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-rose-400">
+                                    <option value="zwiz">ZWIZ.AI (หลัก)</option>
+                                    <option value="easyslip">EasySlip (สำรอง)</option>
+                                </select>
+                            </div>
+                            <div id="zwiz-key-box" class="md:col-span-2">
+                                <label class="text-xs font-semibold text-slate-600 block mb-1">ZWIZ API Key (x-api-key):</label>
+                                <input type="text" id="zwiz-api-key" class="w-full p-2.5 text-sm bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-rose-400" placeholder="กรอก API Key จาก ZWIZ.AI...">
+                            </div>
+                            <div id="easyslip-key-box" class="md:col-span-2 hidden">
+                                <label class="text-xs font-semibold text-slate-600 block mb-1">EasySlip API Key:</label>
+                                <input type="text" id="easyslip-api-key" class="w-full p-2.5 text-sm bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-rose-400" placeholder="กรอก API Key จาก EasySlip...">
+                            </div>
                         </div>
+                        <div id="slip-provider-status" class="text-xs text-slate-500 -mt-2"></div>
 
                         <div class="bg-rose-50/50 border border-rose-200 rounded-2xl p-5 space-y-4">
                             <h4 class="text-xs font-bold text-rose-700 uppercase tracking-wider">บัญชีผู้รับเงินที่ต้องตรวจสอบ</h4>
@@ -2348,6 +2443,10 @@ app.get('/', (req, res) => {
             
             document.getElementById('enable-slip-verify').checked = !!currentConfig.enableSlipVerify;
             document.getElementById('easyslip-api-key').value = currentConfig.easySlipApiKey || '';
+            document.getElementById('zwiz-api-key').value = currentConfig.zwizApiKey || '';
+            document.getElementById('slip-provider').value = currentConfig.slipProvider || 'zwiz';
+            toggleSlipProvider();
+            loadSlipStatus();
             document.getElementById('merchant-bank').value = currentConfig.merchantBank || 'BAY';
             document.getElementById('merchant-account').value = currentConfig.merchantAccount || '';
             document.getElementById('merchant-name').value = currentConfig.merchantName || '';
@@ -2530,6 +2629,8 @@ app.get('/', (req, res) => {
 
             currentConfig.enableSlipVerify = document.getElementById('enable-slip-verify').checked;
             currentConfig.easySlipApiKey = document.getElementById('easyslip-api-key').value.trim();
+            currentConfig.zwizApiKey = document.getElementById('zwiz-api-key').value.trim();
+            currentConfig.slipProvider = document.getElementById('slip-provider').value;
             currentConfig.merchantBank = document.getElementById('merchant-bank').value;
             currentConfig.merchantAccount = document.getElementById('merchant-account').value;
             currentConfig.merchantName = document.getElementById('merchant-name').value;
@@ -2552,6 +2653,26 @@ app.get('/', (req, res) => {
             } else {
                 alert('❌ บันทึกไม่สำเร็จ: ' + data.error);
             }
+        }
+
+        // ===== 🧾 ผู้ให้บริการตรวจสลิป =====
+        function toggleSlipProvider() {
+            const v = document.getElementById('slip-provider').value;
+            document.getElementById('zwiz-key-box').classList.toggle('hidden', v !== 'zwiz');
+            document.getElementById('easyslip-key-box').classList.toggle('hidden', v !== 'easyslip');
+        }
+
+        async function loadSlipStatus() {
+            if (!currentActivePageId) return;
+            const el = document.getElementById('slip-provider-status');
+            try {
+                const r = await (await fetch('/api/slip/status?token=' + authToken + '&pageId=' + currentActivePageId)).json();
+                if (!r.success) { el.innerText = ''; return; }
+                let t = '';
+                if (r.quota && r.quota.remaining !== undefined && r.quota.remaining !== null) t += '📊 โควตาตรวจสลิปคงเหลือ ' + r.quota.remaining + ' ครั้ง';
+                if (r.lastError && Date.now() - r.lastError.at < 6 * 3600000) t += (t ? ' · ' : '') + '⚠️ ตรวจสลิปผิดพลาดล่าสุด: ' + r.lastError.code + ' (' + new Date(r.lastError.at).toLocaleTimeString('th-TH') + ')';
+                el.innerText = t;
+            } catch (e) { el.innerText = ''; }
         }
 
         // ===== 🏷️ ป้ายกำกับตามผลตรวจสลิป (แอดมินเลือกเองจากป้ายที่มีในเพจ) =====
@@ -4314,6 +4435,13 @@ app.get('/api/page-token-status', checkAuth, async (req, res) => {
   res.json({ success: true, ...info });
 });
 
+// 🧾 สถานะผู้ให้บริการตรวจสลิป (โควตาคงเหลือ / error ล่าสุด)
+app.get('/api/slip/status', checkAuth, (req, res) => {
+  const pageData = usersDB[req.userId]?.pages[req.query.pageId];
+  if (!pageData) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
+  res.json({ success: true, provider: pageData.config.slipProvider || 'zwiz', quota: pageData.slipQuota || null, lastError: pageData.lastSlipError || null });
+});
+
 // 🏷️ รายชื่อป้ายกำกับที่มีอยู่ในเพจ (ตัวเลือกในหน้าตั้งค่าสลิป)
 app.get('/api/labels', checkAuth, async (req, res) => {
   const pageData = usersDB[req.userId]?.pages[req.query.pageId];
@@ -5697,8 +5825,8 @@ app.post('/webhook', async (req, res) => {
                 }
 
                 console.log(`🧾 [Page: ${pageId}] พบรูปภาพจากลูกค้า ID: ${senderId} กำลังตรวจสอบสลิป...`);
-                // เรียกใช้ฟังก์ชัน verifySlipByImageUrl
-                const slipResult = await verifySlipByImageUrl(imageUrl, configStore.easySlipApiKey);
+                // ตรวจสลิปกับผู้ให้บริการที่ตั้งไว้ (ZWIZ / EasySlip)
+                const slipResult = await verifySlip(imageUrl, configStore, targetRecord.pageData);
 
                 const sendSlipReply = async (text) => {
                   if (!configStore.pageAccessToken) return;
@@ -5713,17 +5841,18 @@ app.post('/webhook', async (req, res) => {
                   }
                 };
 
-                const slip = slipResult && slipResult.success ? normalizeSlip(slipResult.data) : null;
+                const slip = slipResult.slip || null;
 
                 if (!slip) {
-                  const errCode = slipResult?.error?.error?.code || slipResult?.data?.error?.code || '';
+                  const errCode = slipResult.errCode || '';
                   console.log(`⚠️ [Page: ${pageId}] อ่านข้อมูลสลิปไม่สำเร็จจาก EasySlip`, errCode);
                   if (errCode === 'SLIP_PENDING') {
                     await sendSlipReply('⏳ สลิปธนาคารกรุงเทพเพิ่งโอนไม่ถึง 5 นาที กรุณารอสักครู่แล้วส่งสลิปอีกครั้งนะคะ');
                     continue;
                   }
                   // ปัญหาฝั่งระบบ (key / โควตา / เซิร์ฟเวอร์ EasySlip) ไม่ใช่ความผิดลูกค้า -> ไม่แจ้งลูกค้า
-                  const systemErr = ['MISSING_API_KEY', 'INVALID_API_KEY', 'QUOTA_EXCEEDED', 'IP_NOT_ALLOWED', 'BRANCH_INACTIVE', 'SERVICE_BANNED', 'SERVICE_DELETED', 'USER_BANNED', 'RATE_LIMIT_EXCEEDED', 'API_SERVER_ERROR', 'INTERNAL_SERVER_ERROR'].includes(errCode) || slipResult?.message === 'API Key missing';
+                  const systemErr = ['MISSING_API_KEY', 'INVALID_API_KEY', 'QUOTA_EXCEEDED', 'INSUFFICIENT_QUOTA', 'IP_NOT_ALLOWED', 'BRANCH_INACTIVE', 'SERVICE_BANNED', 'SERVICE_DELETED', 'USER_BANNED', 'RATE_LIMIT_EXCEEDED', 'API_SERVER_ERROR', 'INTERNAL_SERVER_ERROR', 'INTERNAL_ERROR', 'IMAGE_DOWNLOAD_FAILED', 'NETWORK_ERROR', 'HTTP_500', 'HTTP_502', 'HTTP_503', 'HTTP_504'].includes(errCode);
+                  if (systemErr) targetRecord.pageData.lastSlipError = { code: errCode, at: Date.now() };
                   const mode = configStore.slipUnreadableMode || 'smart';
                   const payCtx = isPaymentContext(targetRecord.pageData, senderId);
                   const notify = !systemErr && (mode === 'always' || (mode === 'smart' && payCtx));
@@ -5743,9 +5872,12 @@ app.post('/webhook', async (req, res) => {
                   continue;
                 }
 
-                const receiverOk = slip.receiverAccounts.length > 0
-                  ? accountMatches(configStore.merchantAccount, slip.receiverAccounts)
-                  : (!configStore.merchantAccount && !configStore.merchantName) || nameMatches(configStore.merchantName, slip.receiverNameTh);
+                // ZWIZ ตรวจบัญชีปลายทางให้แล้ว (matched / not_matched) ถ้าไม่ได้ตรวจ (skipped) ใช้การเทียบของระบบเอง
+                const receiverOk = slip.matchResult === 'matched' ? true
+                  : slip.matchResult === 'not_matched' ? false
+                  : slip.receiverAccounts.length > 0
+                    ? accountMatches(configStore.merchantAccount, slip.receiverAccounts)
+                    : (!configStore.merchantAccount && !configStore.merchantName) || nameMatches(configStore.merchantName, slip.receiverNameTh);
 
                 if (!receiverOk) {
                   console.log(`❌ [Page: ${pageId}] เลขบัญชีผู้รับไม่ตรงกับร้านค้า`, slip.receiverAccounts, slip.receiverNameTh);
