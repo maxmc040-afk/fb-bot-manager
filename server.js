@@ -2,6 +2,44 @@ const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 const crypto = require('crypto');
+const https = require('https');
+const http = require('http');
+
+// ⚡ ใช้การเชื่อมต่อเดิมซ้ำ (keep-alive) ไม่ต้องจับมือ TLS ใหม่ทุกครั้งที่เรียก Facebook / EasySlip
+axios.defaults.httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 64, keepAliveMsecs: 30000 });
+axios.defaults.httpAgent = new http.Agent({ keepAlive: true, maxSockets: 64 });
+
+// ⚡ รันงานเบื้องหลังแบบไม่บล็อกกัน (คอมเมนต์ / สลิป แต่ละอันทำงานพร้อมกัน)
+function runTask(fn, label) {
+  return Promise.resolve().then(fn).catch(e => console.error('❌ [Task Error]', label || '', e?.response?.data || e?.message || e));
+}
+// ⚡ จำกัดจำนวนงานยิง Facebook พร้อมกันต่อเพจ กันโดน rate limit ตอนไลฟ์คนคอมเมนต์รัว ๆ
+const FB_CONCURRENCY = 8;
+const fbQueues = {};
+function fbLimit(pageId, fn) {
+  const q = fbQueues[pageId] || (fbQueues[pageId] = { active: 0, waiting: [] });
+  return new Promise((resolve, reject) => {
+    const start = () => {
+      q.active++;
+      Promise.resolve().then(fn).then(resolve, reject).finally(() => {
+        q.active--;
+        const next = q.waiting.shift();
+        if (next) next();
+      });
+    };
+    if (q.active < FB_CONCURRENCY) start(); else q.waiting.push(start);
+  });
+}
+// กันประมวลผลคอมเมนต์ซ้ำ (Facebook ส่ง webhook ซ้ำได้)
+function seenComment(pageData, commentId) {
+  if (!commentId) return false;
+  if (!pageData.seenComments) pageData.seenComments = new Set();
+  const set = pageData.seenComments;
+  if (set.has(commentId)) return true;
+  set.add(commentId);
+  if (set.size > 20000) { let i = 0; for (const k of set) { set.delete(k); if (++i >= 5000) break; } }
+  return false;
+}
 
 const app = express();
 app.use(cors());
@@ -2065,12 +2103,14 @@ app.get('/', (req, res) => {
 
                 if (data.success && data.pages) {
                     fetchedPagesList = data.pages;
+                    if (data.userAccessToken) localStorage.setItem('fb_user_token', data.userAccessToken);
+                    if (showAlert && data.warning) alert('⚠️ ' + data.warning);
                     const dropdown = document.getElementById('page-select-dropdown');
                     dropdown.innerHTML = '<option value="">-- เลือกเพจ --</option>';
                     data.pages.forEach((p, idx) => {
                         dropdown.innerHTML += '<option value="' + idx + '">' + escapeHtml(p.name) + ' (ID: ' + escapeHtml(p.id) + ')</option>';
                     });
-                    if(showAlert) alert('✅ ดึงข้อมูลสำเร็จ พบ ' + data.pages.length + ' เพจ');
+                    if(showAlert) alert('✅ ดึงข้อมูลสำเร็จ พบ ' + data.pages.length + ' เพจ' + (data.neverExpires ? ' (Page Token แบบไม่หมดอายุ ✅)' : ''));
                 } else {
                     if(showAlert) alert('❌ ไม่สามารถดึงรายชื่อเพจได้: ' + (data.error || 'Token หมดอายุ'));
                 }
@@ -3652,19 +3692,72 @@ app.post('/api/config', checkAuth, (req, res) => {
   res.json({ success: true });
 });
 
+// 🔑 แลก User Token อายุสั้น (1-2 ชม.) เป็นอายุยาว (60 วัน)
+// Page Token ที่ดึงจาก User Token อายุยาว จะ "ไม่มีวันหมดอายุ"
+// ต้องตั้งค่า Environment Variable ใน Render: FB_APP_SECRET (และ FB_APP_ID ถ้าใช้แอปอื่น)
+const FB_APP_ID = process.env.FB_APP_ID || defaultPageConfig.appId;
+const FB_APP_SECRET = process.env.FB_APP_SECRET || '';
+
+async function toLongLivedUserToken(userToken) {
+  if (!FB_APP_SECRET) return { token: userToken, longLived: false, error: 'ยังไม่ได้ตั้งค่า FB_APP_SECRET ใน Render' };
+  try {
+    const r = await axios.get('https://graph.facebook.com/v19.0/oauth/access_token', {
+      params: { grant_type: 'fb_exchange_token', client_id: FB_APP_ID, client_secret: FB_APP_SECRET, fb_exchange_token: userToken },
+      timeout: 10000
+    });
+    return { token: r.data.access_token, longLived: true, expiresIn: r.data.expires_in };
+  } catch (err) {
+    return { token: userToken, longLived: false, error: err.response?.data?.error?.message || err.message };
+  }
+}
+
+// ตรวจอายุ Token (expires_at = 0 แปลว่าไม่หมดอายุ)
+async function inspectToken(token) {
+  if (!FB_APP_SECRET || !token) return null;
+  try {
+    const r = await axios.get('https://graph.facebook.com/v19.0/debug_token', {
+      params: { input_token: token, access_token: FB_APP_ID + '|' + FB_APP_SECRET },
+      timeout: 10000
+    });
+    const d = r.data?.data || {};
+    return { valid: !!d.is_valid, expiresAt: d.expires_at || 0, neverExpires: d.is_valid && !d.expires_at };
+  } catch (e) { return null; }
+}
+
 app.post('/api/fetch-pages', async (req, res) => {
   const { userAccessToken } = req.body;
   if (!userAccessToken) return res.json({ success: false, error: 'ไม่พบ Access Token' });
 
+  const ll = await toLongLivedUserToken(userAccessToken);
+  if (!ll.longLived) console.log('⚠️ [Token] แลก Token อายุยาวไม่สำเร็จ:', ll.error);
+
   try {
     const response = await axios.get('https://graph.facebook.com/v19.0/me/accounts', {
-      params: { access_token: userAccessToken },
+      params: { access_token: ll.token, fields: 'id,name,access_token,category', limit: 100 },
       timeout: 10000
     });
-    res.json({ success: true, pages: response.data.data });
+    const pages = response.data.data || [];
+    const check = pages[0] ? await inspectToken(pages[0].access_token) : null;
+    res.json({
+      success: true,
+      pages,
+      userAccessToken: ll.token,
+      longLived: ll.longLived,
+      neverExpires: !!check?.neverExpires,
+      warning: ll.longLived ? '' : ('Token ยังเป็นแบบอายุสั้น (หมดใน 1-2 ชม.) สาเหตุ: ' + ll.error)
+    });
   } catch (err) {
     res.json({ success: false, error: err.response?.data?.error?.message || err.message });
   }
+});
+
+// เช็กอายุ Page Token ของเพจที่เพิ่มไว้แล้ว
+app.get('/api/page-token-status', checkAuth, async (req, res) => {
+  const pageData = usersDB[req.userId]?.pages[req.query.pageId];
+  if (!pageData) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
+  const info = await inspectToken(pageData.config.pageAccessToken);
+  if (!info) return res.json({ success: false, error: FB_APP_SECRET ? 'ตรวจสอบไม่สำเร็จ' : 'ยังไม่ได้ตั้งค่า FB_APP_SECRET' });
+  res.json({ success: true, ...info });
 });
 
 app.post('/api/subscribe-webhook', async (req, res) => {
@@ -4803,6 +4896,7 @@ app.post('/webhook', async (req, res) => {
         for (const msgEvent of entry.messaging) {
           // ข้ามข้อความที่เพจส่งเอง (echo)
           if (msgEvent.message && msgEvent.message.is_echo) continue;
+          runTask(async () => {
 
           const senderId = msgEvent.sender?.id;
           if (senderId) subscribers.add(senderId);
@@ -4890,6 +4984,7 @@ app.post('/webhook', async (req, res) => {
               }
             }
           }
+          }, 'messaging');
         }
       }
 
@@ -4901,6 +4996,7 @@ app.post('/webhook', async (req, res) => {
             const senderId = comment.from?.id;
             // ข้ามคอมเมนต์ที่เพจตอบเอง (ไม่นับเป็นลูกค้า และกันบอตตอบวนซ้ำ)
             if (senderId && (senderId === pageId || senderId === configStore.pageId)) continue;
+            if (seenComment(targetRecord.pageData, comment.comment_id)) continue;
             if (senderId) subscribers.add(senderId);
 
             // หา session ไลฟ์ที่คอมเมนต์นี้สังกัด (ถ้ามี) แล้วใช้ค่าตั้งของ session แทนค่าหลักของเพจ
@@ -4928,48 +5024,41 @@ app.post('/webhook', async (req, res) => {
             }
 
             if (isMatched && cfg.pageAccessToken) {
-              if (cfg.enableAutoLike) {
-                try {
-                  await axios.post('https://graph.facebook.com/v19.0/' + comment.comment_id + '/likes', {}, {
-                    params: { access_token: cfg.pageAccessToken },
-                    timeout: 10000
-                  });
-                } catch (likeErr) {}
-              }
-
-              if (cfg.enableCommentReply) {
-                try {
-                  await axios.post('https://graph.facebook.com/v19.0/' + comment.comment_id + '/comments', {
-                    message: cfg.replyCommentText
-                  }, { 
-                    params: { access_token: cfg.pageAccessToken },
-                    timeout: 10000 
-                  });
-                } catch (repErr) {
-                  console.error('❌ [Comment Reply Error]', repErr.response?.data || repErr.message);
-                }
-              }
-
-              if (cfg.enableInbox) {
-                try {
-                  const inboxRes = await axios.post('https://graph.facebook.com/v19.0/me/messages', {
-                    recipient: { comment_id: comment.comment_id },
+              const token = cfg.pageAccessToken;
+              const commentId = comment.comment_id;
+              const pageDataRef = targetRecord.pageData;
+              const t0 = Date.now();
+              runTask(() => fbLimit(pageId, async () => {
+                const jobs = [];
+                // ส่งเข้าอินบ็อกซ์ (สำคัญสุด) + ตอบคอมเมนต์ + กดไลก์ ยิงพร้อมกัน ไม่ต้องรอกันทีละอัน
+                if (cfg.enableInbox) {
+                  jobs.push(axios.post('https://graph.facebook.com/v19.0/me/messages', {
+                    recipient: { comment_id: commentId },
                     message: { text: cfg.inboxText }
-                  }, { 
-                    params: { access_token: cfg.pageAccessToken },
-                    timeout: 10000 
-                  });
-                  // 📦 จับคู่ ID คนคอมเมนต์ กับ ID แชท (PSID) เพื่อใช้ค้นหาที่อยู่ในแชทภายหลัง
-                  const psid = inboxRes.data?.recipient_id;
-                  if (psid && senderId) {
-                    getPsidMap(targetRecord.pageData).set(senderId, String(psid));
-                    const c = liveSession?.commenters.get(senderId);
-                    if (c) c.psid = String(psid);
-                  }
-                } catch (inbErr) {
-                  console.error('❌ [Inbox Error]', inbErr.response?.data || inbErr.message);
+                  }, { params: { access_token: token }, timeout: 15000 }).then(inboxRes => {
+                    // 📦 จับคู่ ID คนคอมเมนต์ กับ ID แชท (PSID) เพื่อใช้ค้นหาที่อยู่ในแชทภายหลัง
+                    const psid = inboxRes.data?.recipient_id;
+                    if (psid && senderId) {
+                      getPsidMap(pageDataRef).set(senderId, String(psid));
+                      const c = liveSession?.commenters.get(senderId);
+                      if (c) c.psid = String(psid);
+                    }
+                  }).catch(inbErr => console.error('❌ [Inbox Error]', inbErr.response?.data || inbErr.message)));
                 }
-              }
+                if (cfg.enableCommentReply) {
+                  jobs.push(axios.post('https://graph.facebook.com/v19.0/' + commentId + '/comments', {
+                    message: cfg.replyCommentText
+                  }, { params: { access_token: token }, timeout: 15000 })
+                    .catch(repErr => console.error('❌ [Comment Reply Error]', repErr.response?.data || repErr.message)));
+                }
+                if (cfg.enableAutoLike) {
+                  jobs.push(axios.post('https://graph.facebook.com/v19.0/' + commentId + '/likes', {}, {
+                    params: { access_token: token }, timeout: 15000
+                  }).catch(() => {}));
+                }
+                await Promise.all(jobs);
+                console.log('⚡ [Comment] ' + commentId + ' ตอบเสร็จใน ' + (Date.now() - t0) + ' ms');
+              }), 'comment');
             }
           }
         }
