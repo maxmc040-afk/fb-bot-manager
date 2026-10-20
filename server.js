@@ -2134,6 +2134,13 @@ app.get('/', (req, res) => {
                 let msg = data.updated ? '✅ อัปเดต Token ของเพจเรียบร้อยแล้ว' : '✅ เพิ่มเพจเข้าสู่ระบบสำเร็จ!';
                 if(data.subscribe && data.subscribe.success) msg += ' และผูก Webhook ให้อัตโนมัติแล้ว';
                 else if(data.subscribe) msg += ' แต่ผูก Webhook ไม่สำเร็จ: ' + data.subscribe.error + ' (กด Subscribe ตอนนี้ หรือดูวิธีผูกด้วย Graph API Explorer ในหน้านี้)';
+                try {
+                    const ts = await (await fetch('/api/page-token-status?token=' + authToken + '&pageId=' + encodeURIComponent(selected.id))).json();
+                    if (ts.success && ts.neverExpires) msg += NL + NL + '🔑 Page Token แบบไม่หมดอายุ ✅';
+                    else if (ts.success && ts.expiresAt) msg += NL + NL + '⚠️ Token ยังเป็นแบบอายุสั้น หมดอายุ ' + new Date(ts.expiresAt * 1000).toLocaleString('th-TH') + ' (ให้กดเข้าสู่ระบบด้วย Facebook ใหม่ แล้วเพิ่มเพจอีกครั้ง)';
+                    else if (ts.success && !ts.valid) msg += NL + NL + '❌ Token ใช้งานไม่ได้';
+                    else msg += NL + NL + '⚠️ ตรวจอายุ Token ไม่ได้: ' + (ts.error || '');
+                } catch (e) {}
                 alert(msg);
                 loadUserPages();
             } else {
@@ -4085,10 +4092,14 @@ async function runBuyersJob(pageData, s, matched) {
   const token = cfg.pageAccessToken;
   const psidMap = getPsidMap(pageData);
   const inboxLog = getInboxLog(pageData);
-  let convIndex = null;
+  // ⚡ สร้างดัชนีชื่อแชทครั้งเดียว ใช้ร่วมกันทุกคน
+  let convIndexP = null;
+  const getConvIndex = () => convIndexP || (convIndexP = buildConversationIndex(pageId, token).catch(e => {
+    job.warning = 'ดึงรายการแชทไม่สำเร็จ: ' + graphErrorMessage(e);
+    return new Map();
+  }));
 
-  for (const [userId, c] of matched) {
-    if (job.shouldStop) break;
+  const processOne = async ([userId, c]) => {
     job.message = 'กำลังค้นหาที่อยู่ของ ' + (c.name || userId);
 
     const prev = s.buyers.get(userId);
@@ -4109,16 +4120,13 @@ async function runBuyersJob(pageData, s, matched) {
       Object.assign(prev, { fbName: item.fbName || prev.fbName, keyword: item.keyword, matchedCount: item.matchedCount, lastMessage: item.lastMessage });
       job.done++;
       if (prev.address) job.found++;
-      continue;
+      return;
     }
 
     try {
       if (!item.psid && inboxLog.has(userId)) item.psid = userId;
       if (!item.psid && item.fbName) {
-        if (!convIndex) {
-          try { convIndex = await buildConversationIndex(pageId, token); }
-          catch (e) { convIndex = new Map(); job.warning = 'ดึงรายการแชทไม่สำเร็จ: ' + graphErrorMessage(e); }
-        }
+        const convIndex = await getConvIndex();
         item.psid = convIndex.get(normName(item.fbName)) || '';
       }
 
@@ -4177,8 +4185,18 @@ async function runBuyersJob(pageData, s, matched) {
     }
     s.buyers.set(userId, item);
     job.done++;
-    await sleep(250);
-  }
+  };
+
+  // ⚡ ค้นหาที่อยู่พร้อมกันครั้งละ 4 คน (เดิมทำทีละคน + หน่วง 0.25 วิ)
+  const list = Array.from(matched);
+  let nextIdx = 0;
+  const worker = async () => {
+    while (!job.shouldStop && nextIdx < list.length) {
+      const entry = list[nextIdx++];
+      try { await processOne(entry); } catch (e) { console.error('❌ [Buyers Job]', e.message); job.done++; }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, list.length) }, worker));
 
   job.running = false;
   job.message = job.shouldStop ? 'หยุดการค้นหาแล้ว' : ('เสร็จสิ้น: มีที่อยู่ ' + job.found + ' จาก ' + job.total + ' คน');
