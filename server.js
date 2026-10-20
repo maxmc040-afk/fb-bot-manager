@@ -266,6 +266,220 @@ const usersDB = {};
 const pageIndexMap = {};  
 let sessions = {};        
 
+// =====================================================================
+// 💾 ฐานข้อมูลถาวร (Upstash Redis ผ่าน REST API — ไม่ต้องติดตั้งแพ็กเกจเพิ่ม)
+// ตั้งค่าใน Render → Environment:
+//   UPSTASH_REDIS_REST_URL   = https://xxxx.upstash.io
+//   UPSTASH_REDIS_REST_TOKEN = (REST Token)
+// ไม่ตั้งค่า = ทำงานแบบเดิม (เก็บในหน่วยความจำ ข้อมูลหายเมื่อรีสตาร์ท)
+// =====================================================================
+const DB_URL = String(process.env.UPSTASH_REDIS_REST_URL || '').replace(/\/+$/, '');
+const DB_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
+const DB_PREFIX = (process.env.DB_PREFIX || 'fbbot') + ':';
+const DB_ENABLED = !!(DB_URL && DB_TOKEN);
+const dbState = { enabled: DB_ENABLED, loaded: false, saving: false, lastSave: 0, lastError: '', lastErrorAt: 0, keys: 0, bytes: 0, cycle: 0 };
+const dbHashes = new Map(); // key -> hash ของข้อมูลที่บันทึกล่าสุด (บันทึกเฉพาะส่วนที่เปลี่ยน)
+
+async function redisPipeline(cmds) {
+  const r = await axios.post(DB_URL + '/pipeline', cmds, {
+    headers: { Authorization: 'Bearer ' + DB_TOKEN }, timeout: 30000, maxBodyLength: Infinity, maxContentLength: Infinity
+  });
+  const out = Array.isArray(r.data) ? r.data : [];
+  const bad = out.find(x => x && x.error);
+  if (bad) throw new Error('Redis: ' + bad.error);
+  return out.map(x => (x ? x.result : null));
+}
+
+// แปลง Map / Set ให้เก็บเป็น JSON ได้ และแปลงกลับตอนโหลด
+function dbReplacer(k, v) {
+  if (v instanceof Map) return { __m: Array.from(v.entries()) };
+  if (v instanceof Set) return { __s: Array.from(v.values()) };
+  return v;
+}
+function dbReviver(k, v) {
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    if (Array.isArray(v.__m) && Object.keys(v).length === 1) return new Map(v.__m);
+    if (Array.isArray(v.__s) && Object.keys(v).length === 1) return new Set(v.__s);
+  }
+  return v;
+}
+const dbEnc = (str) => zlib.gzipSync(str, { level: 6 }).toString('base64');
+const dbDec = (b64) => JSON.parse(zlib.gunzipSync(Buffer.from(b64, 'base64')).toString('utf8'), dbReviver);
+const dbKeyPart = (x) => encodeURIComponent(String(x));
+
+// ข้อมูลชั่วคราวที่ไม่ต้องบันทึก (สร้างใหม่ได้เอง)
+const PAGE_TRANSIENT = new Set(['liveSessions', 'inboxLog', 'seenComments', 'labelGroups', 'labelIds', 'labelsLoaded', 'fbPause']);
+
+// แบ่งข้อมูลเป็นส่วน ๆ: บัญชี / เพจ / แชท / ไลฟ์แต่ละ session -> บันทึกเฉพาะส่วนที่เปลี่ยน
+function buildDbParts(includeInbox) {
+  const parts = new Map();
+  parts.set('sessions', sessions);
+  const now = Date.now();
+  for (const [username, u] of Object.entries(usersDB)) {
+    const uk = dbKeyPart(username);
+    const { pages, ...userCore } = u;
+    parts.set('user:' + uk, { ...userCore, pageIds: Object.keys(pages || {}) });
+    for (const [pid, pd] of Object.entries(pages || {})) {
+      const pk = uk + ':' + dbKeyPart(pid);
+      const core = {};
+      for (const [k, v] of Object.entries(pd)) if (!PAGE_TRANSIENT.has(k)) core[k] = v;
+      core.liveIds = Object.keys(pd.liveSessions || {});
+      parts.set('page:' + pk, core);
+      for (const [sid, sess] of Object.entries(pd.liveSessions || {})) parts.set('live:' + pk + ':' + dbKeyPart(sid), sess);
+      if (includeInbox) {
+        // แชทลูกค้า: เก็บ 30 ข้อความล่าสุด ของคนที่ทักมาใน 14 วัน (สูงสุด 8,000 คน)
+        const inbox = [];
+        for (const [psid, arr] of (pd.inboxLog || new Map())) {
+          const last = arr[arr.length - 1];
+          if (last && now - (last.time || 0) < 14 * 86400000) inbox.push([psid, arr.slice(-30)]);
+        }
+        parts.set('inbox:' + pk, new Map(inbox.slice(-8000)));
+      }
+    }
+  }
+  return parts;
+}
+
+async function saveDb(force) {
+  if (!DB_ENABLED || !dbState.loaded || dbState.saving) return;
+  dbState.saving = true;
+  try {
+    dbState.cycle++;
+    const includeInbox = force || dbState.cycle % 4 === 0; // แชทบันทึกทุก ~1 นาที ส่วนอื่นทุก 15 วิ
+    const parts = buildDbParts(includeInbox);
+    const cmds = [];
+    let bytes = 0;
+    for (const [k, v] of parts) {
+      const json = JSON.stringify(v, dbReplacer);
+      const h = crypto.createHash('md5').update(json).digest('hex');
+      if (dbHashes.get(k) === h) continue;
+      const enc = dbEnc(json);
+      cmds.push({ k, h, cmd: ['SET', DB_PREFIX + k, enc] });
+      bytes += enc.length;
+    }
+    // ส่วนที่ถูกลบ (เช่น ลบ session / ลบเพจ)
+    const allKeys = new Set(parts.keys());
+    const dels = [];
+    for (const k of dbHashes.keys()) {
+      if (allKeys.has(k)) continue;
+      if (!includeInbox && k.startsWith('inbox:')) { allKeys.add(k); continue; }
+      dels.push(k);
+    }
+    if (cmds.length || dels.length) {
+      const index = Array.from(allKeys);
+      // ส่งเป็นชุด ชุดละไม่เกิน ~4MB
+      let batch = [], size = 0;
+      const flush = async () => { if (batch.length) { await redisPipeline(batch.map(x => x.cmd)); batch.forEach(x => x.h && dbHashes.set(x.k, x.h)); batch = []; size = 0; } };
+      for (const c of cmds) {
+        if (size + c.cmd[2].length > 4 * 1024 * 1024) await flush();
+        batch.push(c); size += c.cmd[2].length;
+      }
+      for (const k of dels) batch.push({ k, h: '', cmd: ['DEL', DB_PREFIX + k] });
+      batch.push({ k: '', h: '', cmd: ['SET', DB_PREFIX + 'index', JSON.stringify(index)] });
+      await flush();
+      dels.forEach(k => dbHashes.delete(k));
+      dbState.bytes = bytes;
+    }
+    dbState.keys = allKeys.size;
+    dbState.lastSave = Date.now();
+    dbState.lastError = '';
+  } catch (e) {
+    dbState.lastError = e.response?.data?.error || e.message;
+    dbState.lastErrorAt = Date.now();
+    console.error('❌ [DB] บันทึกไม่สำเร็จ:', dbState.lastError);
+  } finally {
+    dbState.saving = false;
+  }
+}
+
+async function loadDb() {
+  if (!DB_ENABLED) { console.log('💾 [DB] ไม่ได้ตั้งค่า Upstash — ใช้หน่วยความจำอย่างเดียว (ข้อมูลหายเมื่อรีสตาร์ท)'); return; }
+  const [indexRaw] = await redisPipeline([['GET', DB_PREFIX + 'index']]);
+  const keys = indexRaw ? JSON.parse(indexRaw) : [];
+  const data = new Map();
+  for (let i = 0; i < keys.length; i += 50) {
+    const chunk = keys.slice(i, i + 50);
+    const vals = await redisPipeline([['MGET', ...chunk.map(k => DB_PREFIX + k)]]);
+    const arr = vals[0] || [];
+    chunk.forEach((k, j) => { if (arr[j]) data.set(k, arr[j]); });
+  }
+  const val = (k) => { try { return data.has(k) ? dbDec(data.get(k)) : null; } catch (e) { console.error('⚠️ [DB] อ่าน ' + k + ' ไม่ได้'); return null; } };
+
+  const sess = val('sessions');
+  if (sess) sessions = sess;
+  let pageCount = 0, liveCount = 0;
+  for (const k of keys) {
+    if (!k.startsWith('user:')) continue;
+    const uk = k.slice(5);
+    const username = decodeURIComponent(uk);
+    const { pageIds = [], ...userCore } = val(k) || {};
+    const user = { ...userCore, pages: {} };
+    for (const pid of pageIds) {
+      const pk = uk + ':' + dbKeyPart(pid);
+      const core = val('page:' + pk);
+      if (!core) continue;
+      const { liveIds = [], ...pd } = core;
+      pd.config = { ...defaultPageConfig, ...(pd.config || {}) };
+      if (!(pd.subscribers instanceof Set)) pd.subscribers = new Set();
+      if (!(pd.usedSlips instanceof Set)) pd.usedSlips = new Set();
+      if (!(pd.psidMap instanceof Map)) pd.psidMap = new Map();
+      if (!(pd.lastInbound instanceof Map)) delete pd.lastInbound;
+      const inbox = val('inbox:' + pk);
+      pd.inboxLog = inbox instanceof Map ? inbox : new Map();
+      if (pd.broadcastStatus && pd.broadcastStatus.isBroadcasting) {
+        pd.broadcastStatus.isBroadcasting = false;
+        pd.broadcastStatus.statusMessage = '⏹️ หยุด เพราะเซิร์ฟเวอร์รีสตาร์ท';
+      }
+      pd.liveSessions = {};
+      for (const sid of liveIds) {
+        const ls = val('live:' + pk + ':' + dbKeyPart(sid));
+        if (!ls) continue;
+        if (!(ls.commenters instanceof Map)) ls.commenters = new Map();
+        if (!(ls.buyers instanceof Map)) ls.buyers = new Map();
+        if (!Array.isArray(ls.slips)) ls.slips = [];
+        for (const jobKey of ['buyersJob', 'shipJob']) {
+          if (ls[jobKey] && ls[jobKey].running) { ls[jobKey].running = false; ls[jobKey].message = 'หยุด เพราะเซิร์ฟเวอร์รีสตาร์ท (กดใหม่อีกครั้ง)'; }
+        }
+        if (ls.broadcastStatus && ls.broadcastStatus.isBroadcasting) {
+          ls.broadcastStatus.isBroadcasting = false;
+          ls.broadcastStatus.statusMessage = '⏹️ หยุด เพราะเซิร์ฟเวอร์รีสตาร์ท';
+        }
+        pd.liveSessions[sid] = ls;
+        liveCount++;
+      }
+      user.pages[pid] = pd;
+      pageIndexMap[pid] = { username, pageData: pd };
+      if (pd.config.pageId) pageIndexMap[pd.config.pageId] = { username, pageData: pd };
+      pageCount++;
+    }
+    usersDB[username] = user;
+  }
+  // จำ hash ของที่โหลดมา จะได้ไม่บันทึกซ้ำทันที
+  const parts = buildDbParts(true);
+  for (const [k, v] of parts) dbHashes.set(k, crypto.createHash('md5').update(JSON.stringify(v, dbReplacer)).digest('hex'));
+  for (const k of keys) if (!dbHashes.has(k)) dbHashes.set(k, 'loaded');
+  dbState.keys = keys.length;
+  console.log('💾 [DB] โหลดข้อมูลสำเร็จ: ผู้ใช้ ' + Object.keys(usersDB).length + ' · เพจ ' + pageCount + ' · ไลฟ์ ' + liveCount);
+}
+
+// โหลดตอนเริ่มเซิร์ฟเวอร์ (ลองซ้ำได้ ถ้าโหลดไม่สำเร็จจะ "ไม่บันทึกทับ" กันข้อมูลหาย)
+async function initDb() {
+  if (!DB_ENABLED) return;
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try {
+      await loadDb();
+      dbState.loaded = true;
+      return;
+    } catch (e) {
+      dbState.lastError = 'โหลดฐานข้อมูลไม่สำเร็จ: ' + (e.response?.data?.error || e.message);
+      dbState.lastErrorAt = Date.now();
+      console.error('❌ [DB] ' + dbState.lastError + ' (ครั้งที่ ' + attempt + ')');
+      await sleep(2000 * attempt);
+    }
+  }
+  console.error('🛑 [DB] โหลดไม่สำเร็จ ปิดการบันทึกไว้ก่อน เพื่อไม่ให้ทับข้อมูลเดิมในฐานข้อมูล');
+}
+
 const defaultPageConfig = {
   appId: '1611337127153323',
   verifyToken: '14556456',
@@ -1601,7 +1815,7 @@ app.get('/', (req, res) => {
 
         <div class="flex-1 flex flex-col min-w-0 overflow-hidden">
             <header class="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-6 z-10">
-                <h1 id="page-title" class="text-lg font-bold text-slate-700">กำลังจัดการเพจ: <span id="header-page-name" class="text-blue-600">ยังไม่ได้เลือกเพจ</span></h1>
+                <h1 id="page-title" class="text-lg font-bold text-slate-700">กำลังจัดการเพจ: <span id="header-page-name" class="text-blue-600">ยังไม่ได้เลือกเพจ</span> <span id="db-status" class="ml-2 text-xs font-medium text-slate-400"></span></h1>
                 <span class="text-xs bg-emerald-100 text-emerald-700 px-2.5 py-1 rounded-full font-semibold">● User: <span id="current-username"></span></span>
             </header>
 
@@ -2654,6 +2868,23 @@ app.get('/', (req, res) => {
                 alert('❌ บันทึกไม่สำเร็จ: ' + data.error);
             }
         }
+
+        // ===== 💾 สถานะฐานข้อมูล =====
+        async function loadDbStatus() {
+            if (!authToken) return;
+            const el = document.getElementById('db-status');
+            try {
+                const r = await (await fetch('/api/db/status?token=' + authToken)).json();
+                if (!r.success) return;
+                if (!r.enabled) { el.innerText = '⚠️ ยังไม่ได้เชื่อมฐานข้อมูล (ข้อมูลหายเมื่อรีสตาร์ท)'; el.className = 'ml-2 text-xs font-medium text-amber-600'; return; }
+                if (r.lastError && (!r.lastSave || r.lastErrorAt > r.lastSave)) { el.innerText = '❌ ฐานข้อมูล: ' + r.lastError; el.className = 'ml-2 text-xs font-medium text-rose-600'; return; }
+                if (!r.loaded) { el.innerText = '⏳ กำลังโหลดฐานข้อมูล...'; el.className = 'ml-2 text-xs font-medium text-slate-400'; return; }
+                el.innerText = '💾 บันทึกอัตโนมัติ' + (r.lastSave ? ' · ล่าสุด ' + new Date(r.lastSave).toLocaleTimeString('th-TH') : '');
+                el.className = 'ml-2 text-xs font-medium text-emerald-600';
+            } catch (e) {}
+        }
+        setInterval(loadDbStatus, 30000);
+        setTimeout(loadDbStatus, 1500);
 
         // ===== 🧾 ผู้ให้บริการตรวจสลิป =====
         function toggleSlipProvider() {
@@ -6037,6 +6268,11 @@ app.post('/webhook', async (req, res) => {
 const PORT = process.env.PORT || 3000;
 const serverUrl = process.env.RENDER_EXTERNAL_URL || ('http://localhost:' + PORT);
 
+// 💾 สถานะฐานข้อมูล
+app.get('/api/db/status', checkAuth, (req, res) => {
+  res.json({ success: true, enabled: dbState.enabled, loaded: dbState.loaded, lastSave: dbState.lastSave, keys: dbState.keys, lastError: dbState.lastError, lastErrorAt: dbState.lastErrorAt });
+});
+
 // ⚡ จุดเช็กสถานะเบา ๆ (ตัวปลุกเซิร์ฟเวอร์ใช้ตัวนี้ แทนการโหลดหน้าเว็บ 350KB)
 app.get('/healthz', (req, res) => res.type('text').send('ok'));
 
@@ -6044,8 +6280,12 @@ app.get('/healthz', (req, res) => res.type('text').send('ok'));
 process.on('unhandledRejection', (e) => console.error('⚠️ [Unhandled Rejection]', e?.response?.data || e?.message || e));
 process.on('uncaughtException', (e) => console.error('⚠️ [Uncaught Exception]', e?.stack || e));
 
-const server = app.listen(PORT, () => {
+let server = null;
+const dbBoot = Promise.race([initDb(), sleep(45000)]).catch(() => {});
+dbBoot.then(() => {
+server = app.listen(PORT, () => {
   console.log('Server is running on port ' + PORT);
+  if (DB_ENABLED) setInterval(() => saveDb(false), 15 * 1000);
   loadThaiAddressDb();
   setInterval(() => { if (!thaiAddrDb) loadThaiAddressDb(); }, 10 * 60 * 1000);
   setInterval(async () => {
@@ -6057,3 +6297,23 @@ if (server) {
   server.keepAliveTimeout = 65 * 1000;
   server.headersTimeout = 66 * 1000;
 }
+});
+
+// 💾 Render ส่งสัญญาณ SIGTERM ก่อนรีสตาร์ท/Deploy ใหม่ -> บันทึกข้อมูลล่าสุดก่อนปิด
+let shuttingDown = false;
+async function gracefulShutdown(sig) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log('💾 [DB] ได้รับ ' + sig + ' กำลังบันทึกข้อมูลก่อนปิด...');
+  try {
+    if (DB_ENABLED && dbState.loaded) {
+      for (let i = 0; i < 20 && dbState.saving; i++) await sleep(250);
+      await Promise.race([saveDb(true), sleep(20000)]);
+      console.log('💾 [DB] บันทึกเรียบร้อย');
+    }
+  } finally {
+    process.exit(0);
+  }
+}
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
