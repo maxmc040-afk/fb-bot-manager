@@ -502,23 +502,24 @@ const defaultPageConfig = {
   pageAccessToken: '',
   pageId: '',
   pageName: '',
-  easySlipApiKey: '47f197e2-8c05-42bb-b9ad-9186f84faa82', // EasySlip API Key (สำรอง)
-  slipProvider: 'zwiz',
-  enableCommentBot: true, // สวิตช์หลัก เปิด/ปิด บอตตอบกลับคอมเมนต์ (โพสต์ทั่วไป)   // ผู้ให้บริการตรวจสลิป: 'zwiz' (หลัก) หรือ 'easyslip'
-  zwizApiKey: process.env.ZWIZ_API_KEY || '', // ZWIZ.AI Slip Verification API Key
+  // 🔒 สมาชิกแต่ละคนต้องใส่ API Key / บัญชีรับเงินของตัวเอง (ไม่มีค่าเริ่มต้น กันคนอื่นใช้ของเจ้าของระบบ)
+  easySlipApiKey: '',      // EasySlip API Key (สำรอง)
+  slipProvider: 'zwiz',    // ผู้ให้บริการตรวจสลิป: 'zwiz' (หลัก) หรือ 'easyslip'
+  zwizApiKey: '',          // ZWIZ.AI Slip Verification API Key
+  enableCommentBot: true,  // สวิตช์หลัก เปิด/ปิด บอตตอบกลับคอมเมนต์ (โพสต์ทั่วไป)
   
   matchType: 'contains',
   keywords: ['1', '11', '111', '11111', '111111', 'สนใจ', 'cf'],
   replyCommentText: 'แอดมินส่งรายละเอียดให้ในอินบ็อกซ์เรียบร้อยแล้วนะคะ 🙏',
-  inboxText: 'ร.กรุงศรี 6651198576\nชื่อภิญโญ แจ้งกระจ่าง\n\n🙏 โอนแล้วแจ้งสลิป พร้อมชื่อที่อยู่ ได้เลยคะ🥰\n✨ (ส่งฟรี) ส่งฟรี EMS ✨',
+  inboxText: 'แอดมินส่งรายละเอียดให้แล้วนะคะ 🙏\n\n(ใส่เลขบัญชีของร้านที่เมนู ตอบกลับคอมเมนต์)\n\n🙏 โอนแล้วแจ้งสลิป พร้อมชื่อที่อยู่ ได้เลยค่ะ🥰',
   enableInbox: true,
   enableCommentReply: true,
   enableAutoLike: true,
   
-  enableSlipVerify: true,
-  merchantBank: 'BAY', 
-  merchantAccount: '6651198576',
-  merchantName: 'ภิญโญ แจ้งกระจ่าง',
+  enableSlipVerify: false, // เปิดเองหลังใส่ API Key และบัญชีรับเงินแล้ว
+  merchantBank: '',
+  merchantAccount: '',
+  merchantName: '',
   msgSlipSuccess: 'สถานะ: ตรวจสอบถูกต้อง ✅\nยอดเงิน: {amount} บาท\nวันที่: {date}\n\nรับยอดค่ะพี่ ขอบคุณมากค่ะ 🙏 แจ้งชื่อที่อยู่เบอร์โทร ได้เลยค่ะ🥰',
   msgSlipInvalid: '❌ สลิปไม่ถูกต้อง หรือเลขบัญชีผู้รับไม่ตรงกับของทางร้าน กรุณาตรวจสอบอีกครั้งนะคะ',
   msgSlipUnreadable: '⚠️ ไม่สามารถอ่านข้อมูลจากสลิปนี้ได้ กรุณาส่งรูปสลิปที่ชัดเจนอีกครั้งนะคะ',
@@ -550,7 +551,7 @@ async function callEasySlip(body, keyToUse) {
 }
 
 async function verifySlipByImageUrl(imageUrl, apiKey) {
-  const keyToUse = apiKey || defaultPageConfig.easySlipApiKey;
+  const keyToUse = apiKey; // 🔒 ใช้เฉพาะ Key ของเพจนั้น ไม่มี Key กลาง
   if (!keyToUse) {
     console.log('⚠️ ยังไม่ได้ตั้งค่า EasySlip API Key');
     return { success: false, message: 'API Key missing' };
@@ -645,7 +646,7 @@ function formatZwizDate(d, t) {
 
 // คืนค่า { slip, errCode, quota } โดย slip อยู่ในรูปแบบเดียวกับ normalizeSlip() เพื่อใช้ต่อได้เลย
 async function verifySlipWithZwiz(imageUrl, cfg) {
-  const key = cfg.zwizApiKey || process.env.ZWIZ_API_KEY || '';
+  const key = cfg.zwizApiKey || ''; // 🔒 ใช้เฉพาะ Key ของเพจนั้น ไม่ใช้ Key กลางของเซิร์ฟเวอร์
   if (!key) return { slip: null, errCode: 'MISSING_API_KEY' };
 
   // ZWIZ รับเฉพาะไฟล์รูป -> โหลดรูปจาก Facebook ก่อน
@@ -1991,6 +1992,7 @@ app.get('/', (req, res) => {
                                 <div>
                                     <label class="text-xs font-semibold text-slate-600 block mb-1">ธนาคารผู้รับ:</label>
                                     <select id="merchant-bank" class="w-full p-2.5 text-sm bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-rose-400">
+                                        <option value="">-- เลือกธนาคาร --</option>
                                         <option value="BAY">ธนาคารกรุงศรีอยุธยา (BAY)</option>
                                         <option value="KBANK">ธนาคารกสิกรไทย (KBANK)</option>
                                         <option value="SCB">ธนาคารไทยพาณิชย์ (SCB)</option>
@@ -2714,6 +2716,8 @@ app.get('/', (req, res) => {
                 document.getElementById('subscriber-count').innerText = (data.subscriberCount || 0) + ' คน';
                 renderUI();
                 checkSubscriptionStatus();
+                // เติมข้อมูลเมนู Bee Move ด้วย (ลิงก์ Webhook + ข้อความแจ้งลูกค้า) ทุกครั้งที่เลือก/เปลี่ยนเพจ
+                loadBeemove();
             }
 
             const urlParams = new URLSearchParams(window.location.search);
@@ -2762,7 +2766,7 @@ app.get('/', (req, res) => {
             document.getElementById('slip-provider').value = currentConfig.slipProvider || 'zwiz';
             toggleSlipProvider();
             loadSlipStatus();
-            document.getElementById('merchant-bank').value = currentConfig.merchantBank || 'BAY';
+            document.getElementById('merchant-bank').value = currentConfig.merchantBank || '';
             document.getElementById('merchant-account').value = currentConfig.merchantAccount || '';
             document.getElementById('merchant-name').value = currentConfig.merchantName || '';
             document.getElementById('msg-slip-success').value = currentConfig.msgSlipSuccess || '';
@@ -4336,12 +4340,15 @@ app.get('/', (req, res) => {
         }
 
         async function loadBeemove() {
-            if(!currentActivePageId) return;
-            const res = await fetch(bmUrl('/api/beemove/config'));
-            const d = await res.json();
-            if(!d.success) return;
+            const hookEl = document.getElementById('bm-webhook-url');
+            if(!currentActivePageId) { hookEl.value = ''; hookEl.placeholder = 'กรุณาเลือกเพจก่อน (เมนูด้านซ้าย) ลิงก์จะสร้างให้อัตโนมัติ'; return; }
+            let d;
+            try { d = await (await fetch(bmUrl('/api/beemove/config'))).json(); }
+            catch (e) { hookEl.placeholder = 'โหลดข้อมูลไม่สำเร็จ กรุณารีเฟรชหน้า'; return; }
+            if(!d.success) { hookEl.placeholder = d.error || 'โหลดข้อมูลไม่สำเร็จ'; return; }
             const c = d.config;
             Object.keys(BM_FIELDS).forEach(function(id) { document.getElementById(id).value = c[BM_FIELDS[id]] == null ? '' : c[BM_FIELDS[id]]; });
+            if (!c.notifyText) document.getElementById('bm-notify-text').value = c.defaultNotifyText || '';
             document.getElementById('bm-api-key').value = '';
             document.getElementById('bm-password').value = '';
             document.getElementById('bm-key-state').innerText = c.hasKey ? '(บันทึกแล้ว: ' + c.apiKeyMasked + ')' : '(ยังไม่ได้ใส่)';
@@ -5888,7 +5895,8 @@ app.get('/api/beemove/config', checkAuth, (req, res) => {
     apiKeyMasked: maskKey(bm.apiKey), hasKey: !!bm.apiKey, hasPassword: !!bm.password,
     accounts: cached ? cached.accounts : [],
     webhookPath: '/beemove/webhook/' + bm.webhookKey,
-    recentHooks: (pageData.beemoveHooks || []).slice(0, 5)
+    recentHooks: (pageData.beemoveHooks || []).slice(0, 5),
+    defaultNotifyText: defaultBeemoveConfig.notifyText
   } });
 });
 
