@@ -58,6 +58,20 @@ async function listPageLabels(pageData) {
   return out;
 }
 
+// ป้ายกำกับทั้งหมดของลูกค้า 1 คน (คืนค่าเป็น Set ของ label id)
+async function getUserLabelIds(pageData, psid) {
+  const ids = new Set();
+  let url = 'https://graph.facebook.com/v19.0/' + encodeURIComponent(psid) + '/custom_labels';
+  let params = { fields: 'page_label_name', limit: 100, access_token: pageData.config.pageAccessToken };
+  for (let i = 0; i < 5 && url; i++) {
+    const r = await axios.get(url, { params, timeout: 15000 });
+    for (const l of r.data.data || []) ids.add(String(l.id));
+    url = r.data.paging?.next || null;
+    params = undefined;
+  }
+  return ids;
+}
+
 async function setInboxLabelById(pageData, psid, labelId, remove) {
   await axios({
     method: remove ? 'delete' : 'post',
@@ -1798,6 +1812,17 @@ app.get('/', (req, res) => {
                                     </select>
                                 </div>
                             </div>
+                            <div class="bg-pink-50/50 border border-pink-200 rounded-xl p-4 space-y-2">
+                                <div class="flex flex-wrap items-center justify-between gap-2">
+                                    <div class="text-xs font-bold text-pink-600">🏷️ เลือกผู้รับจากป้ายกำกับ <span class="font-normal text-slate-500">(ไม่เลือก = ไม่กรองป้าย)</span></div>
+                                    <button type="button" onclick="loadLiveBcLabels()" class="px-3 py-1 text-xs font-medium bg-white border border-pink-300 text-pink-600 rounded-lg hover:bg-pink-50">🔄 โหลดป้ายกำกับจากเพจ</button>
+                                </div>
+                                <div class="text-xs font-semibold text-slate-600">ส่งเฉพาะคนที่มีป้าย <span class="font-normal text-slate-400">(มีป้ายใดป้ายหนึ่ง)</span></div>
+                                <div id="lv-bc-lbl-include" class="flex flex-wrap items-center gap-2"></div>
+                                <div class="text-xs font-semibold text-slate-600 pt-1">ยกเว้นคนที่มีป้าย <span class="font-normal text-slate-400">(เช่น ยกเว้น "โอนแล้ว" = ทวงโอนเฉพาะคนที่ยังไม่โอน)</span></div>
+                                <div id="lv-bc-lbl-exclude" class="flex flex-wrap items-center gap-2"></div>
+                                <div id="lv-bc-lbl-status" class="text-xs text-slate-400"></div>
+                            </div>
                             <div id="lv-bc-progress" class="hidden bg-blue-50 border border-blue-200 rounded-xl p-4 space-y-2">
                                 <div class="flex justify-between text-xs font-semibold text-blue-700"><span id="lv-bc-status">-</span><span id="lv-bc-numbers">0/0</span></div>
                                 <div class="w-full bg-blue-200 h-2.5 rounded-full overflow-hidden"><div id="lv-bc-bar" class="bg-blue-600 h-2.5 rounded-full w-0 transition-all duration-300"></div></div>
@@ -2763,11 +2788,71 @@ app.get('/', (req, res) => {
             loadLiveList();
         }
 
+        // ===== 🏷️ กรองผู้รับบรอดแคสต์ตามป้ายกำกับ =====
+        let lvBcLabels = { include: [], exclude: [] };
+
+        function renderLiveBcLabels() {
+            ['include', 'exclude'].forEach(function(kind) {
+                const box = document.getElementById('lv-bc-lbl-' + kind);
+                if (!box) return;
+                const list = lvBcLabels[kind];
+                const inc = kind === 'include';
+                let html = '';
+                list.forEach(function(l, i) {
+                    html += '<span class="inline-flex items-center rounded-full overflow-hidden text-xs font-semibold ' + (inc ? 'bg-pink-600 text-white' : 'bg-slate-600 text-white') + '">'
+                        + '<span class="px-3 py-1">' + (inc ? '' : '🚫 ') + escapeHtml(l.name) + '</span>'
+                        + '<button type="button" class="px-2 py-1 border-l border-white/30 hover:bg-black/20" data-kind="' + kind + '" data-idx="' + i + '" onclick="removeLiveBcLabel(this)">✕</button></span>';
+                });
+                const used = {};
+                lvBcLabels.include.concat(lvBcLabels.exclude).forEach(function(l) { used[l.id] = 1; });
+                html += '<select class="text-xs border ' + (inc ? 'border-pink-300 text-pink-600' : 'border-slate-300 text-slate-600') + ' rounded-full px-3 py-1 bg-white" data-kind="' + kind + '" onchange="addLiveBcLabel(this)">'
+                    + '<option value="">' + (inc ? '+ เลือกป้ายที่จะส่ง' : '+ เลือกป้ายที่จะยกเว้น') + '</option>';
+                pageLabels.filter(function(l) { return !used[l.id]; }).forEach(function(l) {
+                    html += '<option value="' + escapeHtml(l.id) + '">' + escapeHtml(l.name) + '</option>';
+                });
+                if (!pageLabels.length) html += '<option value="" disabled>(กดโหลดป้ายกำกับจากเพจก่อน)</option>';
+                html += '</select>';
+                box.innerHTML = html;
+            });
+        }
+
+        function addLiveBcLabel(sel) {
+            const l = pageLabels.find(function(x) { return x.id === sel.value; });
+            if (l) lvBcLabels[sel.getAttribute('data-kind')].push({ id: l.id, name: l.name });
+            renderLiveBcLabels();
+        }
+
+        function removeLiveBcLabel(btn) {
+            lvBcLabels[btn.getAttribute('data-kind')].splice(parseInt(btn.getAttribute('data-idx'), 10), 1);
+            renderLiveBcLabels();
+        }
+
+        async function loadLiveBcLabels() {
+            if(!currentActivePageId) return;
+            const st = document.getElementById('lv-bc-lbl-status');
+            st.innerText = '⏳ กำลังโหลดป้ายกำกับ...';
+            try {
+                const r = await (await fetch('/api/labels?token=' + authToken + '&pageId=' + currentActivePageId)).json();
+                if (r.success) {
+                    pageLabels = r.labels || [];
+                    st.innerText = pageLabels.length ? ('พบป้ายกำกับในเพจ ' + pageLabels.length + ' ป้าย') : '⚠️ เพจนี้ยังไม่มีป้ายกำกับ (สร้างได้ที่ Meta Business Suite → จัดการป้ายกำกับ)';
+                } else {
+                    st.innerText = '❌ โหลดป้ายไม่สำเร็จ: ' + r.error;
+                }
+            } catch (e) { st.innerText = '❌ ' + e.message; }
+            renderLiveBcLabels();
+        }
+
         async function startLiveBroadcast() {
             if(!currentLiveId) return;
             const message = document.getElementById('lv-bc-message').value.trim();
             if(!message) return alert('กรุณากรอกข้อความบรอดแคสก่อนครับ!');
-            if(!confirm('ยืนยันเริ่มส่งบรอดแคสต์ให้คนใน session นี้?')) return;
+            const lblText = (lvBcLabels.include.length ? NL + 'ส่งเฉพาะป้าย: ' + lvBcLabels.include.map(function(l) { return l.name; }).join(', ') : '')
+                + (lvBcLabels.exclude.length ? NL + 'ยกเว้นป้าย: ' + lvBcLabels.exclude.map(function(l) { return l.name; }).join(', ') : '');
+            if(!confirm('ยืนยันเริ่มส่งบรอดแคสต์ให้คนใน session นี้?' + lblText)) return;
+            const startBtn = document.getElementById('lv-btn-bc-start');
+            startBtn.disabled = true;
+            startBtn.innerText = (lvBcLabels.include.length || lvBcLabels.exclude.length) ? 'กำลังตรวจป้ายกำกับของลูกค้า...' : 'กำลังเตรียมรายชื่อ...';
             const res = await fetch(liveUrl('/api/live/broadcast/start', '&sid=' + currentLiveId), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -2776,12 +2861,18 @@ app.get('/', (req, res) => {
                     delaySec: parseInt(document.getElementById('lv-bc-delay').value) || 3,
                     batchSize: parseInt(document.getElementById('lv-bc-batch').value) || 20,
                     pauseMin: parseInt(document.getElementById('lv-bc-pause').value) || 10,
-                    onlyMatched: document.getElementById('lv-bc-target').value === 'matched'
+                    onlyMatched: document.getElementById('lv-bc-target').value === 'matched',
+                    includeLabels: lvBcLabels.include.map(function(l) { return l.id; }),
+                    excludeLabels: lvBcLabels.exclude.map(function(l) { return l.id; })
                 })
             });
             const data = await res.json();
+            startBtn.disabled = false;
+            startBtn.innerText = 'เริ่มส่งบรอดแคสต์';
             if(!data.success) alert('❌ ' + data.error);
-            else if (data.skipped) alert('เริ่มส่ง ' + data.total + ' คน' + NL + 'ข้าม ' + data.skipped + ' คน: ยังไม่ทักแชทใน 24 ชม. และคอมเมนต์ถูกใช้ส่งข้อความส่วนตัวไปแล้ว (กฎ Facebook)');
+            else if (data.skipped || data.labelFiltered) alert('เริ่มส่ง ' + data.total + ' คน'
+                + (data.labelFiltered ? NL + 'ไม่ตรงเงื่อนไขป้ายกำกับ ' + data.labelFiltered + ' คน' : '')
+                + (data.skipped ? NL + 'ข้าม ' + data.skipped + ' คน: ยังไม่ทักแชทใน 24 ชม. และคอมเมนต์ถูกใช้ส่งข้อความส่วนตัวไปแล้ว (กฎ Facebook)' : ''));
             loadLiveDetail(false);
         }
 
@@ -3631,7 +3722,7 @@ app.get('/', (req, res) => {
             document.getElementById('tab-' + tabId).classList.remove('hidden');
             if(tabId === 'beemove') loadBeemove();
             if(tabId === 'broadcast') loadBroadcastInfo();
-            if(tabId === 'live') { loadLiveList(); startLivePolling(); } else { stopLivePolling(); }
+            if(tabId === 'live') { loadLiveList(); startLivePolling(); if (!pageLabels.length) loadLiveBcLabels(); else renderLiveBcLabels(); } else { stopLivePolling(); }
             document.getElementById('nav-' + tabId).className = "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium bg-blue-50 text-blue-600";
         }
 
@@ -5214,8 +5305,30 @@ app.post('/api/live/broadcast/start', checkAuth, async (req, res) => {
   const targets = [];
   const usedPsid = new Set();
   let skipped = 0;
-  for (const [uid, c] of s.commenters.entries()) {
-    if (onlyMatched && !(c.matchedCount > 0)) continue;
+
+  // 🏷️ กรองตามป้ายกำกับ: ส่งเฉพาะคนที่มีป้ายใดป้ายหนึ่งใน include และไม่มีป้ายใน exclude
+  const includeLabels = (Array.isArray(req.body.includeLabels) ? req.body.includeLabels : []).map(String).filter(Boolean);
+  const excludeLabels = (Array.isArray(req.body.excludeLabels) ? req.body.excludeLabels : []).map(String).filter(Boolean);
+  let candidates = Array.from(s.commenters.entries()).filter(([, c]) => !onlyMatched || c.matchedCount > 0);
+  let labelFiltered = 0;
+  if (includeLabels.length || excludeLabels.length) {
+    let labelErr = '';
+    const checked = await Promise.all(candidates.map(([uid, c]) => {
+      const psid = c.psid || psidMap.get(uid) || '';
+      if (!psid) return Promise.resolve(!includeLabels.length); // ยังไม่มีแชท = ไม่มีป้ายใดๆ
+      return fbLimit(ctx.pageData.config.pageId, () => getUserLabelIds(ctx.pageData, psid))
+        .then(have => (!includeLabels.length || includeLabels.some(id => have.has(id))) && !excludeLabels.some(id => have.has(id)))
+        .catch(e => { labelErr = graphErrorMessage(e); return false; });
+    }));
+    const before = candidates.length;
+    candidates = candidates.filter((_, i) => checked[i]);
+    labelFiltered = before - candidates.length;
+    if (!candidates.length) {
+      return res.json({ success: false, error: 'ไม่มีลูกค้าใน session นี้ที่ตรงเงื่อนไขป้ายกำกับ' + (labelErr ? ' (ตรวจป้ายไม่สำเร็จ: ' + labelErr + ')' : '') });
+    }
+  }
+
+  for (const [uid, c] of candidates) {
     const psid = c.psid || psidMap.get(uid) || '';
     if (psid && windowSet.has(psid)) {
       if (!usedPsid.has(psid)) { usedPsid.add(psid); targets.push({ uid, psid }); }
@@ -5230,8 +5343,8 @@ app.post('/api/live/broadcast/start', checkAuth, async (req, res) => {
     return res.json({ success: false, error: 'ส่งไม่ได้: ' + skipped + ' คนนี้ยังไม่ได้ทักแชทภายใน 24 ชม. และคอมเมนต์ของเขาถูกใช้ส่งข้อความส่วนตัวไปแล้ว (Facebook อนุญาต 1 ครั้งต่อคอมเมนต์) — ให้ลูกค้าทักแชทเข้ามาก่อน หรือรอคอมเมนต์ใหม่' });
   }
 
-  s.broadcastStatus = { isBroadcasting: true, total: targets.length, current: 0, success: 0, failed: 0, skipped, viaComment: 0, errors: {}, statusMessage: 'กำลังเริ่มส่ง...', shouldStop: false };
-  res.json({ success: true, total: targets.length, skipped });
+  s.broadcastStatus = { isBroadcasting: true, total: targets.length, current: 0, success: 0, failed: 0, skipped, labelFiltered, viaComment: 0, errors: {}, statusMessage: 'กำลังเริ่มส่ง...', shouldStop: false };
+  res.json({ success: true, total: targets.length, skipped, labelFiltered });
   runLiveBroadcast(s, ctx.pageData, targets, String(message), delaySec, batchSize, pauseMin);
 });
 
