@@ -97,19 +97,41 @@ function fbLimit(pageId, fn) {
 }
 // ===================== 🏷️ ป้ายกำกับ (Custom Labels) ของ Facebook Inbox =====================
 // ดึงรายชื่อป้ายกำกับทั้งหมดที่มีอยู่แล้วในเพจ
+// - รวมป้ายที่ "ชื่อซ้ำกัน" (Facebook มีได้หลาย ID ชื่อเดียวกัน) ให้เหลือ 1 ตัวเลือก แต่จำทุก ID ไว้
+// - ซ่อนป้ายระบบโฆษณา ad_id.xxxx ที่ Meta สร้างเอง
 async function listPageLabels(pageData) {
   const cfg = pageData.config;
-  const out = [];
+  const groups = new Map(); // ชื่อ -> { id, name, ids: [] }
   let url = 'https://graph.facebook.com/v19.0/' + encodeURIComponent(cfg.pageId) + '/custom_labels';
   let params = { fields: 'page_label_name', limit: 100, access_token: cfg.pageAccessToken };
-  for (let i = 0; i < 20 && url; i++) {
+  for (let i = 0; i < 30 && url; i++) {
     const r = await axios.get(url, { params, timeout: 15000 });
-    for (const l of r.data.data || []) if (l.id && l.page_label_name) out.push({ id: String(l.id), name: String(l.page_label_name) });
+    for (const l of r.data.data || []) {
+      if (!l.id || !l.page_label_name) continue;
+      const name = String(l.page_label_name).trim();
+      if (/^ad_id\./i.test(name)) continue;
+      const key = name.toLowerCase();
+      const g = groups.get(key) || { id: String(l.id), name, ids: [] };
+      if (!g.ids.includes(String(l.id))) g.ids.push(String(l.id));
+      groups.set(key, g);
+    }
     url = r.data.paging?.next || null;
     params = undefined;
   }
-  out.sort((x, y) => x.name.localeCompare(y.name, 'th'));
+  const out = Array.from(groups.values()).sort((x, y) => x.name.localeCompare(y.name, 'th'));
+  // จำไว้ใช้ตอน "ลบป้าย" / "กรองป้าย" ให้ครอบคลุมทุก ID ที่ชื่อเดียวกัน
+  pageData.labelGroups = { byId: new Map(), at: Date.now() };
+  for (const g of out) for (const id of g.ids) pageData.labelGroups.byId.set(id, g.ids);
   return out;
+}
+
+// ID ทั้งหมดที่เป็นป้ายชื่อเดียวกับ id นี้ (ถ้ายังไม่เคยโหลดรายชื่อป้าย จะโหลดก่อน 1 ครั้ง)
+async function sameNameLabelIds(pageData, id) {
+  id = String(id);
+  if (!pageData.labelGroups || Date.now() - pageData.labelGroups.at > 10 * 60 * 1000) {
+    try { await listPageLabels(pageData); } catch (e) { /* ใช้ id เดิม */ }
+  }
+  return (pageData.labelGroups && pageData.labelGroups.byId.get(id)) || [id];
 }
 
 // ป้ายกำกับทั้งหมดของลูกค้า 1 คน (คืนค่าเป็น Set ของ label id)
@@ -150,7 +172,10 @@ function labelKeywordCommenter(pageData, commenter, psid, labels) {
     }
     for (const l of removeList) {
       if (!l || !l.id) continue;
-      try { await setInboxLabelById(pageData, psid, l.id, true); console.log('🏷️ [Label] คำดัก: ลบป้าย "' + l.name + '" ของ ' + psid); }
+      try {
+        for (const id of await sameNameLabelIds(pageData, l.id)) { try { await setInboxLabelById(pageData, psid, id, true); } catch (e) {} }
+        console.log('🏷️ [Label] คำดัก: ลบป้าย "' + l.name + '" ของ ' + psid);
+      }
       catch (e) { /* ลูกค้าไม่มีป้ายนี้อยู่แล้ว ไม่เป็นไร */ }
     }
   }, 'kw-label');
@@ -169,7 +194,10 @@ function labelSlipResult(pageData, psid, result) {
       catch (e) { pageData.lastLabelError = '"' + l.name + '": ' + graphErrorMessage(e); console.error('❌ [Label Error]', pageData.lastLabelError); }
     }
     for (const l of remove) {
-      try { await setInboxLabelById(pageData, psid, l.id, true); console.log('🏷️ [Label] ลบป้าย "' + l.name + '" ของ ' + psid); }
+      try {
+        for (const id of await sameNameLabelIds(pageData, l.id)) { try { await setInboxLabelById(pageData, psid, id, true); } catch (e) {} }
+        console.log('🏷️ [Label] ลบป้าย "' + l.name + '" ของ ' + psid);
+      }
       catch (e) { /* ลูกค้าไม่มีป้ายนี้อยู่แล้ว ไม่เป็นไร */ }
     }
   }, 'label');
@@ -2511,9 +2539,25 @@ app.get('/', (req, res) => {
             SLIP_LABEL_KEYS.forEach(function(k) { renderLabelChips(k, 'add'); renderLabelChips(k, 'remove'); });
         }
 
+        // 🏷️ ป้ายชื่อซ้ำ (Facebook มีหลาย ID ชื่อเดียวกันได้): เทียบด้วยชื่อ ไม่สนตัวพิมพ์/ช่องว่าง
+        function labelKey(l) { return String((l && l.name) || '').trim().toLowerCase(); }
+        function labelFree(used, l) { return !used[l.id] && !used['n:' + labelKey(l)]; }
+        // ลบรายการซ้ำชื่อออกจากป้ายที่เลือกไว้ (เก็บอันแรก) และกันชื่อเดียวกันอยู่ทั้งฝั่งติดและฝั่งลบ
+        function dedupeLabelLists(lists) {
+            const seen = {};
+            lists.forEach(function(list) {
+                if (!Array.isArray(list)) return;
+                for (let i = 0; i < list.length; i++) {
+                    const k = labelKey(list[i]);
+                    if (k && seen[k]) { list.splice(i, 1); i--; } else if (k) seen[k] = 1;
+                }
+            });
+        }
+
         function renderLabelChips(key, kind) {
             const box = document.getElementById('lbl-' + kind + '-' + key);
             if (!box) return;
+            dedupeLabelLists([slipRule(key).add, slipRule(key).remove]);
             const list = slipRule(key)[kind];
             const isAdd = kind === 'add';
             let html = '';
@@ -2524,8 +2568,8 @@ app.get('/', (req, res) => {
                     + '<button type="button" class="px-2 py-1 ' + (isAdd ? 'border-l border-pink-400 hover:bg-pink-700' : 'border-l border-slate-300 hover:bg-slate-300') + '" data-key="' + key + '" data-kind="' + kind + '" data-idx="' + i + '" onclick="removeSlipLabel(this)">✕</button></span>';
             });
             const used = {};
-            list.forEach(function(l) { used[l.id] = 1; });
-            const avail = pageLabels.filter(function(l) { return !used[l.id]; });
+            list.forEach(function(l) { used[l.id] = 1; used['n:' + labelKey(l)] = 1; });
+            const avail = pageLabels.filter(function(l) { return labelFree(used, l); });
             html += '<select class="text-xs border ' + (isAdd ? 'border-pink-300 text-pink-600' : 'border-slate-300 text-slate-600') + ' rounded-full px-3 py-1 bg-white" data-key="' + key + '" data-kind="' + kind + '" onchange="addSlipLabel(this)">'
                 + '<option value="">' + (isAdd ? '+ เพิ่มป้ายกำกับ' : '+ ลบป้ายกำกับ') + '</option>';
             avail.forEach(function(l) { html += '<option value="' + escapeHtml(l.id) + '">' + escapeHtml(l.name) + '</option>'; });
@@ -2893,6 +2937,7 @@ app.get('/', (req, res) => {
         let lvBcLabels = { include: [], exclude: [] };
 
         function renderLiveBcLabels() {
+            dedupeLabelLists([lvBcLabels.include, lvBcLabels.exclude]);
             ['include', 'exclude'].forEach(function(kind) {
                 const box = document.getElementById('lv-bc-lbl-' + kind);
                 if (!box) return;
@@ -2905,10 +2950,10 @@ app.get('/', (req, res) => {
                         + '<button type="button" class="px-2 py-1 border-l border-white/30 hover:bg-black/20" data-kind="' + kind + '" data-idx="' + i + '" onclick="removeLiveBcLabel(this)">✕</button></span>';
                 });
                 const used = {};
-                lvBcLabels.include.concat(lvBcLabels.exclude).forEach(function(l) { used[l.id] = 1; });
+                lvBcLabels.include.concat(lvBcLabels.exclude).forEach(function(l) { used[l.id] = 1; used['n:' + labelKey(l)] = 1; });
                 html += '<select class="text-xs border ' + (inc ? 'border-pink-300 text-pink-600' : 'border-slate-300 text-slate-600') + ' rounded-full px-3 py-1 bg-white" data-kind="' + kind + '" onchange="addLiveBcLabel(this)">'
                     + '<option value="">' + (inc ? '+ เลือกป้ายที่จะส่ง' : '+ เลือกป้ายที่จะยกเว้น') + '</option>';
-                pageLabels.filter(function(l) { return !used[l.id]; }).forEach(function(l) {
+                pageLabels.filter(function(l) { return labelFree(used, l); }).forEach(function(l) {
                     html += '<option value="' + escapeHtml(l.id) + '">' + escapeHtml(l.name) + '</option>';
                 });
                 if (!pageLabels.length) html += '<option value="" disabled>(กดโหลดป้ายกำกับจากเพจก่อน)</option>';
@@ -2918,6 +2963,7 @@ app.get('/', (req, res) => {
         }
 
         function renderKwLabels() {
+            dedupeLabelLists([liveCfg.keywordLabels, liveCfg.keywordRemoveLabels]);
             [['lv-kw-labels', 'keywordLabels', true], ['lv-kw-remove-labels', 'keywordRemoveLabels', false]].forEach(function(cfgRow) {
                 const box = document.getElementById(cfgRow[0]);
                 if (!box) return;
@@ -2932,10 +2978,10 @@ app.get('/', (req, res) => {
                 });
                 // ป้ายเดียวกันจะอยู่ได้แค่ฝั่งติด หรือฝั่งลบ อย่างใดอย่างหนึ่ง
                 const used = {};
-                (liveCfg.keywordLabels || []).concat(liveCfg.keywordRemoveLabels || []).forEach(function(l) { used[l.id] = 1; });
+                (liveCfg.keywordLabels || []).concat(liveCfg.keywordRemoveLabels || []).forEach(function(l) { used[l.id] = 1; used['n:' + labelKey(l)] = 1; });
                 html += '<select class="text-xs border ' + (isAdd ? 'border-pink-300 text-pink-600' : 'border-slate-300 text-slate-600') + ' rounded-full px-3 py-1 bg-white" data-field="' + field + '" onchange="addKwLabel(this)">'
                     + '<option value="">' + (isAdd ? '+ เพิ่มป้ายกำกับ' : '+ ลบป้ายกำกับ') + '</option>';
-                pageLabels.filter(function(l) { return !used[l.id]; }).forEach(function(l) {
+                pageLabels.filter(function(l) { return labelFree(used, l); }).forEach(function(l) {
                     html += '<option value="' + escapeHtml(l.id) + '">' + escapeHtml(l.name) + '</option>';
                 });
                 if (!pageLabels.length) html += '<option value="" disabled>(กดโหลดป้ายกำกับจากเพจก่อน)</option>';
@@ -5480,6 +5526,12 @@ app.post('/api/live/broadcast/start', checkAuth, async (req, res) => {
   let candidates = Array.from(s.commenters.entries()).filter(([, c]) => !onlyMatched || c.matchedCount > 0);
   let labelFiltered = 0;
   if (includeLabels.length || excludeLabels.length) {
+    // ป้ายชื่อเดียวกันหลาย ID ให้นับเป็นป้ายเดียวกัน
+    const expand = async (list) => Array.from(new Set((await Promise.all(list.map(id => sameNameLabelIds(ctx.pageData, id)))).flat()));
+    const incAll = await expand(includeLabels);
+    const excAll = await expand(excludeLabels);
+    includeLabels.splice(0, includeLabels.length, ...incAll);
+    excludeLabels.splice(0, excludeLabels.length, ...excAll);
     let labelErr = '';
     const checked = await Promise.all(candidates.map(([uid, c]) => {
       const psid = c.psid || psidMap.get(uid) || '';
