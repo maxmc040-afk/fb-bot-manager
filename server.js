@@ -177,6 +177,21 @@ async function setInboxLabelById(pageData, psid, labelId, remove) {
   });
 }
 
+// คนคอมเมนต์ที่ไม่ได้อยู่ใน Live Session (โพสต์ทั่วไป): จำเวลาตอบล่าสุด / การติดป้าย ต่อคน
+function pageCommenterRec(pageData, senderId) {
+  if (!pageData.pageCommenters) pageData.pageCommenters = new Map();
+  const m = pageData.pageCommenters;
+  let r = m.get(String(senderId));
+  if (!r) {
+    r = { lastRepliedAt: 0, kwLabeled: false, kwLabeledAt: 0 };
+    m.set(String(senderId), r);
+    if (m.size > 5000) m.delete(m.keys().next().value);
+  }
+  // โพสต์ทั่วไป: ติด/ลบป้ายใหม่ได้วันละครั้งต่อคน
+  if (r.kwLabeled && Date.now() - (r.kwLabeledAt || 0) > 24 * 3600 * 1000) r.kwLabeled = false;
+  return r;
+}
+
 // ติด / ลบป้ายให้คนที่คอมเมนต์ตรงคำดัก (ทำครั้งเดียวต่อคนต่อ session)
 // labels = ป้ายที่จะติด (array) หรือ config ของ session ({ keywordLabels, keywordRemoveLabels })
 function labelKeywordCommenter(pageData, commenter, psid, labels) {
@@ -184,6 +199,7 @@ function labelKeywordCommenter(pageData, commenter, psid, labels) {
   const removeList = (!Array.isArray(labels) && labels && labels.keywordRemoveLabels) || [];
   if (!psid || !commenter || commenter.kwLabeled || (!addList.length && !removeList.length) || !pageData.config.pageAccessToken) return;
   commenter.kwLabeled = true;
+  commenter.kwLabeledAt = Date.now();
   runTask(async () => {
     for (const l of addList) {
       if (!l || !l.id) continue;
@@ -1879,20 +1895,46 @@ app.get('/', (req, res) => {
 
                     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
                         <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 flex flex-col justify-between">
-                            <textarea id="reply-comment-input" rows="4" class="w-full p-3 text-sm border border-slate-200 rounded-xl mb-4 focus:outline-none focus:border-blue-500" placeholder="ข้อความตอบกลับใต้คอมเมนต์..."></textarea>
+                            <div class="mb-4">
+                                <label class="text-xs font-semibold text-slate-600 block mb-1">ข้อความตอบกลับใต้คอมเมนต์:</label>
+                                <textarea id="reply-comment-input" rows="4" class="w-full p-3 text-sm border border-slate-200 rounded-xl focus:outline-none focus:border-blue-500" placeholder="ข้อความตอบกลับใต้คอมเมนต์..."></textarea>
+                                <p class="text-xs text-slate-400 mt-1">ใส่ <b>{name}</b> = ชื่อลูกค้า · เขียนหลายแบบคั่นด้วยบรรทัด <b>---</b> ระบบจะสุ่มส่ง (ข้อความไม่ซ้ำกัน ลดโอกาสโดน Facebook มองเป็นสแปม)</p>
+                            </div>
                             <label class="flex items-center gap-2 cursor-pointer pt-4 border-t border-slate-100">
                                 <input type="checkbox" id="enable-comment-reply" class="w-4 h-4 text-blue-600 rounded">
                                 <span class="text-sm font-medium text-slate-700">เปิดใช้งานตอบกลับคอมเมนต์อัตโนมัติ</span>
                             </label>
                         </div>
                         <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 flex flex-col justify-between">
-                            <textarea id="inbox-input" rows="5" class="w-full p-3 text-sm border border-slate-200 rounded-xl mb-4 focus:outline-none focus:border-blue-500" placeholder="ข้อความส่งเข้าแชทส่วนตัว..."></textarea>
+                            <div class="mb-4">
+                                <label class="text-xs font-semibold text-slate-600 block mb-1">ข้อความส่งเข้าแชทส่วนตัว:</label>
+                                <textarea id="inbox-input" rows="5" class="w-full p-3 text-sm border border-slate-200 rounded-xl focus:outline-none focus:border-blue-500" placeholder="ข้อความส่งเข้าแชทส่วนตัว..."></textarea>
+                                <p class="text-xs text-slate-400 mt-1">ใส่ <b>{name}</b> = ชื่อลูกค้า · หลายแบบคั่นด้วยบรรทัด <b>---</b> ได้เหมือนกัน</p>
+                            </div>
                             <label class="flex items-center gap-2 cursor-pointer pt-4 border-t border-slate-100">
                                 <input type="checkbox" id="enable-inbox" class="w-4 h-4 text-blue-600 rounded">
                                 <span class="text-sm font-medium text-slate-700">ส่งข้อความหาลูกค้าทางแชท (ดึงคอมเมนต์เข้าแชท)</span>
                             </label>
                         </div>
                     </div>
+                    <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-4">
+                        <label class="flex flex-wrap items-center gap-2 text-sm text-slate-700">⏱️ ไม่ตอบซ้ำคนเดิมภายใน
+                            <input type="number" id="reply-cooldown" min="0" max="1440" value="0" class="w-20 p-1.5 text-sm border border-slate-200 rounded-lg bg-white"> นาที
+                            <span class="text-xs text-slate-400">(0 = ตอบทุกครั้ง)</span></label>
+                    </div>
+
+                    <div class="bg-pink-50/50 border border-pink-200 rounded-2xl p-4 space-y-2">
+                        <div class="flex flex-wrap items-center justify-between gap-2">
+                            <div class="text-xs font-bold text-pink-600">🏷️ ติด / ลบป้ายกำกับอัตโนมัติ เมื่อคอมเมนต์ตรงคำดัก <span class="font-normal text-slate-500">(เช่น "ยังไม่โอน" · ต้องเปิด "ส่งข้อความหาลูกค้าทางแชท")</span></div>
+                            <button type="button" onclick="loadPageLabels()" class="px-3 py-1 text-xs font-medium bg-white border border-pink-300 text-pink-600 rounded-lg hover:bg-pink-50">🔄 โหลดป้ายกำกับจากเพจ</button>
+                        </div>
+                        <div class="text-xs font-semibold text-pink-600">ติดป้ายกำกับ</div>
+                        <div id="pg-kw-labels" class="flex flex-wrap items-center gap-2"></div>
+                        <div class="text-xs font-semibold text-slate-600 pt-1">ลบป้ายกำกับ <span class="font-normal text-slate-400">(เช่น ลบ "โอนแล้ว" ที่ค้างจากครั้งก่อน เมื่อลูกค้ากด 1)</span></div>
+                        <div id="pg-kw-remove-labels" class="flex flex-wrap items-center gap-2"></div>
+                        <div class="text-xs text-slate-400">ใช้กับคอมเมนต์ในโพสต์ทั่วไป และเป็นค่าเริ่มต้นของ Live Session ที่สร้างใหม่ · เคล็ดลับ: ที่หน้าตั้งค่าสลิป แท็บ "สลิปถูกต้อง" ให้ติดป้าย "โอนแล้ว" และลบป้าย "ยังไม่โอน"</div>
+                    </div>
+
                     <div class="flex justify-end">
                         <button type="button" onclick="saveConfig()" class="px-6 py-2.5 bg-emerald-600 text-white font-medium rounded-xl hover:bg-emerald-700 shadow-sm">บันทึกการตั้งค่าเพจนี้</button>
                     </div>
@@ -2691,6 +2733,10 @@ app.get('/', (req, res) => {
             document.getElementById('enable-comment-reply').checked = !!currentConfig.enableCommentReply;
             document.getElementById('enable-inbox').checked = !!currentConfig.enableInbox;
             document.getElementById('enable-auto-like').checked = !!currentConfig.enableAutoLike;
+            document.getElementById('reply-cooldown').value = currentConfig.replyCooldownMin || 0;
+            if (!Array.isArray(currentConfig.keywordLabels)) currentConfig.keywordLabels = [];
+            if (!Array.isArray(currentConfig.keywordRemoveLabels)) currentConfig.keywordRemoveLabels = [];
+            renderPgKwLabels();
 
             document.getElementById('conf-verify-token').value = currentConfig.verifyToken || '';
             document.getElementById('conf-page-token').value = currentConfig.pageAccessToken || '';
@@ -2878,6 +2924,8 @@ app.get('/', (req, res) => {
             currentConfig.enableCommentReply = document.getElementById('enable-comment-reply').checked;
             currentConfig.enableInbox = document.getElementById('enable-inbox').checked;
             currentConfig.enableAutoLike = document.getElementById('enable-auto-like').checked;
+            currentConfig.replyCooldownMin = Math.min(1440, Math.max(0, parseInt(document.getElementById('reply-cooldown').value, 10) || 0));
+            // currentConfig.keywordLabels / keywordRemoveLabels แก้สดจากปุ่มเพิ่ม/ลบป้ายแล้ว
             
             currentConfig.verifyToken = document.getElementById('conf-verify-token').value.trim();
             currentConfig.pageAccessToken = document.getElementById('conf-page-token').value.trim();
@@ -3036,6 +3084,7 @@ app.get('/', (req, res) => {
                 }
             } catch (e) { out.innerText = '❌ ' + e.message; }
             renderAllLabelChips();
+            renderPgKwLabels();
         }
 
         // ===================== Live Sessions =====================
@@ -3464,6 +3513,45 @@ app.get('/', (req, res) => {
             });
         }
 
+        // ===== 🏷️ ป้ายคำดัก ระดับเพจ (เมนูตอบกลับคอมเมนต์) =====
+        function renderPgKwLabels() {
+            dedupeLabelLists([currentConfig.keywordLabels, currentConfig.keywordRemoveLabels]);
+            [['pg-kw-labels', 'keywordLabels', true], ['pg-kw-remove-labels', 'keywordRemoveLabels', false]].forEach(function(row) {
+                const box = document.getElementById(row[0]);
+                if (!box) return;
+                const field = row[1];
+                const isAdd = row[2];
+                const list = Array.isArray(currentConfig[field]) ? currentConfig[field] : (currentConfig[field] = []);
+                let html = '';
+                list.forEach(function(l, i) {
+                    html += '<span class="inline-flex items-center rounded-full overflow-hidden text-xs font-semibold ' + (isAdd ? 'bg-pink-600 text-white' : 'bg-slate-600 text-white') + '">'
+                        + '<span class="px-3 py-1">' + (isAdd ? '' : '🗑️ ') + escapeHtml(l.name) + '</span>'
+                        + '<button type="button" class="px-2 py-1 border-l border-white/30 hover:bg-black/20" data-field="' + field + '" data-idx="' + i + '" onclick="removePgKwLabel(this)">✕</button></span>';
+                });
+                const used = {};
+                (currentConfig.keywordLabels || []).concat(currentConfig.keywordRemoveLabels || []).forEach(function(l) { used[l.id] = 1; used['n:' + labelKey(l)] = 1; });
+                html += '<select class="text-xs border ' + (isAdd ? 'border-pink-300 text-pink-600' : 'border-slate-300 text-slate-600') + ' rounded-full px-3 py-1 bg-white" data-field="' + field + '" onchange="addPgKwLabel(this)">'
+                    + '<option value="">' + (isAdd ? '+ เพิ่มป้ายกำกับ' : '+ ลบป้ายกำกับ') + '</option>';
+                pageLabels.filter(function(l) { return labelFree(used, l); }).forEach(function(l) {
+                    html += '<option value="' + escapeHtml(l.id) + '">' + escapeHtml(l.name) + '</option>';
+                });
+                if (!pageLabels.length) html += '<option value="" disabled>(กดโหลดป้ายกำกับจากเพจก่อน)</option>';
+                html += '</select>';
+                if (isAdd && ((currentConfig.keywordLabels || []).length || (currentConfig.keywordRemoveLabels || []).length)) html += '<span class="text-xs text-slate-500">กด "บันทึกการตั้งค่าเพจนี้" เพื่อใช้งาน</span>';
+                box.innerHTML = html;
+            });
+        }
+        function addPgKwLabel(sel) {
+            const field = sel.getAttribute('data-field');
+            const l = pageLabels.find(function(x) { return x.id === sel.value; });
+            if (l) currentConfig[field].push({ id: l.id, name: l.name });
+            renderPgKwLabels();
+        }
+        function removePgKwLabel(btn) {
+            currentConfig[btn.getAttribute('data-field')].splice(parseInt(btn.getAttribute('data-idx'), 10), 1);
+            renderPgKwLabels();
+        }
+
         function renderKwLabels() {
             dedupeLabelLists([liveCfg.keywordLabels, liveCfg.keywordRemoveLabels]);
             [['lv-kw-labels', 'keywordLabels', true], ['lv-kw-remove-labels', 'keywordRemoveLabels', false]].forEach(function(cfgRow) {
@@ -3533,6 +3621,7 @@ app.get('/', (req, res) => {
             } catch (e) { st.innerText = '❌ ' + e.message; }
             renderLiveBcLabels();
             renderKwLabels();
+            renderPgKwLabels();
         }
 
         async function startLiveBroadcast() {
@@ -6358,7 +6447,7 @@ app.post('/webhook', async (req, res) => {
 
             // ⏱️ ไม่ตอบซ้ำคนเดิมถี่ ๆ (ตั้งได้ในหน้า session: 0 = ตอบทุกครั้ง)
             const cooldownMs = Math.max(0, Number(cfg.replyCooldownMin) || 0) * 60000;
-            const cRec = liveSession && senderId ? liveSession.commenters.get(senderId) : null;
+            const cRec = !senderId ? null : (liveSession ? liveSession.commenters.get(senderId) : (isMatched ? pageCommenterRec(targetRecord.pageData, senderId) : null));
             const inCooldown = !!(isMatched && cooldownMs && cRec && cRec.lastRepliedAt && Date.now() - cRec.lastRepliedAt < cooldownMs);
             if (inCooldown) console.log('⏱️ [Comment] ข้าม ' + (comment.from?.name || senderId) + ' (เพิ่งตอบไปไม่ถึง ' + cfg.replyCooldownMin + ' นาที)');
             if (isMatched && cRec && !inCooldown) cRec.lastRepliedAt = Date.now();
@@ -6387,6 +6476,7 @@ app.post('/webhook', async (req, res) => {
                       getPsidMap(pageDataRef).set(senderId, String(psid));
                       if (c) c.psid = String(psid);
                       if (c && liveSession) labelKeywordCommenter(pageDataRef, c, String(psid), liveSession.config);
+                      else if (!liveSession) labelKeywordCommenter(pageDataRef, pageCommenterRec(pageDataRef, senderId), String(psid), cfg);
                     }
                     console.log('⚡ [Inbox] ' + commentId + ' ส่งเข้าแชทใน ' + (Date.now() - t0) + ' ms');
                   }).catch(inbErr => {
@@ -6409,6 +6499,9 @@ app.post('/webhook', async (req, res) => {
                   const c2 = liveSession.commenters.get(senderId);
                   const known = c2 && (c2.psid || getPsidMap(pageDataRef).get(senderId));
                   if (c2 && known) labelKeywordCommenter(pageDataRef, c2, String(known), liveSession.config);
+                } else if (senderId) {
+                  const known = getPsidMap(pageDataRef).get(senderId);
+                  if (known) labelKeywordCommenter(pageDataRef, pageCommenterRec(pageDataRef, senderId), String(known), cfg);
                 }
               }), 'comment');
               if (cfg.enableAutoLike) {
