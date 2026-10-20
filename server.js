@@ -28,6 +28,41 @@ async function fbPost(url, body, params, retries = 2) {
   }
 }
 
+// 💬 ข้อความตอบกลับ: รองรับหลายแบบ (คั่นด้วยบรรทัด ---) สุ่มส่ง + ใส่ชื่อลูกค้า {name} / {fullname}
+// ข้อความไม่ซ้ำกันทุกครั้ง ช่วยลดโอกาส Facebook มองว่าเป็นสแปมแล้วบล็อกการตอบ
+function renderReplyText(template, fullName) {
+  const variants = String(template || '').split(/\r?\n[ \t]*---[ \t]*(?=\r?\n|$)/).map(t => t.trim()).filter(Boolean);
+  if (!variants.length) return '';
+  const pick = variants[Math.floor(Math.random() * variants.length)];
+  const full = String(fullName || '').trim();
+  const first = full.split(/\s+/)[0] || '';
+  return pick.replace(/\{name\}/gi, first || 'คุณลูกค้า').replace(/\{fullname\}/gi, full || 'คุณลูกค้า');
+}
+
+// 🛡️ Facebook บล็อกชั่วคราวเพราะตอบถี่ (code 368 / spam) -> หยุดส่งประเภทนั้นสักพัก กันโดนแบนหนักขึ้น
+const FB_PAUSE_MS = 15 * 60 * 1000;
+function isFbSpamBlock(err) {
+  const e = err.response?.data?.error || {};
+  return e.code === 368 || e.error_subcode === 1390008 || /temporarily blocked|spam|ถูกบล็อกชั่วคราว/i.test(e.message || '');
+}
+function fbPaused(pageData, kind) {
+  const p = pageData.fbPause && pageData.fbPause[kind];
+  return !!(p && p.until > Date.now());
+}
+function setFbPause(pageData, kind, err) {
+  if (!pageData.fbPause) pageData.fbPause = {};
+  pageData.fbPause[kind] = { until: Date.now() + FB_PAUSE_MS, reason: err.response?.data?.error?.message || err.message };
+  console.error('🛑 [FB Block] หยุด' + (kind === 'reply' ? 'ตอบคอมเมนต์' : 'ส่งเข้าแชท') + ' 15 นาที:', pageData.fbPause[kind].reason);
+}
+function fbPauseWarning(pageData) {
+  const out = [];
+  for (const [kind, label] of [['reply', 'ตอบใต้คอมเมนต์'], ['inbox', 'ส่งเข้าแชท']]) {
+    const p = pageData.fbPause && pageData.fbPause[kind];
+    if (p && p.until > Date.now()) out.push('⚠️ Facebook บล็อก' + label + 'ชั่วคราว (ตอบถี่เกินไป) ระบบพักให้อัตโนมัติถึง ' + new Date(p.until).toLocaleTimeString('th-TH', { timeZone: 'Asia/Bangkok' }));
+  }
+  return out.join(' · ');
+}
+
 // ⚡ รันงานเบื้องหลังแบบไม่บล็อกกัน (คอมเมนต์ / สลิป แต่ละอันทำงานพร้อมกัน)
 // สติกเกอร์ ปุ่มไลก์ (👍) และ GIF ใน Messenger มาเป็น attachment ชนิด image -> ไม่ใช่สลิป
 function isStickerOrGif(message, att) {
@@ -100,15 +135,23 @@ async function setInboxLabelById(pageData, psid, labelId, remove) {
   });
 }
 
-// ติดป้ายให้คนที่คอมเมนต์ตรงคำดัก (ติดครั้งเดียวต่อคนต่อ session)
+// ติด / ลบป้ายให้คนที่คอมเมนต์ตรงคำดัก (ทำครั้งเดียวต่อคนต่อ session)
+// labels = ป้ายที่จะติด (array) หรือ config ของ session ({ keywordLabels, keywordRemoveLabels })
 function labelKeywordCommenter(pageData, commenter, psid, labels) {
-  if (!psid || !commenter || commenter.kwLabeled || !Array.isArray(labels) || !labels.length || !pageData.config.pageAccessToken) return;
+  const addList = Array.isArray(labels) ? labels : (labels && labels.keywordLabels) || [];
+  const removeList = (!Array.isArray(labels) && labels && labels.keywordRemoveLabels) || [];
+  if (!psid || !commenter || commenter.kwLabeled || (!addList.length && !removeList.length) || !pageData.config.pageAccessToken) return;
   commenter.kwLabeled = true;
   runTask(async () => {
-    for (const l of labels) {
+    for (const l of addList) {
       if (!l || !l.id) continue;
       try { await setInboxLabelById(pageData, psid, l.id); console.log('🏷️ [Label] คำดัก: ติดป้าย "' + l.name + '" ให้ ' + psid); }
       catch (e) { pageData.lastLabelError = '"' + l.name + '": ' + graphErrorMessage(e); console.error('❌ [Label Error]', pageData.lastLabelError); commenter.kwLabeled = false; }
+    }
+    for (const l of removeList) {
+      if (!l || !l.id) continue;
+      try { await setInboxLabelById(pageData, psid, l.id, true); console.log('🏷️ [Label] คำดัก: ลบป้าย "' + l.name + '" ของ ' + psid); }
+      catch (e) { /* ลูกค้าไม่มีป้ายนี้อยู่แล้ว ไม่เป็นไร */ }
     }
   }, 'kw-label');
 }
@@ -1689,23 +1732,32 @@ app.get('/', (req, res) => {
                                 <div>
                                     <label class="text-xs font-semibold text-slate-600 block mb-1">ข้อความตอบกลับใต้คอมเมนต์:</label>
                                     <textarea id="lv-reply-text" rows="4" class="w-full p-3 text-sm border border-slate-200 rounded-xl focus:outline-none focus:border-blue-500"></textarea>
+                                    <p class="text-xs text-slate-400 mt-1">ใส่ <b>{name}</b> = ชื่อลูกค้า · เขียนหลายแบบคั่นด้วยบรรทัด <b>---</b> ระบบจะสุ่มส่ง (ข้อความไม่ซ้ำกัน ลดโอกาสโดน Facebook มองเป็นสแปม)</p>
                                 </div>
                                 <div>
                                     <label class="text-xs font-semibold text-slate-600 block mb-1">ข้อความส่งเข้าแชทส่วนตัว:</label>
                                     <textarea id="lv-inbox-text" rows="4" class="w-full p-3 text-sm border border-slate-200 rounded-xl focus:outline-none focus:border-blue-500"></textarea>
+                                    <p class="text-xs text-slate-400 mt-1">ใส่ <b>{name}</b> = ชื่อลูกค้า · หลายแบบคั่นด้วยบรรทัด <b>---</b> ได้เหมือนกัน</p>
                                 </div>
                             </div>
+                            <div id="lv-reply-warn" class="hidden text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2"></div>
                             <div class="flex flex-wrap gap-5">
                                 <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" id="lv-enable-like" class="w-4 h-4 rounded"><span class="text-sm text-slate-700">👍 กดไลก์คอมเมนต์</span></label>
                                 <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" id="lv-enable-reply" class="w-4 h-4 rounded"><span class="text-sm text-slate-700">ตอบกลับคอมเมนต์</span></label>
                                 <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" id="lv-enable-inbox" class="w-4 h-4 rounded"><span class="text-sm text-slate-700">ส่งข้อความเข้าแชท</span></label>
+                                <label class="flex items-center gap-2 text-sm text-slate-700">⏱️ ไม่ตอบซ้ำคนเดิมภายใน
+                                    <input type="number" id="lv-reply-cooldown" min="0" max="1440" value="0" class="w-20 p-1.5 text-sm border border-slate-200 rounded-lg bg-white"> นาที
+                                    <span class="text-xs text-slate-400">(0 = ตอบทุกครั้ง)</span></label>
                             </div>
                             <div class="bg-pink-50/50 border border-pink-200 rounded-xl p-4 space-y-2">
                                 <div class="flex flex-wrap items-center justify-between gap-2">
-                                    <div class="text-xs font-bold text-pink-600">🏷️ ติดป้ายกำกับอัตโนมัติ เมื่อคอมเมนต์ตรงคำดัก <span class="font-normal text-slate-500">(เช่น "ยังไม่โอน" · ต้องเปิด "ส่งข้อความเข้าแชท")</span></div>
+                                    <div class="text-xs font-bold text-pink-600">🏷️ ติด / ลบป้ายกำกับอัตโนมัติ เมื่อคอมเมนต์ตรงคำดัก <span class="font-normal text-slate-500">(เช่น "ยังไม่โอน" · ต้องเปิด "ส่งข้อความเข้าแชท")</span></div>
                                     <button type="button" onclick="loadLiveBcLabels()" class="px-3 py-1 text-xs font-medium bg-white border border-pink-300 text-pink-600 rounded-lg hover:bg-pink-50">🔄 โหลดป้ายกำกับจากเพจ</button>
                                 </div>
+                                <div class="text-xs font-semibold text-pink-600">ติดป้ายกำกับ</div>
                                 <div id="lv-kw-labels" class="flex flex-wrap items-center gap-2"></div>
+                                <div class="text-xs font-semibold text-slate-600 pt-1">ลบป้ายกำกับ <span class="font-normal text-slate-400">(เช่น ลบ "โอนแล้ว" ที่ค้างจากไลฟ์ก่อน เมื่อลูกค้ากด 1 ในไลฟ์นี้)</span></div>
+                                <div id="lv-kw-remove-labels" class="flex flex-wrap items-center gap-2"></div>
                                 <div class="text-xs text-slate-400">เคล็ดลับ: ที่หน้าตั้งค่าสลิป แท็บ "สลิปถูกต้อง" ให้ติดป้าย "โอนแล้ว" และลบป้าย "ยังไม่โอน" ป้ายจะเปลี่ยนเองเมื่อลูกค้าโอน</div>
                             </div>
                             <div class="flex justify-end">
@@ -2638,7 +2690,9 @@ app.get('/', (req, res) => {
             document.getElementById('lv-enable-like').checked = !!liveCfg.enableAutoLike;
             document.getElementById('lv-enable-reply').checked = !!liveCfg.enableCommentReply;
             document.getElementById('lv-enable-inbox').checked = !!liveCfg.enableInbox;
+            document.getElementById('lv-reply-cooldown').value = liveCfg.replyCooldownMin || 0;
             if (!Array.isArray(liveCfg.keywordLabels)) liveCfg.keywordLabels = [];
+            if (!Array.isArray(liveCfg.keywordRemoveLabels)) liveCfg.keywordRemoveLabels = [];
             renderLiveKeywords();
             renderKwLabels();
         }
@@ -2670,6 +2724,8 @@ app.get('/', (req, res) => {
 
         function renderLiveStats(d) {
             const s = d.session;
+            const warn = document.getElementById('lv-reply-warn');
+            if (warn) { warn.innerText = d.replyWarning || ''; warn.classList.toggle('hidden', !d.replyWarning); }
             currentLiveStatus = s.status;
             document.getElementById('live-meta').innerText = (s.videoId ? 'ผูกกับ Video ID: ' + s.videoId : 'เปิด/ปิดเอง (ไม่ผูก Video ID)') + ' · ' + (s.status === 'active' ? 'กำลังทำงาน' : 'จบแล้ว');
             const toggle = document.getElementById('live-btn-toggle');
@@ -2795,7 +2851,9 @@ app.get('/', (req, res) => {
                 enableAutoLike: document.getElementById('lv-enable-like').checked,
                 enableCommentReply: document.getElementById('lv-enable-reply').checked,
                 enableInbox: document.getElementById('lv-enable-inbox').checked,
-                keywordLabels: liveCfg.keywordLabels || []
+                keywordLabels: liveCfg.keywordLabels || [],
+                keywordRemoveLabels: liveCfg.keywordRemoveLabels || [],
+                replyCooldownMin: parseInt(document.getElementById('lv-reply-cooldown').value, 10) || 0
             };
             const res = await fetch(liveUrl('/api/live/config', '&sid=' + currentLiveId), {
                 method: 'POST',
@@ -2860,35 +2918,44 @@ app.get('/', (req, res) => {
         }
 
         function renderKwLabels() {
-            const box = document.getElementById('lv-kw-labels');
-            if (!box) return;
-            const list = Array.isArray(liveCfg.keywordLabels) ? liveCfg.keywordLabels : (liveCfg.keywordLabels = []);
-            let html = '';
-            list.forEach(function(l, i) {
-                html += '<span class="inline-flex items-center rounded-full overflow-hidden text-xs font-semibold bg-pink-600 text-white">'
-                    + '<span class="px-3 py-1">' + escapeHtml(l.name) + '</span>'
-                    + '<button type="button" class="px-2 py-1 border-l border-white/30 hover:bg-black/20" data-idx="' + i + '" onclick="removeKwLabel(this)">✕</button></span>';
+            [['lv-kw-labels', 'keywordLabels', true], ['lv-kw-remove-labels', 'keywordRemoveLabels', false]].forEach(function(cfgRow) {
+                const box = document.getElementById(cfgRow[0]);
+                if (!box) return;
+                const field = cfgRow[1];
+                const isAdd = cfgRow[2];
+                const list = Array.isArray(liveCfg[field]) ? liveCfg[field] : (liveCfg[field] = []);
+                let html = '';
+                list.forEach(function(l, i) {
+                    html += '<span class="inline-flex items-center rounded-full overflow-hidden text-xs font-semibold ' + (isAdd ? 'bg-pink-600 text-white' : 'bg-slate-600 text-white') + '">'
+                        + '<span class="px-3 py-1">' + (isAdd ? '' : '🗑️ ') + escapeHtml(l.name) + '</span>'
+                        + '<button type="button" class="px-2 py-1 border-l border-white/30 hover:bg-black/20" data-field="' + field + '" data-idx="' + i + '" onclick="removeKwLabel(this)">✕</button></span>';
+                });
+                // ป้ายเดียวกันจะอยู่ได้แค่ฝั่งติด หรือฝั่งลบ อย่างใดอย่างหนึ่ง
+                const used = {};
+                (liveCfg.keywordLabels || []).concat(liveCfg.keywordRemoveLabels || []).forEach(function(l) { used[l.id] = 1; });
+                html += '<select class="text-xs border ' + (isAdd ? 'border-pink-300 text-pink-600' : 'border-slate-300 text-slate-600') + ' rounded-full px-3 py-1 bg-white" data-field="' + field + '" onchange="addKwLabel(this)">'
+                    + '<option value="">' + (isAdd ? '+ เพิ่มป้ายกำกับ' : '+ ลบป้ายกำกับ') + '</option>';
+                pageLabels.filter(function(l) { return !used[l.id]; }).forEach(function(l) {
+                    html += '<option value="' + escapeHtml(l.id) + '">' + escapeHtml(l.name) + '</option>';
+                });
+                if (!pageLabels.length) html += '<option value="" disabled>(กดโหลดป้ายกำกับจากเพจก่อน)</option>';
+                html += '</select>';
+                if (isAdd && ((liveCfg.keywordLabels || []).length || (liveCfg.keywordRemoveLabels || []).length)) html += '<span class="text-xs text-slate-500">กด "บันทึกการตั้งค่า session นี้" เพื่อใช้งาน</span>';
+                box.innerHTML = html;
             });
-            const used = {};
-            list.forEach(function(l) { used[l.id] = 1; });
-            html += '<select class="text-xs border border-pink-300 text-pink-600 rounded-full px-3 py-1 bg-white" onchange="addKwLabel(this)"><option value="">+ เพิ่มป้ายกำกับ</option>';
-            pageLabels.filter(function(l) { return !used[l.id]; }).forEach(function(l) {
-                html += '<option value="' + escapeHtml(l.id) + '">' + escapeHtml(l.name) + '</option>';
-            });
-            if (!pageLabels.length) html += '<option value="" disabled>(กดโหลดป้ายกำกับจากเพจก่อน)</option>';
-            html += '</select>';
-            if (list.length) html += '<span class="text-xs text-slate-500">กด "บันทึกการตั้งค่า session นี้" เพื่อใช้งาน</span>';
-            box.innerHTML = html;
         }
 
         function addKwLabel(sel) {
+            const field = sel.getAttribute('data-field') || 'keywordLabels';
             const l = pageLabels.find(function(x) { return x.id === sel.value; });
-            if (l) liveCfg.keywordLabels.push({ id: l.id, name: l.name });
+            if (!Array.isArray(liveCfg[field])) liveCfg[field] = [];
+            if (l) liveCfg[field].push({ id: l.id, name: l.name });
             renderKwLabels();
         }
 
         function removeKwLabel(btn) {
-            liveCfg.keywordLabels.splice(parseInt(btn.getAttribute('data-idx'), 10), 1);
+            const field = btn.getAttribute('data-field') || 'keywordLabels';
+            liveCfg[field].splice(parseInt(btn.getAttribute('data-idx'), 10), 1);
             renderKwLabels();
         }
 
@@ -4512,7 +4579,10 @@ app.post('/api/live/create', checkAuth, (req, res) => {
       enableInbox: !!c.enableInbox,
       enableAutoLike: !!c.enableAutoLike,
       // 🏷️ ป้ายที่ติดให้อัตโนมัติเมื่อคอมเมนต์ตรงคำดัก (เลือกเองจากป้ายในเพจ)
-      keywordLabels: Array.isArray(c.keywordLabels) ? c.keywordLabels.slice() : []
+      keywordLabels: Array.isArray(c.keywordLabels) ? c.keywordLabels.slice() : [],
+      // 🏷️ ป้ายที่ถอดออกอัตโนมัติเมื่อคอมเมนต์ตรงคำดัก (เช่น "โอนแล้ว" ของไลฟ์ก่อน)
+      keywordRemoveLabels: Array.isArray(c.keywordRemoveLabels) ? c.keywordRemoveLabels.slice() : [],
+      replyCooldownMin: Number(c.replyCooldownMin) || 0
     },
     stats: { comments: 0, matched: 0 },
     commenters: new Map(),
@@ -4550,7 +4620,8 @@ app.get('/api/live/detail', checkAuth, (req, res) => {
     config: s.config,
     commenters,
     slips: s.slips.slice(-200).reverse(),
-    broadcastStatus: s.broadcastStatus
+    broadcastStatus: s.broadcastStatus,
+    replyWarning: fbPauseWarning(ctx.pageData)
   });
 });
 
@@ -4569,11 +4640,20 @@ app.post('/api/live/config', checkAuth, (req, res) => {
   if (typeof b.enableCommentReply === 'boolean') s.config.enableCommentReply = b.enableCommentReply;
   if (typeof b.enableInbox === 'boolean') s.config.enableInbox = b.enableInbox;
   if (typeof b.enableAutoLike === 'boolean') s.config.enableAutoLike = b.enableAutoLike;
+  if (b.replyCooldownMin !== undefined) {
+    s.config.replyCooldownMin = Math.min(1440, Math.max(0, parseInt(b.replyCooldownMin, 10) || 0));
+    ctx.pageData.config.replyCooldownMin = s.config.replyCooldownMin;
+  }
   if (Array.isArray(b.keywordLabels)) {
     s.config.keywordLabels = b.keywordLabels
       .filter(l => l && l.id).map(l => ({ id: String(l.id), name: String(l.name || '') })).slice(0, 10);
     // จำไว้เป็นค่าเริ่มต้นของ session ถัดไปด้วย
     ctx.pageData.config.keywordLabels = s.config.keywordLabels.slice();
+  }
+  if (Array.isArray(b.keywordRemoveLabels)) {
+    s.config.keywordRemoveLabels = b.keywordRemoveLabels
+      .filter(l => l && l.id).map(l => ({ id: String(l.id), name: String(l.name || '') })).slice(0, 10);
+    ctx.pageData.config.keywordRemoveLabels = s.config.keywordRemoveLabels.slice();
   }
   res.json({ success: true });
 });
@@ -5656,18 +5736,28 @@ app.post('/webhook', async (req, res) => {
               }
             }
 
-            if (isMatched && cfg.pageAccessToken) {
+            // ⏱️ ไม่ตอบซ้ำคนเดิมถี่ ๆ (ตั้งได้ในหน้า session: 0 = ตอบทุกครั้ง)
+            const cooldownMs = Math.max(0, Number(cfg.replyCooldownMin) || 0) * 60000;
+            const cRec = liveSession && senderId ? liveSession.commenters.get(senderId) : null;
+            const inCooldown = !!(isMatched && cooldownMs && cRec && cRec.lastRepliedAt && Date.now() - cRec.lastRepliedAt < cooldownMs);
+            if (inCooldown) console.log('⏱️ [Comment] ข้าม ' + (comment.from?.name || senderId) + ' (เพิ่งตอบไปไม่ถึง ' + cfg.replyCooldownMin + ' นาที)');
+            if (isMatched && cRec && !inCooldown) cRec.lastRepliedAt = Date.now();
+
+            if (isMatched && cfg.pageAccessToken && !inCooldown) {
               const token = cfg.pageAccessToken;
               const commentId = comment.comment_id;
               const pageDataRef = targetRecord.pageData;
               const t0 = Date.now();
+              const customerName = comment.from?.name || '';
+              const inboxMsg = renderReplyText(cfg.inboxText, customerName);
+              const replyMsg = renderReplyText(cfg.replyCommentText, customerName);
               // ⚡ ส่งเข้าแชท + ตอบคอมเมนต์ ใช้คิวหลัก (สำคัญ) · กดไลก์แยกคิวรอง ไม่แย่งช่องของงานสำคัญ
               runTask(() => fbLimit(pageId, async () => {
                 const jobs = [];
-                if (cfg.enableInbox) {
+                if (cfg.enableInbox && inboxMsg && !fbPaused(pageDataRef, 'inbox')) {
                   jobs.push(fbPost('https://graph.facebook.com/v19.0/me/messages', {
                     recipient: { comment_id: commentId },
-                    message: { text: cfg.inboxText }
+                    message: { text: inboxMsg }
                   }, { access_token: token }).then(inboxRes => {
                     // 📦 จับคู่ ID คนคอมเมนต์ กับ ID แชท (PSID) เพื่อใช้ค้นหาที่อยู่ในแชทภายหลัง
                     const psid = inboxRes.data?.recipient_id;
@@ -5676,23 +5766,29 @@ app.post('/webhook', async (req, res) => {
                     if (psid && senderId) {
                       getPsidMap(pageDataRef).set(senderId, String(psid));
                       if (c) c.psid = String(psid);
-                      if (c && liveSession) labelKeywordCommenter(pageDataRef, c, String(psid), liveSession.config.keywordLabels);
+                      if (c && liveSession) labelKeywordCommenter(pageDataRef, c, String(psid), liveSession.config);
                     }
                     console.log('⚡ [Inbox] ' + commentId + ' ส่งเข้าแชทใน ' + (Date.now() - t0) + ' ms');
-                  }).catch(inbErr => console.error('❌ [Inbox Error]', inbErr.response?.data?.error?.message || inbErr.message)));
+                  }).catch(inbErr => {
+                    if (isFbSpamBlock(inbErr)) setFbPause(pageDataRef, 'inbox', inbErr);
+                    console.error('❌ [Inbox Error]', inbErr.response?.data?.error?.message || inbErr.message);
+                  }));
                 }
-                if (cfg.enableCommentReply) {
+                if (cfg.enableCommentReply && replyMsg && !fbPaused(pageDataRef, 'reply')) {
                   jobs.push(fbPost('https://graph.facebook.com/v19.0/' + commentId + '/comments', {
-                    message: cfg.replyCommentText
+                    message: replyMsg
                   }, { access_token: token }, 1)
-                    .catch(repErr => console.error('❌ [Comment Reply Error]', repErr.response?.data?.error?.message || repErr.message)));
+                    .catch(repErr => {
+                      if (isFbSpamBlock(repErr)) setFbPause(pageDataRef, 'reply', repErr);
+                      console.error('❌ [Comment Reply Error]', repErr.response?.data?.error?.message || repErr.message);
+                    }));
                 }
                 await Promise.all(jobs);
                 // ยังไม่ได้ติดป้าย (เช่น ปิดส่งเข้าแชท) แต่รู้ ID แชทของคนนี้อยู่แล้ว -> ติดป้ายเลย
                 if (liveSession && senderId) {
                   const c2 = liveSession.commenters.get(senderId);
                   const known = c2 && (c2.psid || getPsidMap(pageDataRef).get(senderId));
-                  if (c2 && known) labelKeywordCommenter(pageDataRef, c2, String(known), liveSession.config.keywordLabels);
+                  if (c2 && known) labelKeywordCommenter(pageDataRef, c2, String(known), liveSession.config);
                 }
               }), 'comment');
               if (cfg.enableAutoLike) {
