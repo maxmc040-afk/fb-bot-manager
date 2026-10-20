@@ -1672,6 +1672,18 @@ async function beemoveResolveSender(bm) {
   return { pickupPointId: bm.pickupPointId || null, from: manual, points };
 }
 
+// ⚡ จำที่อยู่ผู้ส่ง/จุดเข้ารับพัสดุไว้ 10 นาที (เดิมดึงจาก Bee Move ใหม่ทุกพัสดุ)
+const beemoveSenderCache = new Map();
+async function beemoveResolveSenderCached(bm) {
+  const key = beemoveCacheKey(bm) + '|' + (bm.pickupPointId || '') + '|' + JSON.stringify(beemoveSender(bm));
+  const c = beemoveSenderCache.get(key);
+  if (c && Date.now() - c.at < 10 * 60 * 1000) return c.promise;
+  const promise = beemoveResolveSender(bm);
+  beemoveSenderCache.set(key, { promise, at: Date.now() });
+  promise.then(v => { if (!v.points || !v.points.length) beemoveSenderCache.delete(key); }, () => beemoveSenderCache.delete(key));
+  return promise;
+}
+
 // สร้างพัสดุ 1 รายการ คืนค่า { id, trackingNo, partnerName }
 async function beemoveCreateShipment(bm, buyer, remark) {
   if (!thaiAddrDb) await loadThaiAddressDb();
@@ -1695,7 +1707,7 @@ async function beemoveCreateShipment(bm, buyer, remark) {
   if (phone.length < 9) missing.push('เบอร์โทร');
   if (missing.length) throw new Error('ข้อมูลไม่ครบ: ' + missing.join(', ') + ' (ตรวจชื่อตำบล/อำเภอ/จังหวัดและรหัสไปรษณีย์ให้ตรงกัน เช่น "12/3 ม.4 ต.คอหงส์ อ.หาดใหญ่ จ.สงขลา 90110")');
 
-  const sender = await beemoveResolveSender(bm);
+  const sender = await beemoveResolveSenderCached(bm);
   const fs = sender.from;
   if (!fs.district || !fs.city || !fs.province || !fs.postal_code) {
     throw new Error('ไม่มีที่อยู่ผู้ส่ง: เพิ่ม "ที่อยู่รับสินค้า" ใน Bee Move (ตั้งค่า → ที่อยู่รับสินค้า) หรือกรอกที่อยู่ผู้ส่งในเมนู 🚚 ขนส่ง Bee Move');
@@ -4263,7 +4275,7 @@ app.get('/', (req, res) => {
                 writeWaitPage(w, 'กำลังสร้างเลขพัสดุใน Bee Move...');
                 const res = await fetch(liveUrl('/api/live/beemove/create', '&sid=' + currentLiveId), {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ userIds: todo.map(function(b) { return b.userId; }) })
+                    body: JSON.stringify({ userIds: todo.map(function(b) { return b.userId; }), labelUserIds: uids })
                 });
                 const d = await res.json();
                 if(!d.success) { w.close(); return alert('❌ ' + d.error); }
@@ -4271,8 +4283,8 @@ app.get('/', (req, res) => {
                 if(buyersPoll) clearInterval(buyersPoll);
                 buyersPoll = setInterval(function() { loadBuyers(true); }, 2000);
                 const sid = currentLiveId;
-                for(let i = 0; i < 900; i++) {
-                    await new Promise(function(r) { setTimeout(r, 2000); });
+                for(let i = 0; i < 1800; i++) {
+                    await new Promise(function(r) { setTimeout(r, 1000); });
                     if(sid !== currentLiveId) return;
                     await loadBuyers();
                     if(lastShipJob) writeWaitPage(w, '⏳ ' + lastShipJob.message + ' (' + lastShipJob.done + '/' + lastShipJob.total + ')');
@@ -5717,15 +5729,16 @@ app.post('/api/beemove/test', checkAuth, async (req, res) => {
   res.json(out);
 });
 
-async function runShipJob(pageData, s, userIds) {
+async function runShipJob(pageData, s, userIds, labelUserIds) {
   const job = s.shipJob;
   const bm = getBeemoveConfig(pageData);
   const token = pageData.config.pageAccessToken;
-  for (const uid of userIds) {
-    if (job.shouldStop) break;
+  const t0 = Date.now();
+
+  const one = async (uid) => {
     const item = s.buyers.get(uid);
-    if (!item) { job.done++; continue; }
-    if (item.trackingNo) { job.done++; job.skipped++; continue; }
+    if (!item) { job.done++; return; }
+    if (item.trackingNo) { job.done++; job.skipped++; return; }
     job.message = 'กำลังสร้างพัสดุ: ' + (item.recipientName || item.fbName || uid);
     try {
       const remark = (item.fbName || '') + ' ' + (item.keyword || '') + 'x' + (item.matchedCount || 0);
@@ -5736,18 +5749,30 @@ async function runShipJob(pageData, s, userIds) {
       item.shipStatus = 'created';
       item.shipNote = r.trackingNo ? '' : 'สร้างแล้ว รอเลขพัสดุจากขนส่ง';
       job.created++;
-
-      if (token) await autoNotifyTracking(pageData, bm, item);
+      // ⚡ ส่งเลขพัสดุให้ลูกค้าทางแชทแบบเบื้องหลัง ไม่ต้องรอ
+      if (token) runTask(() => autoNotifyTracking(pageData, bm, item), 'notify-tracking');
     } catch (e) {
       item.shipStatus = 'error';
       item.shipNote = e.response ? beemoveError(e) : e.message;
       job.failed++;
     }
     job.done++;
-    await sleep(400);
-  }
+  };
+
+  // ⚡ สร้างพร้อมกันครั้งละ 3 รายการ (เดิมทีละรายการ + หน่วง 0.4 วิ)
+  let next = 0;
+  const worker = async () => {
+    while (!job.shouldStop && next < userIds.length) await one(userIds[next++]);
+  };
+  await Promise.all(Array.from({ length: Math.min(3, userIds.length) }, worker));
+
+  // ⚡ เริ่มดึงใบแปะหน้าล่วงหน้าทันที (หน้าเว็บขอเมื่อไหร่ได้ไฟล์เร็ว)
+  const ids = (labelUserIds && labelUserIds.length ? labelUserIds : userIds)
+    .map(uid => s.buyers.get(uid)).filter(b => b && b.beemoveOrderId).map(b => b.beemoveOrderId);
+  if (ids.length) getBeemoveLabel(bm, ids, 'A6').catch(() => {}); // หน้าเว็บขอขนาด A6
+
   job.running = false;
-  job.message = 'สร้างพัสดุเสร็จ: สำเร็จ ' + job.created + ' · ล้มเหลว ' + job.failed + (job.skipped ? ' · มีเลขอยู่แล้ว ' + job.skipped : '');
+  job.message = 'สร้างพัสดุเสร็จ: สำเร็จ ' + job.created + ' · ล้มเหลว ' + job.failed + (job.skipped ? ' · มีเลขอยู่แล้ว ' + job.skipped : '') + ' (' + ((Date.now() - t0) / 1000).toFixed(1) + ' วิ)';
 }
 
 app.post('/api/live/beemove/create', checkAuth, (req, res) => {
@@ -5765,7 +5790,8 @@ app.post('/api/live/beemove/create', checkAuth, (req, res) => {
 
   s.shipJob = { running: true, total: userIds.length, done: 0, created: 0, failed: 0, skipped: 0, message: 'กำลังเริ่มสร้างพัสดุ...', shouldStop: false };
   res.json({ success: true });
-  runShipJob(ctx.pageData, s, userIds).catch(e => {
+  const labelUserIds = (Array.isArray(req.body.labelUserIds) ? req.body.labelUserIds : []).map(String).filter(id => s.buyers.has(id));
+  runShipJob(ctx.pageData, s, userIds, labelUserIds).catch(e => {
     s.shipJob.running = false;
     s.shipJob.message = 'เกิดข้อผิดพลาด: ' + e.message;
   });
@@ -5811,6 +5837,44 @@ app.post('/beemove/webhook/:key', async (req, res) => {
 });
 
 // ดาวน์โหลดใบแปะหน้า PDF จาก Bee Move (ส่งต่อให้เบราว์เซอร์)
+// ⚡ ใบแปะหน้า: ดึงล่วงหน้าทันทีที่สร้างพัสดุเสร็จ + จำไว้ 10 นาที + ลองใหม่ถ้า Bee Move ยังสร้างไฟล์ไม่เสร็จ
+const beemoveLabelCache = new Map(); // key -> { promise, at }
+function labelCacheKey(bm, ids, size) { return beemoveCacheKey(bm) + '|' + size + '|' + ids.slice().sort().join(','); }
+async function fetchBeemoveLabelRaw(bm, ids, size) {
+  let lastErr;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const r = await beemoveRequest(bm, 'GET', '/client/v1/label', {
+        params: { ids: ids.join(','), id: ids.join(','), size, print_item: '0' },
+        responseType: 'arraybuffer',
+        timeout: 60000
+      });
+      const type = r.headers['content-type'] || 'application/pdf';
+      if (/json/.test(type)) {
+        lastErr = new Error('Bee Move ไม่ส่งไฟล์ใบแปะหน้า: ' + Buffer.from(r.data).toString('utf8').slice(0, 300));
+      } else {
+        return { type, buf: Buffer.from(r.data) };
+      }
+    } catch (e) {
+      lastErr = e;
+      const st = e.response?.status;
+      if (st && st < 500 && st !== 404 && st !== 409 && st !== 425) break; // error ถาวร ไม่ต้องลองซ้ำ
+    }
+    await sleep(1500 * (attempt + 1)); // รอ Bee Move สร้างใบแปะหน้าของพัสดุที่เพิ่งสร้าง
+  }
+  throw lastErr;
+}
+function getBeemoveLabel(bm, ids, size) {
+  const key = labelCacheKey(bm, ids, size);
+  const c = beemoveLabelCache.get(key);
+  if (c && Date.now() - c.at < 10 * 60 * 1000) return c.promise;
+  const promise = fetchBeemoveLabelRaw(bm, ids, size);
+  beemoveLabelCache.set(key, { promise, at: Date.now() });
+  promise.catch(() => beemoveLabelCache.delete(key));
+  if (beemoveLabelCache.size > 30) beemoveLabelCache.delete(beemoveLabelCache.keys().next().value);
+  return promise;
+}
+
 app.get('/api/beemove/label', checkAuth, async (req, res) => {
   const pageData = usersDB[req.userId]?.pages[req.query.pageId];
   if (!pageData) return res.status(404).json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
@@ -5818,19 +5882,10 @@ app.get('/api/beemove/label', checkAuth, async (req, res) => {
   const ids = String(req.query.ids || '').split(',').map(x => x.trim()).filter(Boolean).slice(0, 100);
   if (!ids.length) return res.status(400).json({ success: false, error: 'ไม่มีพัสดุที่เลือก' });
   try {
-    const r = await beemoveRequest(bm, 'GET', '/client/v1/label', {
-      params: { ids: ids.join(','), id: ids.join(','), size: req.query.size || bm.labelSize || 'A6', print_item: '0' },
-      responseType: 'arraybuffer',
-      timeout: 60000
-    });
-    const type = r.headers['content-type'] || 'application/pdf';
-    if (/json/.test(type)) {
-      const txt = Buffer.from(r.data).toString('utf8');
-      return res.status(502).json({ success: false, error: 'Bee Move ไม่ส่งไฟล์ใบแปะหน้า: ' + txt.slice(0, 300) });
-    }
+    const { type, buf } = await getBeemoveLabel(bm, ids, req.query.size || bm.labelSize || 'A6');
     res.setHeader('Content-Type', type);
     res.setHeader('Content-Disposition', 'inline; filename="beemove-label.pdf"');
-    res.send(Buffer.from(r.data));
+    res.send(buf);
   } catch (e) {
     let msg = e.message;
     if (e.response?.data) {
