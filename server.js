@@ -3031,7 +3031,7 @@ app.get('/', (req, res) => {
             commenterSel = new Set();
             renderCommenters();
             if(buyersPoll) clearInterval(buyersPoll);
-            buyersPoll = setInterval(loadBuyers, 2000);
+            buyersPoll = setInterval(function() { loadBuyers(true); }, 2000);
             await loadBuyers();
             document.getElementById('lv-buyers').scrollIntoView({ behavior: 'smooth', block: 'start' });
         }
@@ -3275,12 +3275,14 @@ app.get('/', (req, res) => {
             const d = await res.json();
             if(!d.success) return alert('❌ ' + d.error);
             if(buyersPoll) clearInterval(buyersPoll);
-            buyersPoll = setInterval(loadBuyers, 2000);
+            buyersPoll = setInterval(function() { loadBuyers(true); }, 2000);
             loadBuyers();
         }
 
-        async function loadBuyers() {
-            if (document.hidden && buyersList.length) return; // ⚡ ไม่ดึงข้อมูลตอนสลับไปแท็บอื่น
+        // fromPoll = true เฉพาะการรีเฟรชอัตโนมัติทุก 2 วิ (ข้ามได้ตอนสลับไปแท็บอื่น)
+        // การเรียกตรง ๆ จากปุ่ม/งานที่รอผล (เช่น สร้างพัสดุ แล้วเปิดหน้าใบแปะหน้า) ต้องดึงข้อมูลเสมอ
+        async function loadBuyers(fromPoll) {
+            if (fromPoll === true && document.hidden && buyersList.length) return; // ⚡ ประหยัดเฉพาะการรีเฟรชอัตโนมัติ
             if(!currentLiveId) return;
             const sid = currentLiveId;
             try {
@@ -3572,7 +3574,7 @@ app.get('/', (req, res) => {
             const d = await res.json();
             if(!d.success) return alert('❌ ' + d.error);
             if(buyersPoll) clearInterval(buyersPoll);
-            buyersPoll = setInterval(function() { loadBuyers().then(renderChatResults); }, 2000);
+            buyersPoll = setInterval(function() { loadBuyers(true).then(renderChatResults); }, 2000);
             await loadBuyers();
             document.getElementById('lv-buyers').scrollIntoView({ behavior: 'smooth', block: 'start' });
         }
@@ -4034,8 +4036,9 @@ app.get('/', (req, res) => {
                 });
                 const d = await res.json();
                 if(!d.success) { w.close(); return alert('❌ ' + d.error); }
+                lastShipJob = null; // ไม่ใช้สถานะของรอบก่อน
                 if(buyersPoll) clearInterval(buyersPoll);
-                buyersPoll = setInterval(loadBuyers, 2000);
+                buyersPoll = setInterval(function() { loadBuyers(true); }, 2000);
                 const sid = currentLiveId;
                 for(let i = 0; i < 900; i++) {
                     await new Promise(function(r) { setTimeout(r, 2000); });
