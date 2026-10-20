@@ -10,6 +10,17 @@ axios.defaults.httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 64, k
 axios.defaults.httpAgent = new http.Agent({ keepAlive: true, maxSockets: 64 });
 
 // ⚡ รันงานเบื้องหลังแบบไม่บล็อกกัน (คอมเมนต์ / สลิป แต่ละอันทำงานพร้อมกัน)
+// สติกเกอร์ ปุ่มไลก์ (👍) และ GIF ใน Messenger มาเป็น attachment ชนิด image -> ไม่ใช่สลิป
+function isStickerOrGif(message, att) {
+  if (message && message.sticker_id) return true;
+  const p = att && att.payload || {};
+  if (p.sticker_id) return true;
+  const url = String(p.url || '').toLowerCase();
+  if (/\.gif(\?|$)/.test(url)) return true;
+  if (/(^|\/\/)[^/]*(giphy|tenor)\./.test(url)) return true;
+  return false;
+}
+
 function runTask(fn, label) {
   return Promise.resolve().then(fn).catch(e => console.error('❌ [Task Error]', label || '', e?.response?.data || e?.message || e));
 }
@@ -30,6 +41,51 @@ function fbLimit(pageId, fn) {
     if (q.active < FB_CONCURRENCY) start(); else q.waiting.push(start);
   });
 }
+// ===================== 🏷️ ป้ายกำกับ (Custom Labels) ของ Facebook Inbox =====================
+// ดึงรายชื่อป้ายกำกับทั้งหมดที่มีอยู่แล้วในเพจ
+async function listPageLabels(pageData) {
+  const cfg = pageData.config;
+  const out = [];
+  let url = 'https://graph.facebook.com/v19.0/' + encodeURIComponent(cfg.pageId) + '/custom_labels';
+  let params = { fields: 'page_label_name', limit: 100, access_token: cfg.pageAccessToken };
+  for (let i = 0; i < 20 && url; i++) {
+    const r = await axios.get(url, { params, timeout: 15000 });
+    for (const l of r.data.data || []) if (l.id && l.page_label_name) out.push({ id: String(l.id), name: String(l.page_label_name) });
+    url = r.data.paging?.next || null;
+    params = undefined;
+  }
+  out.sort((x, y) => x.name.localeCompare(y.name, 'th'));
+  return out;
+}
+
+async function setInboxLabelById(pageData, psid, labelId, remove) {
+  await axios({
+    method: remove ? 'delete' : 'post',
+    url: 'https://graph.facebook.com/v19.0/' + encodeURIComponent(labelId) + '/label',
+    params: { user: psid, access_token: pageData.config.pageAccessToken },
+    timeout: 15000
+  });
+}
+
+// ติด/ลบป้ายตามที่แอดมินเลือกไว้ในแต่ละผลตรวจสลิป: result = 'valid' | 'invalid' | 'unreadable' | 'duplicate'
+function labelSlipResult(pageData, psid, result) {
+  const cfg = pageData.config;
+  const rule = (cfg.slipLabels || {})[result] || {};
+  const add = Array.isArray(rule.add) ? rule.add.filter(l => l && l.id) : [];
+  const remove = Array.isArray(rule.remove) ? rule.remove.filter(l => l && l.id) : [];
+  if (!psid || !cfg.pageAccessToken || (!add.length && !remove.length)) return;
+  runTask(async () => {
+    for (const l of add) {
+      try { await setInboxLabelById(pageData, psid, l.id); console.log('🏷️ [Label] ติดป้าย "' + l.name + '" ให้ ' + psid); }
+      catch (e) { pageData.lastLabelError = '"' + l.name + '": ' + graphErrorMessage(e); console.error('❌ [Label Error]', pageData.lastLabelError); }
+    }
+    for (const l of remove) {
+      try { await setInboxLabelById(pageData, psid, l.id, true); console.log('🏷️ [Label] ลบป้าย "' + l.name + '" ของ ' + psid); }
+      catch (e) { /* ลูกค้าไม่มีป้ายนี้อยู่แล้ว ไม่เป็นไร */ }
+    }
+  }, 'label');
+}
+
 // กันประมวลผลคอมเมนต์ซ้ำ (Facebook ส่ง webhook ซ้ำได้)
 function seenComment(pageData, commentId) {
   if (!commentId) return false;
@@ -41,8 +97,31 @@ function seenComment(pageData, commentId) {
   return false;
 }
 
+const zlib = require('zlib');
+
 const app = express();
 app.use(cors());
+
+// ⚡ บีบอัด (gzip) หน้าเว็บและข้อมูล JSON ก่อนส่ง: หน้า Dashboard ~350KB เหลือ ~60KB โหลดเร็วขึ้นมากบนมือถือ
+const gzipCache = { body: null, buf: null };
+app.use((req, res, next) => {
+  if (!/\bgzip\b/.test(req.headers['accept-encoding'] || '')) return next();
+  const origSend = res.send.bind(res);
+  res.send = (body) => {
+    if (typeof body !== 'string' || body.length < 1500 || res.get('Content-Encoding')) return origSend(body);
+    if (!res.get('Content-Type')) res.type(/^\s*</.test(body) ? 'html' : 'json');
+    let buf;
+    if (body.length > 100000 && gzipCache.body === body) buf = gzipCache.buf; // หน้าเว็บเดิม ใช้ไฟล์บีบอัดซ้ำ
+    else {
+      buf = zlib.gzipSync(body, { level: 6 });
+      if (body.length > 100000) { gzipCache.body = body; gzipCache.buf = buf; }
+    }
+    res.set('Content-Encoding', 'gzip');
+    res.vary('Accept-Encoding');
+    return origSend(buf);
+  };
+  next();
+});
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -73,7 +152,11 @@ const defaultPageConfig = {
   msgSlipSuccess: 'สถานะ: ตรวจสอบถูกต้อง ✅\nยอดเงิน: {amount} บาท\nวันที่: {date}\n\nรับยอดค่ะพี่ ขอบคุณมากค่ะ 🙏 แจ้งชื่อที่อยู่เบอร์โทร ได้เลยค่ะ🥰',
   msgSlipInvalid: '❌ สลิปไม่ถูกต้อง หรือเลขบัญชีผู้รับไม่ตรงกับของทางร้าน กรุณาตรวจสอบอีกครั้งนะคะ',
   msgSlipUnreadable: '⚠️ ไม่สามารถอ่านข้อมูลจากสลิปนี้ได้ กรุณาส่งรูปสลิปที่ชัดเจนอีกครั้งนะคะ',
-  msgSlipDuplicate: '🔄 สลิปนี้ถูกใช้งานไปแล้ว ไม่สามารถส่งซ้ำได้ค่ะ'
+  msgSlipDuplicate: '🔄 สลิปนี้ถูกใช้งานไปแล้ว ไม่สามารถส่งซ้ำได้ค่ะ',
+
+  // 🏷️ ป้ายกำกับ Inbox ที่จะ "ติด" / "ลบ" ตามผลตรวจสลิป (แอดมินเลือกเองจากป้ายที่มีในเพจ ไม่มีค่าเริ่มต้น)
+  // รูปแบบ: { valid: { add: [{id,name}], remove: [{id,name}] }, invalid: {...}, unreadable: {...}, duplicate: {...} }
+  slipLabels: {}
 };
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -106,7 +189,7 @@ async function verifySlipByImageUrl(imageUrl, apiKey) {
   // วิธีที่ 1: ส่ง URL ให้ EasySlip โหลดรูปเอง
   try {
     const response = await callEasySlip({ url: imageUrl, checkDuplicate: true }, keyToUse);
-    console.log('✅ [EasySlip] ผลการตรวจสอบ Raw Data:', JSON.stringify(response.data, null, 2));
+    console.log('✅ [EasySlip] ตรวจสำเร็จ');
     return { success: true, data: response.data };
   } catch (err) {
     const errData = err.response?.data || err.message;
@@ -124,7 +207,7 @@ async function verifySlipByImageUrl(imageUrl, apiKey) {
     const img = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 15000 });
     const base64 = Buffer.from(img.data).toString('base64');
     const response = await callEasySlip({ base64, checkDuplicate: true }, keyToUse);
-    console.log('✅ [EasySlip] (base64) ผลการตรวจสอบ Raw Data:', JSON.stringify(response.data, null, 2));
+    console.log('✅ [EasySlip] (base64) ตรวจสำเร็จ');
     return { success: true, data: response.data };
   } catch (err) {
     console.error('❌ [EasySlip] ส่งแบบ base64 ไม่สำเร็จ:', JSON.stringify(err.response?.data || err.message));
@@ -430,7 +513,10 @@ function logInboxText(pageData, psid, text) {
   const arr = log.get(psid) || [];
   arr.push({ text: String(text).slice(0, 1000), time: Date.now() });
   if (arr.length > 50) arr.splice(0, arr.length - 50);
+  log.delete(psid); // ย้ายไปท้ายสุด (ล่าสุด)
   log.set(psid, arr);
+  // ⚡ กันหน่วยความจำเต็ม: เก็บแชทล่าสุดไม่เกิน 20,000 คน (ลบคนที่เงียบนานสุดออก)
+  if (log.size > 20000) { let i = 0; for (const k of log.keys()) { log.delete(k); if (++i >= 2000) break; } }
 }
 
 async function fetchConversationMessages(pageId, token, psid) {
@@ -1400,17 +1486,46 @@ app.get('/', (req, res) => {
                             <div class="bg-slate-50 rounded-2xl p-4 border border-slate-200">
                                 <div id="slip-msg-success" class="space-y-2">
                                     <textarea id="msg-slip-success" rows="4" class="w-full p-3 text-sm border border-slate-200 rounded-xl focus:outline-none focus:border-rose-400 bg-white"></textarea>
+                                    <div class="slip-label-box border-t border-slate-200 pt-3 mt-2 space-y-2" data-key="valid">
+                                        <div class="text-xs font-semibold text-pink-600">ป้ายกำกับ</div>
+                                        <div id="lbl-add-valid" class="flex flex-wrap items-center gap-2"></div>
+                                        <div class="text-xs font-semibold text-slate-500 pt-1">ลบป้ายกำกับ</div>
+                                        <div id="lbl-remove-valid" class="flex flex-wrap items-center gap-2"></div>
+                                    </div>
                                 </div>
                                 <div id="slip-msg-invalid" class="space-y-2 hidden">
                                     <textarea id="msg-slip-invalid" rows="4" class="w-full p-3 text-sm border border-slate-200 rounded-xl focus:outline-none focus:border-rose-400 bg-white"></textarea>
+                                    <div class="slip-label-box border-t border-slate-200 pt-3 mt-2 space-y-2" data-key="invalid">
+                                        <div class="text-xs font-semibold text-pink-600">ป้ายกำกับ</div>
+                                        <div id="lbl-add-invalid" class="flex flex-wrap items-center gap-2"></div>
+                                        <div class="text-xs font-semibold text-slate-500 pt-1">ลบป้ายกำกับ</div>
+                                        <div id="lbl-remove-invalid" class="flex flex-wrap items-center gap-2"></div>
+                                    </div>
                                 </div>
                                 <div id="slip-msg-unreadable" class="space-y-2 hidden">
                                     <textarea id="msg-slip-unreadable" rows="4" class="w-full p-3 text-sm border border-slate-200 rounded-xl focus:outline-none focus:border-rose-400 bg-white"></textarea>
+                                    <div class="slip-label-box border-t border-slate-200 pt-3 mt-2 space-y-2" data-key="unreadable">
+                                        <div class="text-xs font-semibold text-pink-600">ป้ายกำกับ</div>
+                                        <div id="lbl-add-unreadable" class="flex flex-wrap items-center gap-2"></div>
+                                        <div class="text-xs font-semibold text-slate-500 pt-1">ลบป้ายกำกับ</div>
+                                        <div id="lbl-remove-unreadable" class="flex flex-wrap items-center gap-2"></div>
+                                    </div>
                                 </div>
                                 <div id="slip-msg-duplicate" class="space-y-2 hidden">
                                     <textarea id="msg-slip-duplicate" rows="4" class="w-full p-3 text-sm border border-slate-200 rounded-xl focus:outline-none focus:border-rose-400 bg-white"></textarea>
+                                    <div class="slip-label-box border-t border-slate-200 pt-3 mt-2 space-y-2" data-key="duplicate">
+                                        <div class="text-xs font-semibold text-pink-600">ป้ายกำกับ</div>
+                                        <div id="lbl-add-duplicate" class="flex flex-wrap items-center gap-2"></div>
+                                        <div class="text-xs font-semibold text-slate-500 pt-1">ลบป้ายกำกับ</div>
+                                        <div id="lbl-remove-duplicate" class="flex flex-wrap items-center gap-2"></div>
+                                    </div>
                                 </div>
                             </div>
+                        </div>
+
+                        <div class="flex flex-wrap items-center gap-3 text-xs">
+                            <button type="button" onclick="loadPageLabels()" class="px-3 py-1.5 font-medium bg-white border border-pink-300 text-pink-600 rounded-lg hover:bg-pink-50">🔄 โหลดป้ายกำกับจากเพจ</button>
+                            <span id="label-load-status" class="text-slate-500">ป้ายกำกับเลือกจากที่มีในเพจ (สร้างป้ายใหม่ได้ที่ Meta Business Suite → จัดการป้ายกำกับ)</span>
                         </div>
 
                         <div class="flex justify-end pt-2">
@@ -1424,9 +1539,10 @@ app.get('/', (req, res) => {
                         <div class="flex items-center justify-between mb-4 border-b border-slate-100 pb-4">
                             <div>
                                 <h3 class="text-base font-bold text-slate-700">🚀 บรอดแคสข้อความปลอดภัย (Safety Broadcast)</h3>
+                                <p class="text-xs text-slate-500 mt-1">ตามกฎ Facebook ส่งได้เฉพาะลูกค้าที่ทักแชทเข้ามาภายใน 24 ชม. ล่าสุด (ส่งโปรโมชันหาลูกค้าเก่าให้ใช้ Marketing Messages ใน Meta Business Suite)</p>
                             </div>
                             <div class="text-right">
-                                <span class="text-xs text-slate-400 block">ผู้รับในเพจนี้</span>
+                                <span class="text-xs text-slate-400 block">ส่งได้ (ทักมาใน 24 ชม.)</span>
                                 <span id="subscriber-count" class="text-lg font-bold text-blue-600">0 คน</span>
                             </div>
                         </div>
@@ -2065,6 +2181,9 @@ app.get('/', (req, res) => {
             document.getElementById('msg-slip-invalid').value = currentConfig.msgSlipInvalid || '';
             document.getElementById('msg-slip-unreadable').value = currentConfig.msgSlipUnreadable || '';
             document.getElementById('msg-slip-duplicate').value = currentConfig.msgSlipDuplicate || '';
+            if (!currentConfig.slipLabels || typeof currentConfig.slipLabels !== 'object') currentConfig.slipLabels = {};
+            renderAllLabelChips();
+            loadPageLabels();
 
             const isExact = currentConfig.matchType === 'exact';
             document.getElementById('btn-exact').className = isExact ? "px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-600 text-white" : "px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-100 text-slate-600";
@@ -2243,6 +2362,7 @@ app.get('/', (req, res) => {
             currentConfig.msgSlipInvalid = document.getElementById('msg-slip-invalid').value;
             currentConfig.msgSlipUnreadable = document.getElementById('msg-slip-unreadable').value;
             currentConfig.msgSlipDuplicate = document.getElementById('msg-slip-duplicate').value;
+            // currentConfig.slipLabels ถูกแก้ไขสดจากปุ่มเพิ่ม/ลบป้ายกำกับแล้ว
 
             const res = await fetch('/api/config?token=' + authToken + '&pageId=' + currentActivePageId, { 
                 method: 'POST', 
@@ -2256,6 +2376,80 @@ app.get('/', (req, res) => {
             } else {
                 alert('❌ บันทึกไม่สำเร็จ: ' + data.error);
             }
+        }
+
+        // ===== 🏷️ ป้ายกำกับตามผลตรวจสลิป (แอดมินเลือกเองจากป้ายที่มีในเพจ) =====
+        let pageLabels = [];
+        const SLIP_LABEL_KEYS = ['valid', 'invalid', 'unreadable', 'duplicate'];
+
+        function slipRule(key) {
+            if (!currentConfig.slipLabels || typeof currentConfig.slipLabels !== 'object') currentConfig.slipLabels = {};
+            const r = currentConfig.slipLabels[key] || (currentConfig.slipLabels[key] = { add: [], remove: [] });
+            if (!Array.isArray(r.add)) r.add = [];
+            if (!Array.isArray(r.remove)) r.remove = [];
+            return r;
+        }
+
+        function renderAllLabelChips() {
+            SLIP_LABEL_KEYS.forEach(function(k) { renderLabelChips(k, 'add'); renderLabelChips(k, 'remove'); });
+        }
+
+        function renderLabelChips(key, kind) {
+            const box = document.getElementById('lbl-' + kind + '-' + key);
+            if (!box) return;
+            const list = slipRule(key)[kind];
+            const isAdd = kind === 'add';
+            let html = '';
+            list.forEach(function(l, i) {
+                const missing = pageLabels.length && !pageLabels.some(function(x) { return x.id === l.id; });
+                html += '<span class="inline-flex items-center rounded-full overflow-hidden text-xs font-semibold ' + (isAdd ? 'bg-pink-600 text-white' : 'bg-slate-200 text-slate-700') + '">'
+                    + '<span class="px-3 py-1">' + escapeHtml(l.name) + (missing ? ' (ไม่พบในเพจ)' : '') + '</span>'
+                    + '<button type="button" class="px-2 py-1 ' + (isAdd ? 'border-l border-pink-400 hover:bg-pink-700' : 'border-l border-slate-300 hover:bg-slate-300') + '" data-key="' + key + '" data-kind="' + kind + '" data-idx="' + i + '" onclick="removeSlipLabel(this)">✕</button></span>';
+            });
+            const used = {};
+            list.forEach(function(l) { used[l.id] = 1; });
+            const avail = pageLabels.filter(function(l) { return !used[l.id]; });
+            html += '<select class="text-xs border ' + (isAdd ? 'border-pink-300 text-pink-600' : 'border-slate-300 text-slate-600') + ' rounded-full px-3 py-1 bg-white" data-key="' + key + '" data-kind="' + kind + '" onchange="addSlipLabel(this)">'
+                + '<option value="">' + (isAdd ? '+ เพิ่มป้ายกำกับ' : '+ ลบป้ายกำกับ') + '</option>';
+            avail.forEach(function(l) { html += '<option value="' + escapeHtml(l.id) + '">' + escapeHtml(l.name) + '</option>'; });
+            if (!pageLabels.length) html += '<option value="" disabled>(กดโหลดป้ายกำกับจากเพจก่อน)</option>';
+            html += '</select>';
+            box.innerHTML = html;
+        }
+
+        function addSlipLabel(sel) {
+            const key = sel.getAttribute('data-key');
+            const kind = sel.getAttribute('data-kind');
+            const id = sel.value;
+            if (!id) return;
+            const l = pageLabels.find(function(x) { return x.id === id; });
+            if (l) slipRule(key)[kind].push({ id: l.id, name: l.name });
+            renderLabelChips(key, kind);
+        }
+
+        function removeSlipLabel(btn) {
+            const key = btn.getAttribute('data-key');
+            const kind = btn.getAttribute('data-kind');
+            slipRule(key)[kind].splice(parseInt(btn.getAttribute('data-idx'), 10), 1);
+            renderLabelChips(key, kind);
+        }
+
+        async function loadPageLabels() {
+            if(!currentActivePageId) return;
+            const out = document.getElementById('label-load-status');
+            out.innerText = '⏳ กำลังโหลดป้ายกำกับจากเพจ...';
+            try {
+                const r = await (await fetch('/api/labels?token=' + authToken + '&pageId=' + currentActivePageId)).json();
+                if (r.success) {
+                    pageLabels = r.labels || [];
+                    out.innerText = pageLabels.length
+                        ? ('✅ พบป้ายกำกับในเพจ ' + pageLabels.length + ' ป้าย · เลือกแล้วกด "บันทึกการตั้งค่าสลิป"' + (r.lastError ? ' · ⚠️ ติดป้ายล่าสุดไม่สำเร็จ ' + r.lastError : ''))
+                        : '⚠️ เพจนี้ยังไม่มีป้ายกำกับ ให้สร้างที่ Meta Business Suite → จัดการป้ายกำกับ แล้วกดโหลดใหม่';
+                } else {
+                    out.innerText = '❌ โหลดป้ายไม่สำเร็จ: ' + r.error;
+                }
+            } catch (e) { out.innerText = '❌ ' + e.message; }
+            renderAllLabelChips();
         }
 
         // ===================== Live Sessions =====================
@@ -2287,6 +2481,7 @@ app.get('/', (req, res) => {
         }
 
         async function refreshLive() {
+            if (document.hidden) return; // ⚡ ไม่ดึงข้อมูลตอนสลับไปแท็บอื่น
             await loadLiveList();
             if(currentLiveId) await loadLiveDetail(false);
         }
@@ -2438,8 +2633,12 @@ app.get('/', (req, res) => {
             const area = document.getElementById('lv-bc-progress');
             if(bc.isBroadcasting || bc.total > 0) {
                 area.classList.remove('hidden');
-                document.getElementById('lv-bc-status').innerText = bc.statusMessage;
-                document.getElementById('lv-bc-numbers').innerText = bc.current + '/' + bc.total + ' (สำเร็จ: ' + bc.success + ', ล้มเหลว: ' + bc.failed + ')';
+                let bcText = bc.statusMessage || '';
+                const bcErr = bc.errors || {};
+                const bcKeys = Object.keys(bcErr);
+                if (bcKeys.length) bcText += ' | ส่งไม่สำเร็จเพราะ: ' + bcKeys.map(function(k) { return k + ' (' + bcErr[k] + ')'; }).join(', ');
+                document.getElementById('lv-bc-status').innerText = bcText;
+                document.getElementById('lv-bc-numbers').innerText = (bc.current || 0) + '/' + (bc.total || 0) + ' (สำเร็จ: ' + (bc.success || 0) + (bc.viaComment ? ' · ผ่านคอมเมนต์ ' + bc.viaComment : '') + ', ล้มเหลว: ' + (bc.failed || 0) + (bc.skipped ? ', ข้าม: ' + bc.skipped : '') + ')';
                 document.getElementById('lv-bc-bar').style.width = (bc.total > 0 ? (bc.current / bc.total) * 100 : 0) + '%';
             } else {
                 area.classList.add('hidden');
@@ -2582,6 +2781,7 @@ app.get('/', (req, res) => {
             });
             const data = await res.json();
             if(!data.success) alert('❌ ' + data.error);
+            else if (data.skipped) alert('เริ่มส่ง ' + data.total + ' คน' + NL + 'ข้าม ' + data.skipped + ' คน: ยังไม่ทักแชทใน 24 ชม. และคอมเมนต์ถูกใช้ส่งข้อความส่วนตัวไปแล้ว (กฎ Facebook)');
             loadLiveDetail(false);
         }
 
@@ -2647,6 +2847,7 @@ app.get('/', (req, res) => {
         }
 
         async function loadBuyers() {
+            if (document.hidden && buyersList.length) return; // ⚡ ไม่ดึงข้อมูลตอนสลับไปแท็บอื่น
             if(!currentLiveId) return;
             const sid = currentLiveId;
             try {
@@ -3429,6 +3630,7 @@ app.get('/', (req, res) => {
             });
             document.getElementById('tab-' + tabId).classList.remove('hidden');
             if(tabId === 'beemove') loadBeemove();
+            if(tabId === 'broadcast') loadBroadcastInfo();
             if(tabId === 'live') { loadLiveList(); startLivePolling(); } else { stopLivePolling(); }
             document.getElementById('nav-' + tabId).className = "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium bg-blue-50 text-blue-600";
         }
@@ -3443,20 +3645,47 @@ app.get('/', (req, res) => {
             if(!message) return alert('กรุณากรอกข้อความบรอดแคสก่อนครับ!');
             if(!confirm('ยืนยันเริ่มส่งบรอดแคส?')) return;
 
+            document.getElementById('btn-start-bc').disabled = true;
+            document.getElementById('btn-start-bc').innerText = 'กำลังรวบรวมผู้รับ...';
             const res = await fetch('/api/broadcast/start?token=' + authToken + '&pageId=' + currentActivePageId, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ message, delaySec, batchSize, pauseMin })
             });
             const data = await res.json();
+            document.getElementById('btn-start-bc').disabled = false;
+            document.getElementById('btn-start-bc').innerText = 'เริ่มส่งบรอดแคส';
             if(data.success) {
-                document.getElementById('bc-progress-area').classList.remove('hidden');
-                document.getElementById('btn-start-bc').classList.add('hidden');
-                document.getElementById('btn-stop-bc').classList.remove('hidden');
-                statusInterval = setInterval(checkBroadcastStatus, 1000);
+                showBroadcastRunning();
             } else {
                 alert('เกิดข้อผิดพลาด: ' + data.error);
             }
+        }
+
+        function showBroadcastRunning() {
+            document.getElementById('bc-progress-area').classList.remove('hidden');
+            document.getElementById('btn-start-bc').classList.add('hidden');
+            document.getElementById('btn-stop-bc').classList.remove('hidden');
+            if (statusInterval) clearInterval(statusInterval);
+            statusInterval = setInterval(checkBroadcastStatus, 1500);
+            checkBroadcastStatus();
+        }
+
+        // เปิดแท็บบรอดแคส: นับผู้รับที่ส่งได้จริง (ทักมาใน 24 ชม.) และกลับมาดูความคืบหน้าถ้ากำลังส่งอยู่
+        async function loadBroadcastInfo() {
+            if(!currentActivePageId) return;
+            const el = document.getElementById('subscriber-count');
+            el.innerText = 'กำลังนับ...';
+            try {
+                const r = await (await fetch('/api/broadcast/recipients?token=' + authToken + '&pageId=' + currentActivePageId)).json();
+                el.innerText = r.success ? (r.count + ' คน') : '-';
+                el.title = r.fbError ? ('ดึงรายการแชทไม่สำเร็จ: ' + r.fbError) : '';
+            } catch (e) { el.innerText = '-'; }
+            try {
+                const st = await (await fetch('/api/broadcast/status?token=' + authToken + '&pageId=' + currentActivePageId)).json();
+                if (st.isBroadcasting) showBroadcastRunning();
+                else if (st.total) { document.getElementById('bc-progress-area').classList.remove('hidden'); renderBroadcastStatus(st); }
+            } catch (e) {}
         }
 
         async function stopBroadcast() {
@@ -3464,15 +3693,21 @@ app.get('/', (req, res) => {
             alert('ส่งคำสั่งหยุดบรอดแคสเรียบร้อยแล้ว');
         }
 
+        function renderBroadcastStatus(status) {
+            let txt = status.statusMessage || '';
+            const errs = status.errors || {};
+            const keys = Object.keys(errs);
+            if (keys.length) txt += ' | ส่งไม่สำเร็จเพราะ: ' + keys.map(function(k) { return k + ' (' + errs[k] + ')'; }).join(', ');
+            document.getElementById('bc-status-text').innerText = txt;
+            document.getElementById('bc-numbers').innerText = (status.current || 0) + '/' + (status.total || 0) + ' (สำเร็จ: ' + (status.success || 0) + ', ล้มเหลว: ' + (status.failed || 0) + ')';
+            const pct = status.total > 0 ? (status.current / status.total) * 100 : 0;
+            document.getElementById('bc-progress-bar').style.width = pct + '%';
+        }
+
         async function checkBroadcastStatus() {
             const res = await fetch('/api/broadcast/status?token=' + authToken + '&pageId=' + currentActivePageId);
             const status = await res.json();
-
-            document.getElementById('bc-status-text').innerText = status.statusMessage;
-            document.getElementById('bc-numbers').innerText = status.current + '/' + status.total + ' (สำเร็จ: ' + status.success + ', ล้มเหลว: ' + status.failed + ')';
-
-            const pct = status.total > 0 ? (status.current / status.total) * 100 : 0;
-            document.getElementById('bc-progress-bar').style.width = pct + '%';
+            renderBroadcastStatus(status);
 
             if(!status.isBroadcasting) {
                 clearInterval(statusInterval);
@@ -3767,6 +4002,18 @@ app.get('/api/page-token-status', checkAuth, async (req, res) => {
   res.json({ success: true, ...info });
 });
 
+// 🏷️ รายชื่อป้ายกำกับที่มีอยู่ในเพจ (ตัวเลือกในหน้าตั้งค่าสลิป)
+app.get('/api/labels', checkAuth, async (req, res) => {
+  const pageData = usersDB[req.userId]?.pages[req.query.pageId];
+  if (!pageData) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
+  if (!pageData.config.pageAccessToken) return res.json({ success: false, error: 'เพจนี้ยังไม่มี Page Access Token' });
+  try {
+    res.json({ success: true, labels: await listPageLabels(pageData), lastError: pageData.lastLabelError || '' });
+  } catch (e) {
+    res.json({ success: false, error: graphErrorMessage(e) });
+  }
+});
+
 app.post('/api/subscribe-webhook', async (req, res) => {
   const { pageAccessToken, pageId } = req.body;
   if (!pageAccessToken) return res.json({ success: false, error: 'ไม่พบ Page Access Token' });
@@ -3782,56 +4029,128 @@ app.post('/api/subscribe-webhook', async (req, res) => {
 // -------------------------------------------------------------
 // 5. API บรอดแคส
 // -------------------------------------------------------------
+// ⚠️ กฎ Facebook: ส่งข้อความหาลูกค้าได้เฉพาะคนที่ "ทักแชทมาภายใน 24 ชั่วโมง" เท่านั้น
+// คนที่เกิน 24 ชม. Facebook จะปฏิเสธ (ส่งโปรโมชันนอกเวลา 24 ชม. ต้องใช้ Marketing Messages ใน Meta Business Suite)
+const BC_WINDOW_MS = 24 * 3600 * 1000;
+
+// รวบรวมผู้รับที่อยู่ในช่วง 24 ชม.: จากรายการแชทของ Facebook (ไม่หายแม้เซิร์ฟเวอร์รีสตาร์ท) + ข้อความที่เข้ามาทาง Webhook
+async function collectBroadcastRecipients(pageData) {
+  const cfg = pageData.config;
+  const pageId = String(cfg.pageId || '');
+  const cutoff = Date.now() - BC_WINDOW_MS;
+  const ids = new Map(); // psid -> เวลาล่าสุด
+  let fbError = '';
+
+  if (cfg.pageAccessToken && pageId) {
+    let url = 'https://graph.facebook.com/v19.0/' + encodeURIComponent(pageId) + '/conversations';
+    let params = { platform: 'messenger', fields: 'participants,updated_time', limit: 100, access_token: cfg.pageAccessToken };
+    try {
+      for (let i = 0; i < 30 && url; i++) {
+        const r = await axios.get(url, { params, timeout: 15000 });
+        let older = false;
+        for (const conv of r.data.data || []) {
+          const t = Date.parse(conv.updated_time || '') || 0;
+          if (t < cutoff) { older = true; continue; }
+          for (const p of conv.participants?.data || []) {
+            if (String(p.id) !== pageId) ids.set(String(p.id), Math.max(ids.get(String(p.id)) || 0, t));
+          }
+        }
+        if (older) break; // รายการเรียงจากใหม่ไปเก่า เจอเก่ากว่า 24 ชม. แล้วหยุด
+        url = r.data.paging?.next || null;
+        params = undefined;
+      }
+    } catch (e) {
+      fbError = graphErrorMessage(e);
+    }
+  }
+  for (const [psid, t] of (pageData.lastInbound || new Map())) {
+    if (t >= cutoff) ids.set(psid, Math.max(ids.get(psid) || 0, t));
+  }
+  return { recipients: Array.from(ids.keys()), fbError };
+}
+
+// เก็บสาเหตุที่ส่งไม่สำเร็จ ให้แอดมินเห็น
+function recordBroadcastError(st, err) {
+  const e = err.response?.data?.error || {};
+  let reason = e.message || err.message || 'ไม่ทราบสาเหตุ';
+  if (e.error_subcode === 2018278 || e.code === 10 || /outside of allowed window/i.test(reason)) reason = 'เกิน 24 ชม. หลังลูกค้าทักล่าสุด (กฎ Facebook)';
+  else if (e.code === 551 || e.error_subcode === 1545041) reason = 'ลูกค้าไม่รับข้อความ / บล็อกเพจ';
+  else if (e.code === 100 && /No matching user/i.test(reason)) reason = 'ไม่ใช่ ID แชทของลูกค้า';
+  else if (e.code === 190) reason = 'Token หมดอายุ (เพิ่มเพจใหม่)';
+  else if (e.code === 613 || e.code === 4 || e.code === 32) reason = 'ส่งถี่เกินไป Facebook จำกัดชั่วคราว (เพิ่มเวลาหน่วง)';
+  st.errors = st.errors || {};
+  st.errors[reason] = (st.errors[reason] || 0) + 1;
+}
+
+app.get('/api/broadcast/recipients', checkAuth, async (req, res) => {
+  const pageData = usersDB[req.userId]?.pages[req.query.pageId];
+  if (!pageData) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
+  const r = await collectBroadcastRecipients(pageData);
+  res.json({ success: true, count: r.recipients.length, fbError: r.fbError });
+});
+
 app.post('/api/broadcast/start', checkAuth, async (req, res) => {
   const username = req.userId;
   const pageId = req.query.pageId;
-  const { message, delaySec, batchSize, pauseMin } = req.body;
-  
+  const message = String(req.body.message || '').trim();
+  const delaySec = Math.max(1, parseInt(req.body.delaySec) || 3);
+  const batchSize = Math.max(1, parseInt(req.body.batchSize) || 20);
+  const pauseMin = Math.max(1, parseInt(req.body.pauseMin) || 10);
+
   const pageData = usersDB[username]?.pages[pageId];
   if (!pageData) return res.json({ success: false, error: 'กรุณาเลือกเพจก่อนทำรายการ' });
-  
+  if (!message) return res.json({ success: false, error: 'กรุณากรอกข้อความบรอดแคส' });
+  if (!pageData.config.pageAccessToken) return res.json({ success: false, error: 'เพจนี้ยังไม่มี Page Access Token' });
   if (pageData.broadcastStatus.isBroadcasting) return res.json({ success: false, error: 'กำลังรันบรอดแคสอยู่แล้ว' });
-  if (pageData.subscribers.size === 0) return res.json({ success: false, error: 'ยังไม่มีผู้รับในระบบของเพจนี้' });
 
-  const subList = Array.from(pageData.subscribers);
-  pageData.broadcastStatus = { isBroadcasting: true, total: subList.length, current: 0, success: 0, failed: 0, statusMessage: 'กำลังเริ่มส่ง...', shouldStop: false };
-  res.json({ success: true });
+  const { recipients: subList, fbError } = await collectBroadcastRecipients(pageData);
+  if (subList.length === 0) {
+    return res.json({ success: false, error: 'ไม่มีลูกค้าที่ทักแชทมาภายใน 24 ชม. (Facebook อนุญาตให้ส่งเฉพาะกลุ่มนี้)' + (fbError ? ' | ' + fbError : '') });
+  }
+
+  pageData.broadcastStatus = { isBroadcasting: true, total: subList.length, current: 0, success: 0, failed: 0, errors: {}, statusMessage: 'กำลังเริ่มส่ง...', shouldStop: false };
+  res.json({ success: true, total: subList.length });
 
   (async () => {
+    const st = pageData.broadcastStatus;
     let currentBatchCount = 0;
     for (let i = 0; i < subList.length; i++) {
-      if (pageData.broadcastStatus.shouldStop) break;
+      if (st.shouldStop) break;
       const recipientId = subList[i];
-      pageData.broadcastStatus.current = i + 1;
-      pageData.broadcastStatus.statusMessage = 'กำลังส่งหาผู้รับที่ ' + (i + 1) + '/' + subList.length + '...';
+      st.current = i + 1;
+      st.statusMessage = 'กำลังส่งหาผู้รับที่ ' + (i + 1) + '/' + subList.length + '...';
 
       try {
         await axios.post('https://graph.facebook.com/v19.0/me/messages', {
           recipient: { id: recipientId },
+          messaging_type: 'RESPONSE',
           message: { text: message }
-        }, { 
+        }, {
           params: { access_token: pageData.config.pageAccessToken },
-          timeout: 10000 
+          timeout: 15000
         });
-        pageData.broadcastStatus.success++;
+        st.success++;
       } catch (err) {
-        pageData.broadcastStatus.failed++;
+        st.failed++;
+        recordBroadcastError(st, err);
+        if (err.response?.data?.error?.code === 190) { st.statusMessage = '❌ Token หมดอายุ หยุดส่ง'; st.shouldStop = true; break; }
       }
 
       currentBatchCount++;
       if (currentBatchCount >= batchSize && (i + 1) < subList.length) {
         currentBatchCount = 0;
         for (let m = pauseMin; m > 0; m--) {
-          if (pageData.broadcastStatus.shouldStop) break;
-          pageData.broadcastStatus.statusMessage = '⏳ พักระบบ ' + m + ' นาที...';
-          await sleep(60 * 1000);
+          if (st.shouldStop) break;
+          st.statusMessage = '⏳ พักระบบ ' + m + ' นาที...';
+          for (let k = 0; k < 12 && !st.shouldStop; k++) await sleep(5000); // เช็กปุ่มหยุดทุก 5 วิ
         }
-      } else {
+      } else if ((i + 1) < subList.length) {
         await sleep(delaySec * 1000);
       }
     }
-    pageData.broadcastStatus.isBroadcasting = false;
-    if (!pageData.broadcastStatus.shouldStop) pageData.broadcastStatus.statusMessage = '✅ บรอดแคสเสร็จสิ้นสมบูรณ์!';
+    st.isBroadcasting = false;
+    if (st.shouldStop) { if (!/Token/.test(st.statusMessage)) st.statusMessage = '⏹️ หยุดบรอดแคสแล้ว'; }
+    else st.statusMessage = '✅ บรอดแคสเสร็จสิ้น';
   })();
 });
 
@@ -3905,6 +4224,34 @@ function findLiveSessionForSender(pageData, senderId) {
   if (best) return best;
   const active = all.filter(s => s.status === 'active').sort((a, b) => b.startedAt - a.startedAt);
   return active[0] || null;
+}
+
+// ⚡ จัดกลุ่มสลิปตามผู้ส่งครั้งเดียวต่อคำขอ (เดิมวนสลิปทั้งหมดใหม่ทุกคน)
+function buildSlipIndex(pageData, s) {
+  const since = s.firstStartedAt || s.startedAt || 0;
+  const idx = new Map();
+  const add = (x) => {
+    if (!x || (x.time || 0) < since) return;
+    const k = String(x.senderId);
+    if (!idx.has(k)) idx.set(k, []);
+    idx.get(k).push(x);
+  };
+  (s.slips || []).forEach(add);
+  (pageData.slipLog || []).forEach(add);
+  return idx;
+}
+
+function paymentStatusFromIndex(idx, userId, psid) {
+  const seen = new Set();
+  let total = 0, count = 0, last = 0;
+  for (const k of [String(userId), psid ? String(psid) : '']) {
+    if (!k) continue;
+    for (const x of idx.get(k) || []) {
+      if (seen.has(x.transRef)) continue;
+      seen.add(x.transRef); total += Number(x.amount) || 0; count++; last = Math.max(last, x.time || 0);
+    }
+  }
+  return { paid: count > 0, paidTotal: total, slipCount: count, lastSlipTime: last };
 }
 
 // สถานะโอนเงินของลูกค้าใน session: สลิปที่ตรวจผ่านตั้งแต่เริ่ม session (หรือที่ถูกบันทึกเข้า session นี้)
@@ -4010,12 +4357,17 @@ app.get('/api/live/detail', checkAuth, (req, res) => {
   const s = ctx.live;
   if (!s) return res.json({ success: false, error: 'ไม่พบ session นี้' });
 
+  const slipIdx = buildSlipIndex(ctx.pageData, s);
+  const psidMap = getPsidMap(ctx.pageData);
   const commenters = Array.from(s.commenters.entries())
-    .map(([userId, c]) => ({
-      userId, ...c,
-      ...paymentStatus(ctx.pageData, s, userId, c.psid || getPsidMap(ctx.pageData).get(userId)),
-      inBuyers: !!(s.buyers && s.buyers.has(userId))
-    }))
+    .map(([userId, c]) => {
+      const { pendingComments, ...pub } = c; // ข้อมูลภายใน ไม่ต้องส่งไปหน้าเว็บ
+      return {
+        userId, ...pub,
+        ...paymentStatusFromIndex(slipIdx, userId, c.psid || psidMap.get(userId)),
+        inBuyers: !!(s.buyers && s.buyers.has(userId))
+      };
+    })
     .sort((a, b) => b.lastTime - a.lastTime)
     .slice(0, 300);
 
@@ -4790,40 +5142,57 @@ app.get('/api/beemove/label', checkAuth, async (req, res) => {
   }
 });
 
-async function runLiveBroadcast(live, pageToken, recipients, message, delaySec, batchSize, pauseMin) {
+const PRIVATE_REPLY_MS = 7 * 24 * 3600 * 1000;
+
+// targets: [{ uid, psid }] ส่งแบบแชทปกติ (ลูกค้าทักมาใน 24 ชม.) หรือ [{ uid, commentId }] ส่งแบบ Private Reply ผ่านคอมเมนต์
+async function runLiveBroadcast(live, pageData, targets, message, delaySec, batchSize, pauseMin) {
   const st = live.broadcastStatus;
+  const pageToken = pageData.config.pageAccessToken;
   let batchCount = 0;
-  for (let i = 0; i < recipients.length; i++) {
+  for (let i = 0; i < targets.length; i++) {
     if (st.shouldStop) break;
+    const t = targets[i];
     st.current = i + 1;
-    st.statusMessage = 'กำลังส่งหาผู้รับที่ ' + (i + 1) + '/' + recipients.length + '...';
+    st.statusMessage = 'กำลังส่งหาผู้รับที่ ' + (i + 1) + '/' + targets.length + '...';
+    const c = live.commenters.get(t.uid);
     try {
-      await axios.post('https://graph.facebook.com/v19.0/me/messages', {
-        recipient: { id: recipients[i] },
+      const r = await axios.post('https://graph.facebook.com/v19.0/me/messages', {
+        recipient: t.psid ? { id: t.psid } : { comment_id: t.commentId },
+        messaging_type: 'RESPONSE',
         message: { text: message }
-      }, { params: { access_token: pageToken }, timeout: 10000 });
+      }, { params: { access_token: pageToken }, timeout: 15000 });
       st.success++;
+      if (t.commentId) {
+        st.viaComment = (st.viaComment || 0) + 1;
+        const psid = r.data?.recipient_id;
+        if (psid) { getPsidMap(pageData).set(t.uid, String(psid)); if (c) c.psid = String(psid); }
+      }
     } catch (err) {
       st.failed++;
+      recordBroadcastError(st, err);
+      if (err.response?.data?.error?.code === 190) { st.shouldStop = true; break; }
     }
+    // คอมเมนต์นี้ใช้สิทธิ์ส่งส่วนตัวไปแล้ว (สำเร็จหรือไม่ก็ใช้ซ้ำไม่ได้)
+    if (t.commentId && c && c.pendingComments) c.pendingComments = c.pendingComments.filter(x => x.id !== t.commentId);
 
     batchCount++;
-    if (batchCount >= batchSize && (i + 1) < recipients.length) {
+    if (batchCount >= batchSize && (i + 1) < targets.length) {
       batchCount = 0;
       for (let m = pauseMin; m > 0; m--) {
         if (st.shouldStop) break;
         st.statusMessage = '⏳ พักระบบ ' + m + ' นาที...';
-        await sleep(60 * 1000);
+        for (let k = 0; k < 12 && !st.shouldStop; k++) await sleep(5000);
       }
-    } else {
+    } else if ((i + 1) < targets.length) {
       await sleep(delaySec * 1000);
     }
   }
   st.isBroadcasting = false;
-  st.statusMessage = st.shouldStop ? '⏹️ หยุดบรอดแคสแล้ว' : '✅ บรอดแคสเสร็จสิ้นสมบูรณ์!';
+  const extra = st.skipped ? (' · ข้าม ' + st.skipped + ' คน (ยังไม่ทักแชท และไม่มีคอมเมนต์ที่ส่งส่วนตัวได้)') : '';
+  st.statusMessage = (st.shouldStop ? '⏹️ หยุดบรอดแคสแล้ว' : '✅ บรอดแคสเสร็จสิ้น') + extra;
 }
 
-app.post('/api/live/broadcast/start', checkAuth, (req, res) => {
+app.post('/api/live/broadcast/start', checkAuth, async (req, res) => {
   const ctx = getLiveContext(req, res);
   if (!ctx) return;
   const s = ctx.live;
@@ -4837,14 +5206,33 @@ app.post('/api/live/broadcast/start', checkAuth, (req, res) => {
   if (!message || !String(message).trim()) return res.json({ success: false, error: 'กรุณากรอกข้อความบรอดแคส' });
   if (!ctx.pageData.config.pageAccessToken) return res.json({ success: false, error: 'เพจนี้ยังไม่มี Page Access Token' });
 
-  const recipients = Array.from(s.commenters.entries())
-    .filter(([, c]) => !onlyMatched || c.matchedCount > 0)
-    .map(([id, c]) => c.psid || id);
-  if (recipients.length === 0) return res.json({ success: false, error: 'ยังไม่มีผู้รับใน session นี้' });
+  // คนที่ทักแชทมาภายใน 24 ชม. -> ส่งแชทปกติได้
+  const { recipients: inWindow } = await collectBroadcastRecipients(ctx.pageData);
+  const windowSet = new Set(inWindow);
+  const psidMap = getPsidMap(ctx.pageData);
+  const now = Date.now();
+  const targets = [];
+  const usedPsid = new Set();
+  let skipped = 0;
+  for (const [uid, c] of s.commenters.entries()) {
+    if (onlyMatched && !(c.matchedCount > 0)) continue;
+    const psid = c.psid || psidMap.get(uid) || '';
+    if (psid && windowSet.has(psid)) {
+      if (!usedPsid.has(psid)) { usedPsid.add(psid); targets.push({ uid, psid }); }
+      continue;
+    }
+    // ยังไม่ทักแชท -> ใช้ Private Reply ผ่านคอมเมนต์ล่าสุดที่ยังไม่เคยใช้สิทธิ์ (ภายใน 7 วัน)
+    const pc = (c.pendingComments || []).filter(x => now - x.time < PRIVATE_REPLY_MS);
+    if (pc.length) { targets.push({ uid, commentId: pc[pc.length - 1].id }); continue; }
+    skipped++;
+  }
+  if (targets.length === 0) {
+    return res.json({ success: false, error: 'ส่งไม่ได้: ' + skipped + ' คนนี้ยังไม่ได้ทักแชทภายใน 24 ชม. และคอมเมนต์ของเขาถูกใช้ส่งข้อความส่วนตัวไปแล้ว (Facebook อนุญาต 1 ครั้งต่อคอมเมนต์) — ให้ลูกค้าทักแชทเข้ามาก่อน หรือรอคอมเมนต์ใหม่' });
+  }
 
-  s.broadcastStatus = { isBroadcasting: true, total: recipients.length, current: 0, success: 0, failed: 0, statusMessage: 'กำลังเริ่มส่ง...', shouldStop: false };
-  res.json({ success: true });
-  runLiveBroadcast(s, ctx.pageData.config.pageAccessToken, recipients, String(message), delaySec, batchSize, pauseMin);
+  s.broadcastStatus = { isBroadcasting: true, total: targets.length, current: 0, success: 0, failed: 0, skipped, viaComment: 0, errors: {}, statusMessage: 'กำลังเริ่มส่ง...', shouldStop: false };
+  res.json({ success: true, total: targets.length, skipped });
+  runLiveBroadcast(s, ctx.pageData, targets, String(message), delaySec, batchSize, pauseMin);
 });
 
 app.post('/api/live/broadcast/stop', checkAuth, (req, res) => {
@@ -4917,7 +5305,13 @@ app.post('/webhook', async (req, res) => {
           runTask(async () => {
 
           const senderId = msgEvent.sender?.id;
-          if (senderId) subscribers.add(senderId);
+          if (senderId) {
+            subscribers.add(senderId);
+            const li = targetRecord.pageData.lastInbound || (targetRecord.pageData.lastInbound = new Map());
+            li.delete(String(senderId));
+            li.set(String(senderId), Date.now());
+            if (li.size > 20000) { let i = 0; for (const k of li.keys()) { li.delete(k); if (++i >= 2000) break; } }
+          }
 
           // 📦 เก็บข้อความตัวอักษรของลูกค้าไว้ ใช้ค้นหาชื่อที่อยู่สำหรับใบแปะหน้า
           if (senderId && msgEvent.message && msgEvent.message.text) {
@@ -4929,6 +5323,11 @@ app.post('/webhook', async (req, res) => {
               if (att.type === 'image' && configStore.enableSlipVerify) {
                 const imageUrl = att.payload?.url;
                 if (!imageUrl) continue;
+                // ข้ามสติกเกอร์ / ปุ่มไลก์ 👍 / GIF (Facebook ส่งมาเป็น "รูปภาพ" แต่ไม่ใช่สลิป)
+                if (isStickerOrGif(msgEvent.message, att)) {
+                  console.log(`🙂 [Page: ${pageId}] ข้ามสติกเกอร์/GIF จาก ${senderId} ไม่ตรวจเป็นสลิป`);
+                  continue;
+                }
 
                 console.log(`🧾 [Page: ${pageId}] พบรูปภาพจากลูกค้า ID: ${senderId} กำลังตรวจสอบสลิป...`);
                 // เรียกใช้ฟังก์ชัน verifySlipByImageUrl
@@ -4951,6 +5350,7 @@ app.post('/webhook', async (req, res) => {
                 if (!slip) {
                   const errCode = slipResult?.error?.error?.code || slipResult?.data?.error?.code || '';
                   console.log(`⚠️ [Page: ${pageId}] อ่านข้อมูลสลิปไม่สำเร็จจาก EasySlip`, errCode);
+                  if (errCode !== 'SLIP_PENDING') labelSlipResult(targetRecord.pageData, senderId, 'unreadable');
                   if (errCode === 'SLIP_PENDING') {
                     await sendSlipReply('⏳ สลิปธนาคารกรุงเทพเพิ่งโอนไม่ถึง 5 นาที กรุณารอสักครู่แล้วส่งสลิปอีกครั้งนะคะ');
                   } else {
@@ -4961,6 +5361,7 @@ app.post('/webhook', async (req, res) => {
 
                 if (usedSlips.has(slip.transRef) || slip.isDuplicate) {
                   console.log(`🔄 [Page: ${pageId}] สลิปซ้ำ ถูกใช้งานไปแล้ว`);
+                  labelSlipResult(targetRecord.pageData, senderId, 'duplicate');
                   await sendSlipReply(configStore.msgSlipDuplicate);
                   continue;
                 }
@@ -4971,11 +5372,14 @@ app.post('/webhook', async (req, res) => {
 
                 if (!receiverOk) {
                   console.log(`❌ [Page: ${pageId}] เลขบัญชีผู้รับไม่ตรงกับร้านค้า`, slip.receiverAccounts, slip.receiverNameTh);
+                  labelSlipResult(targetRecord.pageData, senderId, 'invalid');
                   await sendSlipReply(configStore.msgSlipInvalid);
                   continue;
                 }
 
                 usedSlips.add(slip.transRef);
+                labelSlipResult(targetRecord.pageData, senderId, 'valid');
+                if (usedSlips.size > 50000) { let i = 0; for (const k of usedSlips) { usedSlips.delete(k); if (++i >= 5000) break; } }
 
                 // บันทึกสลิปที่ผ่านการตรวจไว้ระดับเพจ (ใช้ดูสถานะ "โอนแล้ว" ของลูกค้า)
                 if (!targetRecord.pageData.slipLog) targetRecord.pageData.slipLog = [];
@@ -5015,7 +5419,7 @@ app.post('/webhook', async (req, res) => {
             // ข้ามคอมเมนต์ที่เพจตอบเอง (ไม่นับเป็นลูกค้า และกันบอตตอบวนซ้ำ)
             if (senderId && (senderId === pageId || senderId === configStore.pageId)) continue;
             if (seenComment(targetRecord.pageData, comment.comment_id)) continue;
-            if (senderId) subscribers.add(senderId);
+            // หมายเหตุ: ID คนคอมเมนต์ ไม่ใช่ ID แชท (PSID) จึงไม่เพิ่มเข้ารายชื่อบรอดแคส (ส่งไปก็ล้มเหลว)
 
             // หา session ไลฟ์ที่คอมเมนต์นี้สังกัด (ถ้ามี) แล้วใช้ค่าตั้งของ session แทนค่าหลักของเพจ
             const liveSession = findLiveSessionForComment(targetRecord.pageData, comment.post_id, comment.video_id);
@@ -5037,6 +5441,12 @@ app.post('/webhook', async (req, res) => {
                 prev.lastMessage = commentText.slice(0, 200);
                 prev.lastTime = Date.now();
                 if (!prev.psid) prev.psid = getPsidMap(targetRecord.pageData).get(senderId) || '';
+                // เก็บคอมเมนต์ที่ยังไม่เคยส่งข้อความส่วนตัว (Private Reply) ไว้ใช้บรอดแคสต์ภายหลัง (Facebook ให้ส่งได้ 1 ครั้ง/คอมเมนต์ ภายใน 7 วัน)
+                if (!prev.pendingComments) prev.pendingComments = [];
+                if (comment.comment_id) {
+                  prev.pendingComments.push({ id: comment.comment_id, time: Date.now() });
+                  if (prev.pendingComments.length > 5) prev.pendingComments.shift();
+                }
                 liveSession.commenters.set(senderId, prev);
               }
             }
@@ -5056,9 +5466,10 @@ app.post('/webhook', async (req, res) => {
                   }, { params: { access_token: token }, timeout: 15000 }).then(inboxRes => {
                     // 📦 จับคู่ ID คนคอมเมนต์ กับ ID แชท (PSID) เพื่อใช้ค้นหาที่อยู่ในแชทภายหลัง
                     const psid = inboxRes.data?.recipient_id;
+                    const c = senderId ? liveSession?.commenters.get(senderId) : null;
+                    if (c && c.pendingComments) c.pendingComments = c.pendingComments.filter(x => x.id !== commentId);
                     if (psid && senderId) {
                       getPsidMap(pageDataRef).set(senderId, String(psid));
-                      const c = liveSession?.commenters.get(senderId);
                       if (c) c.psid = String(psid);
                     }
                   }).catch(inbErr => console.error('❌ [Inbox Error]', inbErr.response?.data || inbErr.message)));
