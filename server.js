@@ -2419,6 +2419,7 @@ app.get('/', (req, res) => {
                                         <option value="matched">เฉพาะคนที่ตรงคำดัก</option>
                                         <option value="unpaid">ตรงคำดัก · ยังไม่โอน</option>
                                         <option value="paid">ตรงคำดัก · โอนแล้ว</option>
+                                        <option value="paidNotBuyer">โอนแล้ว · ยังไม่อยู่ในรายชื่อลูกค้า</option>
                                         <option value="all">ทุกคนที่คอมเมนต์</option>
                                     </select>
                                     <span id="lv-cm-summary"></span>
@@ -3722,6 +3723,7 @@ app.get('/', (req, res) => {
                 if(f === 'all') return true;
                 if(!(c.matchedCount > 0)) return false;
                 if(f === 'paid') return c.paid;
+                if(f === 'paidNotBuyer') return c.paid && !c.inBuyers;
                 if(f === 'unpaid') return !c.paid;
                 return true;
             });
