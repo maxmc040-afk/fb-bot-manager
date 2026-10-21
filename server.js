@@ -2408,7 +2408,10 @@ app.get('/', (req, res) => {
                             <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
                                 <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
                                     <h3 class="text-base font-bold text-slate-700">💬 รายชื่อคนคอมเมนต์ (ล่าสุด 300 คน)</h3>
-                                    <button type="button" onclick="pullSelectedCommenters()" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm">📥 ดึงข้อมูลคนที่เลือก</button>
+                                    <div class="flex flex-wrap gap-2">
+                                        <button type="button" onclick="deleteSelectedCommenters()" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-white text-rose-600 border border-rose-300 hover:bg-rose-50 shadow-sm">🗑️ ลบคนที่เลือก</button>
+                                        <button type="button" onclick="pullSelectedCommenters()" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm">📥 ดึงข้อมูลคนที่เลือก</button>
+                                    </div>
                                 </div>
                                 <div class="flex flex-wrap items-center gap-3 mb-2 text-xs text-slate-600">
                                     <label class="flex items-center gap-1.5 cursor-pointer"><input type="checkbox" id="lv-cm-all" onchange="toggleAllCommenters(this.checked)" class="w-4 h-4 rounded"> เลือกทั้งหมด</label>
@@ -3763,6 +3766,21 @@ app.get('/', (req, res) => {
             if(e.target.checked) commenterSel.add(id); else commenterSel.delete(id);
             renderCommenters();
         });
+
+        async function deleteSelectedCommenters() {
+            if(!currentLiveId) return;
+            const ids = Array.from(commenterSel).filter(function(id) { return commenterList.some(function(c) { return c.userId === id; }); });
+            if(!ids.length) return alert('กรุณาติ๊กเลือกรายชื่อที่จะลบก่อน');
+            if(!confirm('ลบ ' + ids.length + ' รายชื่อออกจากตารางนี้?' + NL + '(สลิปที่โอนแล้วยังเก็บไว้ · ถ้าคนนี้คอมเมนต์ใหม่จะกลับมาในรายชื่ออีกครั้ง)')) return;
+            try {
+                const r = await (await fetch(liveUrl('/api/live/commenters/delete', '&sid=' + currentLiveId), {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userIds: ids })
+                })).json();
+                if(!r.success) return alert('❌ ' + r.error);
+                ids.forEach(function(id) { commenterSel.delete(id); });
+                await loadLiveDetail(false);
+            } catch(e) { alert('❌ ' + e.message); }
+        }
 
         async function pullSelectedCommenters() {
             if(!currentLiveId) return;
@@ -5699,6 +5717,19 @@ app.post('/api/live/manual-payment', checkAuth, (req, res) => {
   const psid = c.psid || getPsidMap(ctx.pageData).get(userId);
   if (psid) labelSlipResult(ctx.pageData, psid, 'valid');
   res.json({ success: true, slip: rec });
+});
+
+// 🗑️ ลบรายชื่อคนคอมเมนต์ออกจากตาราง (ไม่ลบสลิป · คอมเมนต์ใหม่จะกลับมาเอง)
+app.post('/api/live/commenters/delete', checkAuth, (req, res) => {
+  const ctx = getLiveContext(req, res);
+  if (!ctx) return;
+  const s = ctx.live;
+  if (!s) return res.json({ success: false, error: 'ไม่พบ session นี้' });
+  const ids = Array.isArray(req.body.userIds) ? req.body.userIds.map(String).slice(0, 5000) : [];
+  if (!ids.length) return res.json({ success: false, error: 'ยังไม่ได้เลือกรายชื่อ' });
+  let removed = 0;
+  for (const id of ids) if (s.commenters.delete(id)) removed++;
+  res.json({ success: true, removed });
 });
 
 app.post('/api/live/manual-payment/delete', checkAuth, (req, res) => {
