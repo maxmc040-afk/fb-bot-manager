@@ -2343,12 +2343,13 @@ app.get('/', (req, res) => {
                                     <button type="button" onclick="deleteLiveSession()" class="px-4 py-2 text-xs font-semibold rounded-lg bg-rose-50 text-rose-600 border border-rose-200 hover:bg-rose-100">🗑️ ลบ</button>
                                 </div>
                             </div>
-                            <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+                            <div class="grid grid-cols-2 md:grid-cols-6 gap-3">
                                 <div class="bg-slate-50 border border-slate-200 rounded-xl p-3"><div class="text-xs text-slate-500">คอมเมนต์ทั้งหมด</div><div id="lv-stat-comments" class="text-xl font-bold text-slate-800">0</div></div>
                                 <div class="bg-slate-50 border border-slate-200 rounded-xl p-3"><div class="text-xs text-slate-500">ตรงคำดัก</div><div id="lv-stat-matched" class="text-xl font-bold text-blue-600">0</div></div>
                                 <div class="bg-slate-50 border border-slate-200 rounded-xl p-3"><div class="text-xs text-slate-500">คนคอมเมนต์</div><div id="lv-stat-people" class="text-xl font-bold text-slate-800">0</div></div>
                                 <div class="bg-slate-50 border border-slate-200 rounded-xl p-3"><div class="text-xs text-slate-500">สลิปที่ผ่าน</div><div id="lv-stat-slips" class="text-xl font-bold text-emerald-600">0</div></div>
                                 <div class="bg-slate-50 border border-slate-200 rounded-xl p-3"><div class="text-xs text-slate-500">ยอดโอนรวม (บาท)</div><div id="lv-stat-total" class="text-xl font-bold text-emerald-600">0</div></div>
+                                <div class="bg-rose-50 border border-rose-200 rounded-xl p-3" title="รวมเฉพาะลูกค้าที่ใส่ 'ยอดที่ต้องจ่าย' ไว้ในตารางรายชื่อคนคอมเมนต์"><div class="text-xs text-rose-600">ยอดที่ยังขาด (บาท)</div><div id="lv-stat-short" class="text-xl font-bold text-rose-600">0</div><div id="lv-stat-short-sub" class="text-[10px] text-rose-500 mt-0.5"></div></div>
                             </div>
                         </div>
 
@@ -3597,6 +3598,11 @@ app.get('/', (req, res) => {
             document.getElementById('lv-stat-people').innerText = s.stats.uniqueCommenters;
             document.getElementById('lv-stat-slips').innerText = s.stats.slips;
             document.getElementById('lv-stat-total').innerText = fmtMoney(s.stats.slipTotal);
+            const ds = d.dueSummary || {};
+            document.getElementById('lv-stat-short').innerText = fmtMoney(ds.short || 0);
+            document.getElementById('lv-stat-short-sub').innerText = ds.people
+                ? ('ขาด ' + (ds.shortPeople || 0) + ' คน · ยังไม่โอนเลย ' + (ds.unpaidPeople || 0) + ' คน (จาก ' + ds.people + ' คนที่ใส่ยอด)')
+                : 'ใส่ "ยอดที่ต้องจ่าย" ในตารางรายชื่อก่อน';
 
             commenterList = d.commenters || [];
             renderCommenters();
@@ -3867,6 +3873,7 @@ app.get('/', (req, res) => {
                 if(c) c.dueAmount = r.dueAmount;
                 closeDueEditor();
                 renderCommenters();
+                loadLiveDetail(false); // อัปเดตการ์ด "ยอดที่ยังขาด" ด้านบน
             } catch(e) { msg.innerText = '❌ ' + e.message; }
             finally { btn.disabled = false; }
         }
@@ -6164,10 +6171,22 @@ app.get('/api/live/detail', checkAuth, (req, res) => {
     .sort((a, b) => b.lastTime - a.lastTime)
     .slice(0, 300);
 
+  // 💰 สรุปยอดที่ยังขาด (เฉพาะคนที่แอดมินใส่ยอดที่ต้องจ่ายไว้) คิดจากทุกคนใน session
+  const dueSummary = { people: 0, due: 0, paid: 0, short: 0, shortPeople: 0, unpaidPeople: 0 };
+  for (const [userId, c] of s.commenters) {
+    const due = Number(c.dueAmount) || 0;
+    if (!(due > 0)) continue;
+    const got = Math.round((paymentStatusFromIndex(slipIdx, userId, c.psid || psidMap.get(userId)).paidTotal || 0) * 100) / 100;
+    dueSummary.people++; dueSummary.due += due; dueSummary.paid += got;
+    if (got < due) { dueSummary.short += due - got; dueSummary.shortPeople++; if (!(got > 0)) dueSummary.unpaidPeople++; }
+  }
+  dueSummary.short = Math.round(dueSummary.short * 100) / 100;
+
   res.json({
     success: true,
     session: liveSummary(s),
     config: s.config,
+    dueSummary,
     commenters,
     slips: s.slips.slice(-200).reverse(),
     broadcastStatus: s.broadcastStatus,
