@@ -2420,6 +2420,10 @@ app.get('/', (req, res) => {
                                         <option value="unpaid">ตรงคำดัก · ยังไม่โอน</option>
                                         <option value="paid">ตรงคำดัก · โอนแล้ว</option>
                                         <option value="paidNotBuyer">โอนแล้ว · ยังไม่อยู่ในรายชื่อลูกค้า</option>
+                                        <option value="short">💰 ยอดยังไม่ครบ (โอนขาด)</option>
+                                        <option value="over">💰 โอนเกิน</option>
+                                        <option value="full">💰 โอนครบแล้ว</option>
+                                        <option value="noDue">💰 ยังไม่ได้ใส่ยอดที่ต้องจ่าย</option>
                                         <option value="all">ทุกคนที่คอมเมนต์</option>
                                     </select>
                                     <span id="lv-cm-summary"></span>
@@ -2427,7 +2431,7 @@ app.get('/', (req, res) => {
                                 <div id="pager-cm" class="pager-bar flex flex-wrap items-center gap-2 text-xs text-slate-600 mb-2"></div>
                                 <div class="overflow-auto max-h-96">
                                     <table class="w-full text-xs">
-                                        <thead class="text-left text-slate-500 border-b border-slate-200"><tr><th class="py-2 pr-2">✓</th><th class="py-2 pr-2">ชื่อ</th><th class="py-2 pr-2">ครั้ง</th><th class="py-2 pr-2">ตรงคำดัก</th><th class="py-2 pr-2">สถานะโอน</th><th class="py-2 pr-2">คอมเมนต์ล่าสุด</th><th class="py-2 pr-2 text-center">แชท</th><th class="py-2">เวลา</th></tr></thead>
+                                        <thead class="text-left text-slate-500 border-b border-slate-200"><tr><th class="py-2 pr-2">✓</th><th class="py-2 pr-2">ชื่อ</th><th class="py-2 pr-2">ครั้ง</th><th class="py-2 pr-2">ตรงคำดัก</th><th class="py-2 pr-2 whitespace-nowrap">ยอดที่ต้องจ่าย</th><th class="py-2 pr-2">สถานะโอน</th><th class="py-2 pr-2">คอมเมนต์ล่าสุด</th><th class="py-2 pr-2 text-center">แชท</th><th class="py-2">เวลา</th></tr></thead>
                                         <tbody id="lv-commenters"></tbody>
                                     </table>
                                 </div>
@@ -3747,6 +3751,11 @@ app.get('/', (req, res) => {
                 if(!(c.matchedCount > 0)) return false;
                 if(f === 'paid') return c.paid;
                 if(f === 'paidNotBuyer') return c.paid && !c.inBuyers;
+                const due = Number(c.dueAmount) || 0, got = Math.round((Number(c.paidTotal) || 0) * 100) / 100;
+                if(f === 'short') return due > 0 && got < due;
+                if(f === 'over') return due > 0 && got > due;
+                if(f === 'full') return due > 0 && got === due;
+                if(f === 'noDue') return !(due > 0);
                 if(f === 'unpaid') return !c.paid;
                 return true;
             });
@@ -3762,22 +3771,54 @@ app.get('/', (req, res) => {
                         ? '<button type="button" class="inline-block px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-semibold whitespace-nowrap hover:ring-2 hover:ring-emerald-300"' + payBtn + '>✅ โอนแล้ว ' + fmtMoney(c.paidTotal) + ' ฿</button>' + (c.slipCount > 1 ? '<div class="text-[10px] text-slate-400">' + c.slipCount + ' รายการ</div>' : '')
                         : '<button type="button" class="inline-block px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-semibold whitespace-nowrap hover:ring-2 hover:ring-amber-300"' + payBtn + '>⏳ ยังไม่โอน ✎</button>')
                     : '<span class="text-slate-300">-</span>';
+                const due = Number(c.dueAmount) || 0, got = Math.round((Number(c.paidTotal) || 0) * 100) / 100;
+                const dueCell = '<button type="button" data-uid="' + escapeHtml(c.userId) + '" data-name="' + escapeHtml(c.name || c.userId) + '" onclick="editDueAmount(this)" title="คลิกเพื่อใส่/แก้ยอดที่ลูกค้าต้องจ่าย" class="px-2 py-0.5 rounded-md border whitespace-nowrap '
+                    + (due > 0 ? 'border-slate-300 bg-white text-slate-800 font-semibold hover:bg-slate-50">' + fmtMoney(due) + ' ฿ ✎' : 'border-dashed border-slate-300 text-slate-400 hover:bg-slate-50">+ ใส่ยอด') + '</button>';
+                let cmp = '';
+                if(due > 0) {
+                    if(got === due) cmp = '<div class="mt-0.5 text-[11px] font-semibold text-emerald-700">✔ โอนครบ</div>';
+                    else if(got < due) cmp = '<div class="mt-0.5 text-[11px] font-semibold text-rose-600">✖ ขาด ' + fmtMoney(due - got) + ' ฿</div>';
+                    else cmp = '<div class="mt-0.5 text-[11px] font-semibold text-blue-600">▲ เกิน ' + fmtMoney(got - due) + ' ฿</div>';
+                }
                 ch += '<tr data-cid="' + escapeHtml(c.userId) + '" class="border-b border-slate-100">'
                     + '<td class="py-1.5 pr-2"><input type="checkbox" class="cm-sel w-4 h-4 rounded"' + (commenterSel.has(c.userId) ? ' checked' : '') + '></td>'
                     + '<td class="py-1.5 pr-2 font-medium text-slate-700">' + escapeHtml(c.name || c.userId) + (c.inBuyers ? '<div class="text-[10px] text-indigo-500 font-normal">อยู่ในรายชื่อลูกค้าแล้ว</div>' : '')
                         + (c.kwLabelStatus ? '<div class="text-[10px] font-normal ' + (c.kwLabelStatus.charAt(0) === '❌' ? 'text-rose-600' : (c.kwLabelStatus.charAt(0) === '⏳' ? 'text-amber-600' : 'text-pink-600')) + '">🏷️ ' + escapeHtml(c.kwLabelStatus) + '</div>' : '') + '</td>'
                     + '<td class="py-1.5 pr-2">' + c.count + '</td>'
                     + '<td class="py-1.5 pr-2">' + (c.matchedCount > 0 ? '<span class="text-blue-600 font-semibold">' + c.matchedCount + ' (' + escapeHtml(c.lastKeyword) + ')</span>' : '-') + '</td>'
-                    + '<td class="py-1.5 pr-2">' + pay + '</td>'
+                    + '<td class="py-1.5 pr-2">' + dueCell + '</td>'
+                    + '<td class="py-1.5 pr-2">' + pay + cmp + '</td>'
                     + '<td class="py-1.5 pr-2 text-slate-600">' + escapeHtml(c.lastMessage) + '</td>'
                     + '<td class="py-1.5 pr-2 text-center">' + messengerLinkHtml(c) + '</td>'
                     + '<td class="py-1.5 text-slate-500">' + fmtTime(c.lastTime) + '</td></tr>';
             });
-            document.getElementById('lv-commenters').innerHTML = ch || '<tr><td colspan="8" class="py-3 text-slate-400">ยังไม่มีคอมเมนต์</td></tr>';
+            document.getElementById('lv-commenters').innerHTML = ch || '<tr><td colspan="9" class="py-3 text-slate-400">ยังไม่มีคอมเมนต์</td></tr>';
             const matched = commenterList.filter(function(c) { return c.matchedCount > 0; });
             const paid = matched.filter(function(c) { return c.paid; }).length;
-            document.getElementById('lv-cm-summary').innerText = 'ตรงคำดัก ' + matched.length + ' คน · โอนแล้ว ' + paid + ' · ยังไม่โอน ' + (matched.length - paid) + ' · เลือกไว้ ' + commenterSel.size;
+            const withDue = commenterList.filter(function(c) { return Number(c.dueAmount) > 0; });
+            let dueSum = 0, gotSum = 0, nFull = 0, nShort = 0, nOver = 0;
+            withDue.forEach(function(c) { const d = Number(c.dueAmount) || 0, g = Math.round((Number(c.paidTotal) || 0) * 100) / 100; dueSum += d; gotSum += g; if(g === d) nFull++; else if(g < d) nShort++; else nOver++; });
+            document.getElementById('lv-cm-summary').innerText = 'ตรงคำดัก ' + matched.length + ' คน · โอนแล้ว ' + paid + ' · ยังไม่โอน ' + (matched.length - paid) + ' · เลือกไว้ ' + commenterSel.size
+                + (withDue.length ? ' | 💰 ใส่ยอดแล้ว ' + withDue.length + ' คน: ครบ ' + nFull + ' · ขาด ' + nShort + ' · เกิน ' + nOver + ' (ยอดรวม ' + fmtMoney(dueSum) + ' / ได้รับ ' + fmtMoney(gotSum) + ' ฿)' : '');
             document.getElementById('lv-cm-all').checked = list.length > 0 && list.every(function(c) { return commenterSel.has(c.userId); });
+        }
+
+        // 💰 ยอดที่ลูกค้าต้องจ่าย (แอดมินใส่เอง) เทียบกับยอดสลิปรวมทุกใบ
+        async function editDueAmount(btn) {
+            if(!currentLiveId) return;
+            const uid = btn.getAttribute('data-uid');
+            const c = commenterList.find(function(x) { return x.userId === uid; }) || {};
+            const cur = Number(c.dueAmount) > 0 ? String(c.dueAmount) : '';
+            const v = prompt('ยอดที่ ' + (btn.getAttribute('data-name') || '') + ' ต้องจ่าย (บาท)' + NL + 'ยอดสลิปที่โอนมาแล้ว: ' + fmtMoney(Number(c.paidTotal) || 0) + ' ฿ (' + (c.slipCount || 0) + ' สลิป)' + NL + 'เว้นว่าง = ลบยอด', cur);
+            if(v === null) return;
+            try {
+                const r = await (await fetch(liveUrl('/api/live/due-amount', '&sid=' + currentLiveId), {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: uid, amount: v })
+                })).json();
+                if(!r.success) return alert('❌ ' + r.error);
+                c.dueAmount = r.dueAmount;
+                renderCommenters();
+            } catch(e) { alert('❌ ' + e.message); }
         }
 
         // 💬 หน้าต่างแชทในแดชบอร์ด (อ่าน + ตอบลูกค้าผ่าน Facebook API)
@@ -6004,6 +6045,22 @@ app.post('/api/live/manual-payment', checkAuth, (req, res) => {
   const psid = c.psid || getPsidMap(ctx.pageData).get(userId);
   if (psid) labelSlipResult(ctx.pageData, psid, 'valid');
   res.json({ success: true, slip: rec });
+});
+
+// 💰 ใส่/แก้ ยอดที่ลูกค้าต้องจ่าย (เทียบกับยอดสลิปรวม)
+app.post('/api/live/due-amount', checkAuth, (req, res) => {
+  const ctx = getLiveContext(req, res);
+  if (!ctx) return;
+  const s = ctx.live;
+  if (!s) return res.json({ success: false, error: 'ไม่พบ session นี้' });
+  const c = s.commenters.get(String(req.body.userId || ''));
+  if (!c) return res.json({ success: false, error: 'ไม่พบลูกค้าคนนี้ใน session' });
+  const raw = String(req.body.amount ?? '').replace(/[๐-๙]/g, d => String('๐๑๒๓๔๕๖๗๘๙'.indexOf(d))).replace(/[^0-9.]/g, '');
+  if (!raw) { delete c.dueAmount; return res.json({ success: true, dueAmount: 0 }); }
+  const amount = Math.round(parseFloat(raw) * 100) / 100;
+  if (!(amount > 0) || amount > 10000000) return res.json({ success: false, error: 'กรุณาใส่ยอดเงินให้ถูกต้อง' });
+  c.dueAmount = amount;
+  res.json({ success: true, dueAmount: amount });
 });
 
 // 🗑️ ลบรายชื่อคนคอมเมนต์ออกจากตาราง (ไม่ลบสลิป · คอมเมนต์ใหม่จะกลับมาเอง)
