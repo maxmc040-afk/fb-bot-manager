@@ -2343,6 +2343,12 @@ app.get('/', (req, res) => {
                                     <button type="button" onclick="deleteLiveSession()" class="px-4 py-2 text-xs font-semibold rounded-lg bg-rose-50 text-rose-600 border border-rose-200 hover:bg-rose-100">🗑️ ลบ</button>
                                 </div>
                             </div>
+                            <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+                                <label class="block bg-white border border-slate-300 rounded-xl p-3 cursor-text focus-within:border-amber-500 focus-within:ring-2 focus-within:ring-amber-100"><div class="text-xs text-slate-500">📦 ต้นทุน (บาท) ✎</div><input type="number" min="0" step="0.01" id="lv-fin-cost" data-field="cost" onchange="saveLiveFinance(this)" onkeydown="if(event.key==='Enter') this.blur()" placeholder="0" class="w-full bg-transparent text-xl font-bold text-slate-800 focus:outline-none"></label>
+                                <label class="block bg-white border border-slate-300 rounded-xl p-3 cursor-text focus-within:border-amber-500 focus-within:ring-2 focus-within:ring-amber-100"><div class="text-xs text-slate-500">📣 ค่าแอด (บาท) ✎</div><input type="number" min="0" step="0.01" id="lv-fin-ads" data-field="ads" onchange="saveLiveFinance(this)" onkeydown="if(event.key==='Enter') this.blur()" placeholder="0" class="w-full bg-transparent text-xl font-bold text-slate-800 focus:outline-none"></label>
+                                <label class="block bg-white border border-slate-300 rounded-xl p-3 cursor-text focus-within:border-amber-500 focus-within:ring-2 focus-within:ring-amber-100"><div class="text-xs text-slate-500">🚚 ค่าส่ง (บาท) ✎</div><input type="number" min="0" step="0.01" id="lv-fin-shipping" data-field="shipping" onchange="saveLiveFinance(this)" onkeydown="if(event.key==='Enter') this.blur()" placeholder="0" class="w-full bg-transparent text-xl font-bold text-slate-800 focus:outline-none"></label>
+                                <div id="lv-fin-profit-box" class="bg-emerald-50 border border-emerald-200 rounded-xl p-3"><div id="lv-fin-profit-label" class="text-xs text-emerald-700">💹 กำไร (บาท)</div><div id="lv-fin-profit" class="text-xl font-bold text-emerald-700">0</div><div id="lv-fin-profit-sub" class="text-[10px] text-slate-500 mt-0.5"></div></div>
+                            </div>
                             <div class="grid grid-cols-2 md:grid-cols-6 gap-3">
                                 <div class="bg-slate-50 border border-slate-200 rounded-xl p-3"><div class="text-xs text-slate-500">คอมเมนต์ทั้งหมด</div><div id="lv-stat-comments" class="text-xl font-bold text-slate-800">0</div></div>
                                 <div class="bg-slate-50 border border-slate-200 rounded-xl p-3"><div class="text-xs text-slate-500">ตรงคำดัก</div><div id="lv-stat-matched" class="text-xl font-bold text-blue-600">0</div></div>
@@ -3598,6 +3604,7 @@ app.get('/', (req, res) => {
             document.getElementById('lv-stat-people').innerText = s.stats.uniqueCommenters;
             document.getElementById('lv-stat-slips').innerText = s.stats.slips;
             document.getElementById('lv-stat-total').innerText = fmtMoney(s.stats.slipTotal);
+            renderLiveFinance(s);
             const ds = d.dueSummary || {};
             document.getElementById('lv-stat-short').innerText = fmtMoney(ds.short || 0);
             document.getElementById('lv-stat-short-sub').innerText = ds.people
@@ -3828,6 +3835,38 @@ app.get('/', (req, res) => {
         }
 
         // 💰 ยอดที่ลูกค้าต้องจ่าย (แอดมินใส่เอง) เทียบกับยอดสลิปรวมทุกใบ
+        // 📊 กำไร/ขาดทุน ของ session = ยอดโอนรวม - ต้นทุน - ค่าแอด - ค่าส่ง
+        let lastLiveSummary = null;
+        function renderLiveFinance(s) {
+            lastLiveSummary = s;
+            const f = s.finance || {};
+            ['cost', 'ads', 'shipping'].forEach(function(k) {
+                const el = document.getElementById('lv-fin-' + k);
+                if (el && document.activeElement !== el) el.value = Number(f[k]) > 0 ? String(f[k]) : '';
+            });
+            const income = Number(s.stats.slipTotal) || 0;
+            const spend = (Number(f.cost) || 0) + (Number(f.ads) || 0) + (Number(f.shipping) || 0);
+            const profit = Math.round((income - spend) * 100) / 100;
+            const loss = profit < 0;
+            document.getElementById('lv-fin-profit-box').className = (loss ? 'bg-rose-50 border border-rose-200' : 'bg-emerald-50 border border-emerald-200') + ' rounded-xl p-3';
+            document.getElementById('lv-fin-profit-label').className = 'text-xs ' + (loss ? 'text-rose-600' : 'text-emerald-700');
+            document.getElementById('lv-fin-profit-label').innerText = loss ? '📉 ขาดทุน (บาท)' : '💹 กำไร (บาท)';
+            const pv = document.getElementById('lv-fin-profit');
+            pv.className = 'text-xl font-bold ' + (loss ? 'text-rose-600' : 'text-emerald-700');
+            pv.innerText = (loss ? '-' : '') + fmtMoney(Math.abs(profit));
+            document.getElementById('lv-fin-profit-sub').innerText = 'ยอดโอน ' + fmtMoney(income) + ' - ค่าใช้จ่าย ' + fmtMoney(spend);
+        }
+        async function saveLiveFinance(el) {
+            if(!currentLiveId) return;
+            try {
+                const r = await (await fetch(liveUrl('/api/live/finance', '&sid=' + currentLiveId), {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ field: el.getAttribute('data-field'), amount: el.value })
+                })).json();
+                if(!r.success) return alert('❌ ' + r.error);
+                if(lastLiveSummary) { lastLiveSummary.finance = r.finance; renderLiveFinance(lastLiveSummary); }
+            } catch(e) { alert('❌ ' + e.message); }
+        }
+
         let dueEditUid = '';
         function editDueAmount(btn) {
             if(!currentLiveId) return;
@@ -5902,7 +5941,8 @@ function liveSummary(s) {
     stats: {
       comments: s.stats.comments, matched: s.stats.matched,
       uniqueCommenters: s.commenters.size, slips: s.slips.length, slipTotal
-    }
+    },
+    finance: { cost: Number(s.finance?.cost) || 0, ads: Number(s.finance?.ads) || 0, shipping: Number(s.finance?.shipping) || 0 }
   };
 }
 
@@ -6107,6 +6147,22 @@ app.post('/api/live/manual-payment', checkAuth, (req, res) => {
   const psid = c.psid || getPsidMap(ctx.pageData).get(userId);
   if (psid) labelSlipResult(ctx.pageData, psid, 'valid');
   res.json({ success: true, slip: rec });
+});
+
+// 📊 ต้นทุน / ค่าแอด / ค่าส่ง ของ session (แอดมินใส่เอง) ใช้คำนวณกำไร = ยอดโอนรวม - ต้นทุน - ค่าแอด - ค่าส่ง
+app.post('/api/live/finance', checkAuth, (req, res) => {
+  const ctx = getLiveContext(req, res);
+  if (!ctx) return;
+  const s = ctx.live;
+  if (!s) return res.json({ success: false, error: 'ไม่พบ session นี้' });
+  const field = String(req.body.field || '');
+  if (!['cost', 'ads', 'shipping'].includes(field)) return res.json({ success: false, error: 'ช่องไม่ถูกต้อง' });
+  const raw = String(req.body.amount ?? '').replace(/[๐-๙]/g, d => String('๐๑๒๓๔๕๖๗๘๙'.indexOf(d))).replace(/[^0-9.]/g, '');
+  const amount = raw ? Math.round(parseFloat(raw) * 100) / 100 : 0;
+  if (!(amount >= 0) || amount > 100000000) return res.json({ success: false, error: 'กรุณาใส่ยอดเงินให้ถูกต้อง' });
+  if (!s.finance) s.finance = {};
+  s.finance[field] = amount;
+  res.json({ success: true, finance: liveSummary(s).finance });
 });
 
 // 💰 ใส่/แก้ ยอดที่ลูกค้าต้องจ่าย (เทียบกับยอดสลิปรวม)
