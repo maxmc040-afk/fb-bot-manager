@@ -371,7 +371,7 @@ function labelSlipResult(pageData, psid, result) {
       console.error('❌ [Label Error]', pageData.lastLabelError);
     }
     // แสดงผลการติดป้ายในประวัติตรวจสลิป (รายการล่าสุดของลูกค้าคนนี้)
-    const at = (pageData.slipAttempts || []).find(a => a.senderId === psid && Date.now() - a.time < 10 * 60000);
+    const at = (pageData.slipAttempts || []).find(a => a.senderId === psid && a.result !== 'noimage' && Date.now() - a.time < 10 * 60000);
     if (at) at.labelStatus = status;
   }, 'label');
 }
@@ -2231,8 +2231,8 @@ app.get('/', (req, res) => {
                             <div class="mt-3 overflow-auto max-h-96">
                                 <div class="flex justify-end mb-2"><button type="button" onclick="loadSlipStatus()" class="px-3 py-1 text-xs font-medium bg-white border border-slate-300 rounded-lg hover:bg-slate-100">🔄 รีเฟรช</button></div>
                                 <table class="w-full text-xs">
-                                    <thead class="text-left text-slate-500 border-b border-slate-200"><tr><th class="py-1.5 pr-2">เวลา</th><th class="py-1.5 pr-2">ผล</th><th class="py-1.5 pr-2 text-right">ยอด</th><th class="py-1.5 pr-2">รหัส</th><th class="py-1.5">รายละเอียด</th></tr></thead>
-                                    <tbody id="slip-history-body"><tr><td colspan="5" class="py-3 text-slate-400">ยังไม่มีประวัติ</td></tr></tbody>
+                                    <thead class="text-left text-slate-500 border-b border-slate-200"><tr><th class="py-1.5 pr-2">เวลา</th><th class="py-1.5 pr-2">ชื่อเฟส</th><th class="py-1.5 pr-2">ผล</th><th class="py-1.5 pr-2 text-right">ยอด</th><th class="py-1.5 pr-2">รหัส</th><th class="py-1.5">รายละเอียด</th></tr></thead>
+                                    <tbody id="slip-history-body"><tr><td colspan="6" class="py-3 text-slate-400">ยังไม่มีประวัติ</td></tr></tbody>
                                 </table>
                             </div>
                         </details>
@@ -3301,13 +3301,14 @@ app.get('/', (req, res) => {
                 (r.attempts || []).forEach(function(a) {
                     const m = RES[a.result] || [a.result, ''];
                     rows += '<tr class="border-b border-slate-100 align-top"><td class="py-1.5 pr-2 whitespace-nowrap text-slate-500">' + new Date(a.time).toLocaleString('th-TH', { dateStyle: 'short', timeStyle: 'medium' }) + '</td>'
+                        + '<td class="py-1.5 pr-2 text-slate-700 font-medium">' + (a.name ? escapeHtml(a.name) : '<span class="text-slate-400 font-mono text-[10px]">' + escapeHtml(a.senderId || '-') + '</span>') + '</td>'
                         + '<td class="py-1.5 pr-2 whitespace-nowrap font-semibold ' + m[1] + '">' + m[0] + '</td>'
                         + '<td class="py-1.5 pr-2 text-right">' + (a.amount !== undefined && a.amount !== null ? fmtMoney(a.amount) : '-') + '</td>'
                         + '<td class="py-1.5 pr-2 font-mono text-slate-500">' + escapeHtml(a.code || '') + '</td>'
                         + '<td class="py-1.5 text-slate-600">' + escapeHtml(a.note || '') + (a.labelStatus ? '<div class="text-[11px] ' + (a.labelStatus.charAt(0) === '✅' ? 'text-pink-600' : 'text-rose-600') + '">🏷️ ' + escapeHtml(a.labelStatus) + '</div>' : '') + '</td></tr>';
                 });
                 const hb = document.getElementById('slip-history-body');
-                if (hb) hb.innerHTML = rows || '<tr><td colspan="5" class="py-3 text-slate-400">ยังไม่มีประวัติ</td></tr>';
+                if (hb) hb.innerHTML = rows || '<tr><td colspan="6" class="py-3 text-slate-400">ยังไม่มีประวัติ</td></tr>';
             } catch (e) { el.innerText = ''; }
         }
 
@@ -5409,10 +5410,43 @@ app.get('/api/page-token-status', checkAuth, async (req, res) => {
 });
 
 // 🧾 สถานะผู้ให้บริการตรวจสลิป (โควตาคงเหลือ / error ล่าสุด)
-app.get('/api/slip/status', checkAuth, (req, res) => {
+// 👤 ชื่อเฟสของลูกค้าจาก ID แชท (PSID): หาจากรายชื่อในไลฟ์ก่อน ถ้าไม่เจอถาม Facebook แล้วจำไว้
+function knownNameForPsid(pageData, psid) {
+  psid = String(psid || '');
+  if (!psid) return '';
+  const cache = pageData.psidNames || (pageData.psidNames = {});
+  if (cache[psid]) return cache[psid];
+  for (const ls of Object.values(pageData.liveSessions || {})) {
+    for (const c of ls.commenters ? ls.commenters.values() : []) if (c && c.psid === psid && c.name) return (cache[psid] = c.name);
+    if (ls.buyers) for (const b of ls.buyers.values()) if (b && b.psid === psid && b.fbName) return (cache[psid] = b.fbName);
+  }
+  return '';
+}
+async function nameForPsid(pageData, psid) {
+  const known = knownNameForPsid(pageData, psid);
+  if (known || !pageData.config.pageAccessToken) return known;
+  try {
+    const r = await axios.get('https://graph.facebook.com/v19.0/' + encodeURIComponent(psid), { params: { fields: 'name', access_token: pageData.config.pageAccessToken }, timeout: 5000 });
+    const n = r.data && r.data.name ? String(r.data.name) : '';
+    if (n) {
+      const cache = pageData.psidNames || (pageData.psidNames = {});
+      cache[psid] = n;
+      const keys = Object.keys(cache);
+      if (keys.length > 5000) for (const k of keys.slice(0, 1000)) delete cache[k];
+    }
+    return n;
+  } catch (e) { return ''; }
+}
+
+app.get('/api/slip/status', checkAuth, async (req, res) => {
   const pageData = usersDB[req.userId]?.pages[req.query.pageId];
   if (!pageData) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
-  res.json({ success: true, provider: pageData.config.slipProvider || 'zwiz', quota: pageData.slipQuota || null, lastError: pageData.lastSlipError || null, attempts: (pageData.slipAttempts || []).slice(0, 30) });
+  const attempts = (pageData.slipAttempts || []).slice(0, 30);
+  // เติมชื่อเฟสของคนส่ง (ถาม Facebook เฉพาะคนที่ยังไม่รู้ชื่อ ไม่เกิน 10 คนต่อครั้ง)
+  const missing = Array.from(new Set(attempts.filter(a => a.senderId && !a.name && !knownNameForPsid(pageData, a.senderId)).map(a => a.senderId))).slice(0, 10);
+  await Promise.all(missing.map(id => nameForPsid(pageData, id)));
+  for (const a of attempts) if (!a.name && a.senderId) { const n = knownNameForPsid(pageData, a.senderId); if (n) a.name = n; }
+  res.json({ success: true, provider: pageData.config.slipProvider || 'zwiz', quota: pageData.slipQuota || null, lastError: pageData.lastSlipError || null, attempts });
 });
 
 // 🏷️ รายชื่อป้ายกำกับที่มีอยู่ในเพจ (ตัวเลือกในหน้าตั้งค่าสลิป)
@@ -7151,7 +7185,8 @@ async function processSlipImage(targetRecord, pageId, senderId, imageUrl, attemp
 // ประวัติการตรวจสลิปล่าสุด (แสดงในหน้าตั้งค่าสลิป ช่วยดูสาเหตุที่ไม่ผ่าน)
 function logSlipAttempt(pageData, rec) {
   if (!pageData.slipAttempts) pageData.slipAttempts = [];
-  pageData.slipAttempts.unshift({ time: Date.now(), ...rec, amount: rec.amount !== undefined ? Number(rec.amount) || 0 : undefined });
+  const name = rec.name || (rec.senderId ? knownNameForPsid(pageData, rec.senderId) : '');
+  pageData.slipAttempts.unshift({ time: Date.now(), ...rec, name, amount: rec.amount !== undefined ? Number(rec.amount) || 0 : undefined });
   if (pageData.slipAttempts.length > 50) pageData.slipAttempts.length = 50;
 }
 const BANK_CODE_NAMES = { '002': 'กรุงเทพ', '004': 'กสิกรไทย', '006': 'กรุงไทย', '011': 'ทีทีบี', '014': 'ไทยพาณิชย์', '022': 'ซีไอเอ็มบี', '024': 'ยูโอบี', '025': 'กรุงศรี', '030': 'ออมสิน', '033': 'อาคารสงเคราะห์', '034': 'ธ.ก.ส.', '067': 'ทิสโก้', '069': 'เกียรตินาคิน', '073': 'แลนด์แอนด์เฮ้าส์' };
@@ -7222,7 +7257,9 @@ app.post('/webhook', async (req, res) => {
             if (types !== 'image') console.log(`📎 [Page: ${pageId}] ไฟล์แนบชนิด ${types} จาก ${senderId} · พบรูป ${urls.length}`);
             if (!urls.length) {
               const onlyStickers = msgEvent.message.attachments.every(a => a && a.type === 'image');
-              if (!onlyStickers) {
+              // การ์ด template ที่ไม่มีข้อมูล (Messenger แปลงสลิปเป็นการ์ด "ตรวจสอบยืนยันสลิป") -> รูปสลิปตัวจริงมาเป็นอีกข้อความ ไม่ต้องบันทึก
+              const emptyCards = msgEvent.message.attachments.every(a => a && a.type !== 'image' && (!a.payload || !Object.keys(a.payload).length));
+              if (!onlyStickers && !emptyCards) {
                 // บันทึกไว้ดูในประวัติตรวจสลิป เผื่อ Facebook ส่งสลิปมาในรูปแบบที่ยังไม่รองรับ
                 let raw = ''; try { raw = JSON.stringify(msgEvent.message.attachments).slice(0, 300); } catch (e) {}
                 logSlipAttempt(targetRecord.pageData, { senderId, provider: '-', result: 'noimage', code: types, note: 'ได้รับไฟล์แนบแต่ไม่พบรูปสลิป · ' + raw });
