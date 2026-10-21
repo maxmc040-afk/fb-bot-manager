@@ -2427,7 +2427,7 @@ app.get('/', (req, res) => {
                                 <div id="pager-cm" class="pager-bar flex flex-wrap items-center gap-2 text-xs text-slate-600 mb-2"></div>
                                 <div class="overflow-auto max-h-96">
                                     <table class="w-full text-xs">
-                                        <thead class="text-left text-slate-500 border-b border-slate-200"><tr><th class="py-2 pr-2">✓</th><th class="py-2 pr-2">ชื่อ</th><th class="py-2 pr-2">ครั้ง</th><th class="py-2 pr-2">ตรงคำดัก</th><th class="py-2 pr-2">สถานะโอน</th><th class="py-2 pr-2">คอมเมนต์ล่าสุด</th><th class="py-2">เวลา</th></tr></thead>
+                                        <thead class="text-left text-slate-500 border-b border-slate-200"><tr><th class="py-2 pr-2">✓</th><th class="py-2 pr-2">ชื่อ</th><th class="py-2 pr-2">ครั้ง</th><th class="py-2 pr-2">ตรงคำดัก</th><th class="py-2 pr-2">สถานะโอน</th><th class="py-2 pr-2">คอมเมนต์ล่าสุด</th><th class="py-2 pr-2 text-center">แชท</th><th class="py-2">เวลา</th></tr></thead>
                                         <tbody id="lv-commenters"></tbody>
                                     </table>
                                 </div>
@@ -3747,13 +3747,24 @@ app.get('/', (req, res) => {
                     + '<td class="py-1.5 pr-2">' + (c.matchedCount > 0 ? '<span class="text-blue-600 font-semibold">' + c.matchedCount + ' (' + escapeHtml(c.lastKeyword) + ')</span>' : '-') + '</td>'
                     + '<td class="py-1.5 pr-2">' + pay + '</td>'
                     + '<td class="py-1.5 pr-2 text-slate-600">' + escapeHtml(c.lastMessage) + '</td>'
+                    + '<td class="py-1.5 pr-2 text-center">' + messengerLinkHtml(c) + '</td>'
                     + '<td class="py-1.5 text-slate-500">' + fmtTime(c.lastTime) + '</td></tr>';
             });
-            document.getElementById('lv-commenters').innerHTML = ch || '<tr><td colspan="7" class="py-3 text-slate-400">ยังไม่มีคอมเมนต์</td></tr>';
+            document.getElementById('lv-commenters').innerHTML = ch || '<tr><td colspan="8" class="py-3 text-slate-400">ยังไม่มีคอมเมนต์</td></tr>';
             const matched = commenterList.filter(function(c) { return c.matchedCount > 0; });
             const paid = matched.filter(function(c) { return c.paid; }).length;
             document.getElementById('lv-cm-summary').innerText = 'ตรงคำดัก ' + matched.length + ' คน · โอนแล้ว ' + paid + ' · ยังไม่โอน ' + (matched.length - paid) + ' · เลือกไว้ ' + commenterSel.size;
             document.getElementById('lv-cm-all').checked = list.length > 0 && list.every(function(c) { return commenterSel.has(c.userId); });
+        }
+
+        // 💬 ปุ่มเปิดแชทของลูกค้าใน Meta Business Suite (แท็บใหม่)
+        function messengerLinkHtml(c) {
+            const pid = (currentConfig && currentConfig.pageId) || currentActivePageId;
+            const uid = c.chatId || c.userId;
+            if(!pid || !uid) return '';
+            const url = 'https://business.facebook.com/latest/inbox/all?asset_id=' + encodeURIComponent(pid) + '&selected_item_id=' + encodeURIComponent(uid) + '&thread_type=FB_MESSAGE&mailbox_id=' + encodeURIComponent(pid);
+            const svg = '<svg viewBox="0 0 24 24" class="w-5 h-5"><circle cx="12" cy="12" r="12" fill="#0866FF"/><path fill="#fff" d="M5.9 14.6l3.1-4.9c.5-.8 1.5-1 2.3-.4l2.4 1.8c.2.2.5.2.8 0l3.3-2.5c.4-.3 1 .2.7.6l-3.1 4.9c-.5.8-1.5 1-2.3.4l-2.4-1.8c-.2-.2-.5-.2-.8 0l-3.3 2.5c-.4.3-1-.2-.7-.6z"/></svg>';
+            return '<a href="' + escapeHtml(url) + '" target="_blank" rel="noopener" title="เปิดแชทของ ' + escapeHtml(c.name || '') + ' ใน Business Suite' + (c.chatId ? '' : ' (ยังไม่มี ID แชท ใช้ ID คอมเมนต์แทน)') + '" class="inline-flex items-center justify-center hover:scale-110 transition' + (c.chatId ? '' : ' opacity-50') + '">' + svg + '</a>';
         }
 
         function toggleAllCommenters(on) {
@@ -4869,7 +4880,21 @@ app.get('/', (req, res) => {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ userIds: todo.map(function(b) { return b.userId; }), labelUserIds: uids })
                 });
-                const d = await res.json();
+                let d = await res.json();
+                if(!d.success && d.duplicates && d.duplicates.length) {
+                    // 🛡️ กันสร้างใบแปะหน้าซ้ำ: เคยสร้างพัสดุให้คนนี้แล้วภายใน 1 วัน
+                    let dm = '⚠️ พบ ' + d.duplicates.length + ' คนที่เคยสร้างพัสดุไปแล้วภายใน 1 วัน (24 ชม.):' + NL;
+                    d.duplicates.slice(0, 15).forEach(function(x) { dm += '• ' + x.name + ' · ' + (x.trackingNo || 'รอเลขพัสดุ') + ' (' + x.session + ' ' + new Date(x.at).toLocaleString('th-TH', { dateStyle: 'short', timeStyle: 'short' }) + ')' + NL; });
+                    dm += NL + 'กด "ตกลง" = สร้างใหม่ทั้งหมด (ซ้ำ)' + NL + 'กด "ยกเลิก" = ข้ามคนที่ซ้ำ สร้างเฉพาะคนที่เหลือ';
+                    const dupIds = d.duplicates.map(function(x) { return x.userId; });
+                    const again = confirm(dm);
+                    const sendIds = todo.map(function(b) { return b.userId; }).filter(function(id) { return again || dupIds.indexOf(id) < 0; });
+                    if(!sendIds.length) { w.close(); return alert('ไม่มีรายการที่ต้องสร้างใหม่'); }
+                    d = await (await fetch(liveUrl('/api/live/beemove/create', '&sid=' + currentLiveId), {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ userIds: sendIds, labelUserIds: uids, force: true })
+                    })).json();
+                }
                 if(!d.success) { w.close(); return alert('❌ ' + d.error); }
                 lastShipJob = null; // ไม่ใช้สถานะของรอบก่อน
                 if(buyersPoll) clearInterval(buyersPoll);
@@ -5760,6 +5785,7 @@ app.get('/api/live/detail', checkAuth, (req, res) => {
       return {
         userId, ...pub,
         ...paymentStatusFromIndex(slipIdx, userId, c.psid || psidMap.get(userId)),
+        chatId: c.psid || psidMap.get(userId) || '',
         inBuyers: !!(s.buyers && s.buyers.has(userId))
       };
     })
@@ -6432,6 +6458,22 @@ app.post('/api/beemove/test', checkAuth, async (req, res) => {
   res.json(out);
 });
 
+// 🛡️ ประวัติการสร้างพัสดุของเพจ (ทุก session) ใช้กันสร้างใบแปะหน้าซ้ำ แม้ลบแถวลูกค้าหรือดึงเข้า session ใหม่
+const SHIP_DUP_DAYS = 1;
+function shipPhoneKey(p) { const d = String(p || '').replace(/\D/g, ''); return d.length >= 9 ? d.slice(-9) : ''; }
+function recordShipLog(pageData, s, item) {
+  if (!pageData.shipLog) pageData.shipLog = [];
+  pageData.shipLog.unshift({ uid: item.userId || '', psid: item.psid || '', phone: shipPhoneKey(item.phone), name: item.recipientName || item.fbName || '',
+    trackingNo: item.trackingNo || '', orderId: item.beemoveOrderId || '', sid: s.id || '', sname: s.name || '', at: Date.now() });
+  if (pageData.shipLog.length > 3000) pageData.shipLog.length = 3000;
+}
+function findShipDuplicate(pageData, s, uid, item) {
+  const since = Date.now() - SHIP_DUP_DAYS * 86400000;
+  const phone = shipPhoneKey(item.phone);
+  return (pageData.shipLog || []).find(l => l.at >= since && !(l.sid === s.id && l.orderId && l.orderId === item.beemoveOrderId) &&
+    (l.uid === uid || (item.psid && l.psid === item.psid) || (phone && l.phone === phone))) || null;
+}
+
 async function runShipJob(pageData, s, userIds, labelUserIds) {
   const job = s.shipJob;
   const bm = getBeemoveConfig(pageData);
@@ -6441,7 +6483,9 @@ async function runShipJob(pageData, s, userIds, labelUserIds) {
   const one = async (uid) => {
     const item = s.buyers.get(uid);
     if (!item) { job.done++; return; }
-    if (item.trackingNo) { job.done++; job.skipped++; return; }
+    // มีเลขพัสดุ / มีออเดอร์ Bee Move อยู่แล้ว (รอเลขจากขนส่ง) -> ไม่สร้างซ้ำ
+    if (item.trackingNo || item.beemoveOrderId || item.shipBusy) { job.done++; job.skipped++; return; }
+    item.shipBusy = true;
     job.message = 'กำลังสร้างพัสดุ: ' + (item.recipientName || item.fbName || uid);
     try {
       const remark = (item.fbName || '') + ' ' + (item.keyword || '') + 'x' + (item.matchedCount || 0);
@@ -6451,6 +6495,7 @@ async function runShipJob(pageData, s, userIds, labelUserIds) {
       item.partnerName = r.partnerName;
       item.shipStatus = 'created';
       item.shipNote = r.trackingNo ? '' : 'สร้างแล้ว รอเลขพัสดุจากขนส่ง';
+      recordShipLog(pageData, s, { ...item, userId: uid });
       job.created++;
       // ⚡ ส่งเลขพัสดุให้ลูกค้าทางแชทแบบเบื้องหลัง ไม่ต้องรอ
       if (token) runTask(() => autoNotifyTracking(pageData, bm, item), 'notify-tracking');
@@ -6459,6 +6504,7 @@ async function runShipJob(pageData, s, userIds, labelUserIds) {
       item.shipNote = e.response ? beemoveError(e) : e.message;
       job.failed++;
     }
+    item.shipBusy = false;
     job.done++;
   };
 
@@ -6488,8 +6534,19 @@ app.post('/api/live/beemove/create', checkAuth, (req, res) => {
   const loginMode = !bm.authMode || bm.authMode === 'login';
   if (loginMode && (!bm.username || !bm.password)) return res.json({ success: false, error: 'ยังไม่ได้ใส่เบอร์โทรและรหัสผ่าน Bee Move (เมนู 🚚 ขนส่ง Bee Move)' });
   if (!loginMode && !bm.apiKey) return res.json({ success: false, error: 'ยังไม่ได้ใส่ API Key ของ Bee Move (เมนู 🚚 ขนส่ง Bee Move)' });
-  const userIds = (Array.isArray(req.body.userIds) ? req.body.userIds : []).map(String).filter(id => s.buyers.has(id));
+  const userIds = Array.from(new Set((Array.isArray(req.body.userIds) ? req.body.userIds : []).map(String))).filter(id => s.buyers.has(id));
   if (!userIds.length) return res.json({ success: false, error: 'กรุณาเลือกลูกค้าอย่างน้อย 1 คน' });
+  // 🛡️ เคยสร้างพัสดุให้ลูกค้าคนนี้ (ชื่อเฟส / แชท / เบอร์โทรเดียวกัน) ภายใน 1 วัน -> ถามยืนยันก่อน
+  if (!req.body.force) {
+    const dups = [];
+    for (const id of userIds) {
+      const it = s.buyers.get(id);
+      if (!it || it.trackingNo || it.beemoveOrderId) continue;
+      const d = findShipDuplicate(ctx.pageData, s, id, it);
+      if (d) dups.push({ userId: id, name: it.recipientName || it.fbName || id, trackingNo: d.trackingNo, session: d.sid === s.id ? 'session นี้' : (d.sname || 'session อื่น'), at: d.at });
+    }
+    if (dups.length) return res.json({ success: false, duplicates: dups, error: 'พบลูกค้าที่เคยสร้างพัสดุแล้ว' });
+  }
 
   s.shipJob = { running: true, total: userIds.length, done: 0, created: 0, failed: 0, skipped: 0, message: 'กำลังเริ่มสร้างพัสดุ...', shouldStop: false };
   res.json({ success: true });
