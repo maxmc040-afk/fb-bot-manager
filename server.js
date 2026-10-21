@@ -3759,12 +3759,11 @@ app.get('/', (req, res) => {
 
         // 💬 ปุ่มเปิดแชทของลูกค้าใน Meta Business Suite (แท็บใหม่)
         function messengerLinkHtml(c) {
-            const pid = (currentConfig && currentConfig.pageId) || currentActivePageId;
-            const uid = c.chatId || c.userId;
-            if(!pid || !uid) return '';
-            const url = 'https://business.facebook.com/latest/inbox/all?asset_id=' + encodeURIComponent(pid) + '&selected_item_id=' + encodeURIComponent(uid) + '&thread_type=FB_MESSAGE&mailbox_id=' + encodeURIComponent(pid);
+            if(!currentActivePageId || !c.userId) return '';
+            // ให้เซิร์ฟเวอร์หาห้องแชทจริงจาก Facebook แล้วพาไป (ลิงก์ที่สร้างเองจาก ID แชท เปิดใน Business Suite ไม่ได้)
+            const url = '/api/chat-link?token=' + encodeURIComponent(authToken) + '&pageId=' + encodeURIComponent(currentActivePageId) + '&sid=' + encodeURIComponent(currentLiveId || '') + '&uid=' + encodeURIComponent(c.userId) + (c.chatId ? '&psid=' + encodeURIComponent(c.chatId) : '');
             const svg = '<svg viewBox="0 0 24 24" class="w-5 h-5"><circle cx="12" cy="12" r="12" fill="#0866FF"/><path fill="#fff" d="M5.9 14.6l3.1-4.9c.5-.8 1.5-1 2.3-.4l2.4 1.8c.2.2.5.2.8 0l3.3-2.5c.4-.3 1 .2.7.6l-3.1 4.9c-.5.8-1.5 1-2.3.4l-2.4-1.8c-.2-.2-.5-.2-.8 0l-3.3 2.5c-.4.3-1-.2-.7-.6z"/></svg>';
-            return '<a href="' + escapeHtml(url) + '" target="_blank" rel="noopener" title="เปิดแชทของ ' + escapeHtml(c.name || '') + ' ใน Business Suite' + (c.chatId ? '' : ' (ยังไม่มี ID แชท ใช้ ID คอมเมนต์แทน)') + '" class="inline-flex items-center justify-center hover:scale-110 transition' + (c.chatId ? '' : ' opacity-50') + '">' + svg + '</a>';
+            return '<a href="' + escapeHtml(url) + '" target="_blank" rel="noopener" title="เปิดแชทของ ' + escapeHtml(c.name || '') + ' ใน Business Suite' + (c.chatId ? '' : ' (ยังไม่มี ID แชท จะเปิดกล่องข้อความรวม)') + '" class="inline-flex items-center justify-center hover:scale-110 transition' + (c.chatId ? '' : ' opacity-50') + '">' + svg + '</a>';
         }
 
         function toggleAllCommenters(on) {
@@ -5665,6 +5664,38 @@ function getLiveContext(req, res) {
   const live = getLiveSessions(pageData)[req.query.sid];
   return { pageData, live };
 }
+
+// 💬 เปิดแชทของลูกค้า: หาห้องแชทจริงจาก Facebook (conversations?user_id=PSID) แล้วพาไปที่ลิงก์ของห้องนั้น
+const chatLinkCache = new Map();
+app.get('/api/chat-link', checkAuth, async (req, res) => {
+  const pageData = usersDB[req.userId]?.pages[req.query.pageId];
+  const pid = pageData ? (pageData.config.pageId || req.query.pageId) : '';
+  const inbox = 'https://business.facebook.com/latest/inbox/all?asset_id=' + encodeURIComponent(pid) + '&mailbox_id=' + encodeURIComponent(pid);
+  if (!pageData) return res.status(404).send('ไม่พบข้อมูลเพจนี้');
+  const uid = String(req.query.uid || '');
+  const live = req.query.sid ? getLiveSessions(pageData)[req.query.sid] : null;
+  const c = live && live.commenters.get(uid);
+  const psid = String(req.query.psid || (c && c.psid) || getPsidMap(pageData).get(uid) || '');
+  if (!psid) return res.redirect(inbox); // ยังไม่มี ID แชท (ยังไม่เคยส่งข้อความเข้าแชท) -> เปิดกล่องข้อความรวม
+  const key = pid + ':' + psid;
+  const hit = chatLinkCache.get(key);
+  if (hit && Date.now() - hit.at < 30 * 60000) return res.redirect(hit.url);
+  let url = '';
+  try {
+    const r = await axios.get('https://graph.facebook.com/v19.0/' + encodeURIComponent(pid) + '/conversations', {
+      params: { platform: 'messenger', user_id: psid, fields: 'id,link', access_token: pageData.config.pageAccessToken }, timeout: 15000
+    });
+    const conv = (r.data && r.data.data || [])[0];
+    if (conv && conv.link) url = /^https?:/i.test(conv.link) ? conv.link : 'https://www.facebook.com' + (conv.link.charAt(0) === '/' ? '' : '/') + conv.link;
+    console.log('💬 [Chat Link] ' + psid + ' -> ' + (conv ? conv.id + ' ' + conv.link : 'ไม่พบห้องแชท'));
+  } catch (e) {
+    console.error('❌ [Chat Link]', e.response?.data?.error?.message || e.message);
+  }
+  if (!url) url = inbox + '&selected_item_id=' + encodeURIComponent(psid) + '&thread_type=FB_MESSAGE';
+  chatLinkCache.set(key, { url, at: Date.now() });
+  if (chatLinkCache.size > 5000) chatLinkCache.delete(chatLinkCache.keys().next().value);
+  res.redirect(url);
+});
 
 app.get('/api/live/list', checkAuth, (req, res) => {
   const pageData = usersDB[req.userId]?.pages[req.query.pageId];
