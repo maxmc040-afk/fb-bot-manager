@@ -2427,7 +2427,7 @@ app.get('/', (req, res) => {
                                 <div id="pager-cm" class="pager-bar flex flex-wrap items-center gap-2 text-xs text-slate-600 mb-2"></div>
                                 <div class="overflow-auto max-h-96">
                                     <table class="w-full text-xs">
-                                        <thead class="text-left text-slate-500 border-b border-slate-200"><tr><th class="py-2 pr-2">✓</th><th class="py-2 pr-2">ชื่อ</th><th class="py-2 pr-2">ครั้ง</th><th class="py-2 pr-2">ตรงคำดัก</th><th class="py-2 pr-2">สถานะโอน</th><th class="py-2 pr-2">คอมเมนต์ล่าสุด</th><th class="py-2 pr-2 text-center">แชท</th><th class="py-2">เวลา</th></tr></thead>
+                                        <thead class="text-left text-slate-500 border-b border-slate-200"><tr><th class="py-2 pr-2">✓</th><th class="py-2 pr-2">ชื่อ</th><th class="py-2 pr-2">ครั้ง</th><th class="py-2 pr-2">ตรงคำดัก</th><th class="py-2 pr-2">สถานะโอน</th><th class="py-2 pr-2">คอมเมนต์ล่าสุด</th><th class="py-2 pr-2 text-center whitespace-nowrap">แชท</th><th class="py-2">เวลา</th></tr></thead>
                                         <tbody id="lv-commenters"></tbody>
                                     </table>
                                 </div>
@@ -2777,6 +2777,28 @@ app.get('/', (req, res) => {
                     <div class="flex justify-end gap-2 pt-1">
                         <button type="button" onclick="closePayEditor()" class="px-4 py-2 text-sm rounded-xl border border-slate-300 bg-white hover:bg-slate-50">ยกเลิก</button>
                         <button type="button" id="pay-editor-save" onclick="savePayEditor()" class="px-4 py-2 text-sm font-semibold rounded-xl bg-emerald-600 text-white hover:bg-emerald-700">💾 บันทึก เป็นโอนแล้ว</button>
+                    </div>
+                </div>
+            </div>
+            <div id="chat-box" class="hidden fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-2 sm:p-4" onclick="if(event.target===this) closeChatBox()">
+                <div class="bg-white rounded-2xl shadow-xl border border-slate-200 w-full max-w-lg flex flex-col" style="height:min(640px,92vh)">
+                    <div class="flex items-center gap-2 px-4 py-3 border-b border-slate-200">
+                        <div class="w-8 h-8 rounded-full bg-[#0866FF] text-white flex items-center justify-center text-sm font-bold" id="chat-box-avatar">?</div>
+                        <div class="flex-1 min-w-0">
+                            <div class="font-bold text-slate-800 truncate" id="chat-box-name"></div>
+                            <div class="text-[11px] text-slate-500 truncate" id="chat-box-sub"></div>
+                        </div>
+                        <button type="button" onclick="loadChatBox(true)" title="โหลดใหม่" class="px-2 py-1 text-sm rounded-lg hover:bg-slate-100">🔄</button>
+                        <button type="button" onclick="closeChatBox()" title="ปิด" class="px-2 py-1 text-sm rounded-lg hover:bg-slate-100">✕</button>
+                    </div>
+                    <div id="chat-box-list" class="flex-1 overflow-y-auto px-3 py-3 space-y-2 bg-slate-50"></div>
+                    <div class="border-t border-slate-200 p-3 space-y-2">
+                        <div id="chat-box-msg" class="text-xs text-rose-600"></div>
+                        <div class="flex gap-2 items-end">
+                            <textarea id="chat-box-input" rows="2" class="flex-1 p-2 text-sm border border-slate-300 rounded-xl resize-none focus:outline-none focus:border-[#0866FF]" placeholder="พิมพ์ข้อความ... (Enter = ส่ง · Shift+Enter = ขึ้นบรรทัดใหม่)"></textarea>
+                            <button type="button" id="chat-box-send" onclick="sendChatBox()" class="px-4 py-2 text-sm font-semibold rounded-xl bg-[#0866FF] text-white hover:opacity-90">ส่ง</button>
+                        </div>
+                        <div class="text-[10px] text-slate-400">ส่งข้อความได้ภายใน 24 ชม. หลังลูกค้าทักล่าสุด (กฎ Facebook) · <a href="#" onclick="copyNameOpenInbox(); return false;" class="text-[#0866FF] hover:underline">คัดลอกชื่อ + เปิด Business Suite</a></div>
                     </div>
                 </div>
             </div>
@@ -3747,7 +3769,7 @@ app.get('/', (req, res) => {
                     + '<td class="py-1.5 pr-2">' + (c.matchedCount > 0 ? '<span class="text-blue-600 font-semibold">' + c.matchedCount + ' (' + escapeHtml(c.lastKeyword) + ')</span>' : '-') + '</td>'
                     + '<td class="py-1.5 pr-2">' + pay + '</td>'
                     + '<td class="py-1.5 pr-2 text-slate-600">' + escapeHtml(c.lastMessage) + '</td>'
-                    + '<td class="py-1.5 pr-2 text-center">' + messengerLinkHtml(c) + '</td>'
+                    + '<td class="py-1.5 pr-2 text-center whitespace-nowrap">' + messengerLinkHtml(c) + '</td>'
                     + '<td class="py-1.5 text-slate-500">' + fmtTime(c.lastTime) + '</td></tr>';
             });
             document.getElementById('lv-commenters').innerHTML = ch || '<tr><td colspan="8" class="py-3 text-slate-400">ยังไม่มีคอมเมนต์</td></tr>';
@@ -3757,13 +3779,126 @@ app.get('/', (req, res) => {
             document.getElementById('lv-cm-all').checked = list.length > 0 && list.every(function(c) { return commenterSel.has(c.userId); });
         }
 
-        // 💬 ปุ่มเปิดแชทของลูกค้าใน Meta Business Suite (แท็บใหม่)
+        // 💬 หน้าต่างแชทในแดชบอร์ด (อ่าน + ตอบลูกค้าผ่าน Facebook API)
+        let chatBoxUid = '', chatBoxPsid = '', chatBoxName = '', chatBoxPoll = null, chatBoxLastKey = '';
+        function openChatBox(btn) {
+            chatBoxUid = btn.getAttribute('data-uid') || '';
+            chatBoxPsid = btn.getAttribute('data-psid') || '';
+            chatBoxName = btn.getAttribute('data-name') || '';
+            chatBoxLastKey = '';
+            document.getElementById('chat-box-name').innerText = chatBoxName;
+            document.getElementById('chat-box-avatar').innerText = (chatBoxName || '?').charAt(0);
+            document.getElementById('chat-box-sub').innerText = 'กำลังโหลด...';
+            document.getElementById('chat-box-list').innerHTML = '<div class="text-center text-xs text-slate-400 py-8">กำลังโหลดข้อความ...</div>';
+            document.getElementById('chat-box-msg').innerText = '';
+            document.getElementById('chat-box-input').value = '';
+            document.getElementById('chat-box').classList.remove('hidden');
+            loadChatBox(true);
+            if(chatBoxPoll) clearInterval(chatBoxPoll);
+            chatBoxPoll = setInterval(function() { if(!document.hidden) loadChatBox(false); }, 5000);
+            setTimeout(function() { document.getElementById('chat-box-input').focus(); }, 50);
+        }
+        function closeChatBox() {
+            document.getElementById('chat-box').classList.add('hidden');
+            if(chatBoxPoll) clearInterval(chatBoxPoll);
+            chatBoxPoll = null; chatBoxUid = '';
+        }
+        function chatQuery() {
+            return '?token=' + encodeURIComponent(authToken) + '&pageId=' + encodeURIComponent(currentActivePageId) + '&sid=' + encodeURIComponent(currentLiveId || '')
+                + '&uid=' + encodeURIComponent(chatBoxUid) + '&psid=' + encodeURIComponent(chatBoxPsid);
+        }
+        function chatTime(t) {
+            const d = new Date(t);
+            const today = new Date().toDateString() === d.toDateString();
+            return today ? d.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }) : d.toLocaleString('th-TH', { dateStyle: 'short', timeStyle: 'short' });
+        }
+        async function loadChatBox(force) {
+            if(!chatBoxUid) return;
+            const uid = chatBoxUid;
+            try {
+                const r = await (await fetch('/api/chat/messages' + chatQuery())).json();
+                if(uid !== chatBoxUid) return;
+                const sub = document.getElementById('chat-box-sub');
+                const list = document.getElementById('chat-box-list');
+                if(!r.success) { sub.innerText = ''; list.innerHTML = '<div class="text-center text-xs text-rose-500 py-8">❌ ' + escapeHtml(r.error || 'โหลดไม่สำเร็จ') + '</div>'; return; }
+                if(r.psid) chatBoxPsid = r.psid;
+                sub.innerText = r.psid ? (r.canReply ? '🟢 ตอบได้ (ลูกค้าทักล่าสุด ' + (r.lastInbound ? chatTime(r.lastInbound) : '-') + ')' : '⚪ เกิน 24 ชม. หลังลูกค้าทักล่าสุด (ส่งไม่ได้จนกว่าลูกค้าจะทักมาใหม่)')
+                    : (r.canPrivateReply ? '💬 ยังไม่มีแชท · ส่งข้อความแรกจากคอมเมนต์ได้ 1 ครั้ง' : 'ลูกค้ายังไม่มีแชทกับเพจ');
+                const key = (r.messages || []).map(function(m) { return m.id; }).join(',');
+                if(!force && key === chatBoxLastKey) return;
+                chatBoxLastKey = key;
+                let html = '';
+                (r.messages || []).forEach(function(m) {
+                    const mine = m.fromPage;
+                    let body = m.text ? escapeHtml(m.text).split(NL).join('<br>') : '';
+                    (m.images || []).forEach(function(u) { body += '<a href="' + escapeHtml(u) + '" target="_blank" rel="noopener"><img src="' + escapeHtml(u) + '" class="mt-1 max-w-[220px] max-h-[260px] rounded-lg border border-slate-200"></a>'; });
+                    (m.files || []).forEach(function(f) { body += '<div class="mt-1"><a href="' + escapeHtml(f.url) + '" target="_blank" rel="noopener" class="underline">📎 ' + escapeHtml(f.name || 'ไฟล์แนบ') + '</a></div>'; });
+                    if(!body) body = '<span class="italic opacity-60">(สติกเกอร์ / ไฟล์แนบ)</span>';
+                    html += '<div class="flex ' + (mine ? 'justify-end' : 'justify-start') + '"><div class="max-w-[80%]">'
+                        + '<div class="px-3 py-2 rounded-2xl text-sm whitespace-normal break-words ' + (mine ? 'bg-[#0866FF] text-white rounded-br-md' : 'bg-white border border-slate-200 text-slate-800 rounded-bl-md') + '">' + body + '</div>'
+                        + '<div class="text-[10px] text-slate-400 mt-0.5 ' + (mine ? 'text-right' : '') + '">' + chatTime(m.time) + '</div></div></div>';
+                });
+                list.innerHTML = html || '<div class="text-center text-xs text-slate-400 py-8">' + (r.psid ? 'ยังไม่มีข้อความ' : 'ลูกค้ายังไม่เคยแชทกับเพจ') + '</div>';
+                list.scrollTop = list.scrollHeight;
+            } catch(e) { document.getElementById('chat-box-sub').innerText = '❌ ' + e.message; }
+        }
+        async function sendChatBox() {
+            const input = document.getElementById('chat-box-input');
+            const text = input.value.trim();
+            const msg = document.getElementById('chat-box-msg');
+            if(!text || !chatBoxUid) return;
+            const btn = document.getElementById('chat-box-send');
+            btn.disabled = true; msg.innerText = '';
+            try {
+                const r = await (await fetch('/api/chat/send' + chatQuery(), {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: text })
+                })).json();
+                if(!r.success) { msg.innerText = '❌ ' + r.error; return; }
+                if(r.psid) chatBoxPsid = r.psid;
+                input.value = '';
+                setTimeout(function() { loadChatBox(true); }, 800);
+            } catch(e) { msg.innerText = '❌ ' + e.message; }
+            finally { btn.disabled = false; input.focus(); }
+        }
+        document.addEventListener('keydown', function(e) {
+            if(!chatBoxUid) return;
+            if(e.key === 'Escape') closeChatBox();
+            if(e.key === 'Enter' && !e.shiftKey && e.target && e.target.id === 'chat-box-input') { e.preventDefault(); sendChatBox(); }
+        });
+        // 📋 คัดลอกชื่อลูกค้า แล้วเปิดกล่องข้อความ Business Suite (กด Ctrl+V ในช่องค้นหา)
+        function copyText(t) {
+            try { if(navigator.clipboard && window.isSecureContext) { navigator.clipboard.writeText(t); return; } } catch(e) {}
+            const ta = document.createElement('textarea');
+            ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0';
+            document.body.appendChild(ta); ta.select();
+            try { document.execCommand('copy'); } catch(e) {}
+            document.body.removeChild(ta);
+        }
+        function showToast(t) {
+            let el = document.getElementById('mini-toast');
+            if(!el) {
+                el = document.createElement('div'); el.id = 'mini-toast';
+                el.className = 'fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] px-4 py-2 rounded-xl bg-slate-800 text-white text-sm shadow-lg';
+                el.style.transform = 'translateX(-50%)'; el.style.left = '50%';
+                document.body.appendChild(el);
+            }
+            el.innerText = t; el.style.display = 'block';
+            clearTimeout(el._t); el._t = setTimeout(function() { el.style.display = 'none'; }, 3500);
+        }
+        function copyNameAndOpen(name) {
+            const pid = (currentConfig && currentConfig.pageId) || currentActivePageId;
+            copyText(name || '');
+            window.open('https://business.facebook.com/latest/inbox/all?asset_id=' + encodeURIComponent(pid) + '&mailbox_id=' + encodeURIComponent(pid), '_blank');
+            showToast('📋 คัดลอก "' + name + '" แล้ว · กด Ctrl+V ในช่องค้นหาของกล่องข้อความ');
+        }
+        function copyNameOpenInbox() { copyNameAndOpen(chatBoxName); }
+        function copyNameOpenInboxBtn(btn) { copyNameAndOpen(btn.getAttribute('data-name') || ''); }
+
         function messengerLinkHtml(c) {
             if(!currentActivePageId || !c.userId) return '';
-            // ให้เซิร์ฟเวอร์หาห้องแชทจริงจาก Facebook แล้วพาไป (ลิงก์ที่สร้างเองจาก ID แชท เปิดใน Business Suite ไม่ได้)
-            const url = '/api/chat-link?token=' + encodeURIComponent(authToken) + '&pageId=' + encodeURIComponent(currentActivePageId) + '&sid=' + encodeURIComponent(currentLiveId || '') + '&uid=' + encodeURIComponent(c.userId) + (c.chatId ? '&psid=' + encodeURIComponent(c.chatId) : '');
             const svg = '<svg viewBox="0 0 24 24" class="w-5 h-5"><circle cx="12" cy="12" r="12" fill="#0866FF"/><path fill="#fff" d="M5.9 14.6l3.1-4.9c.5-.8 1.5-1 2.3-.4l2.4 1.8c.2.2.5.2.8 0l3.3-2.5c.4-.3 1 .2.7.6l-3.1 4.9c-.5.8-1.5 1-2.3.4l-2.4-1.8c-.2-.2-.5-.2-.8 0l-3.3 2.5c-.4.3-1-.2-.7-.6z"/></svg>';
-            return '<a href="' + escapeHtml(url) + '" target="_blank" rel="noopener" title="เปิดแชทของ ' + escapeHtml(c.name || '') + ' ใน Business Suite' + (c.chatId ? '' : ' (ยังไม่มี ID แชท จะเปิดกล่องข้อความรวม)') + '" class="inline-flex items-center justify-center hover:scale-110 transition' + (c.chatId ? '' : ' opacity-50') + '">' + svg + '</a>';
+            return '<button type="button" data-uid="' + escapeHtml(c.userId) + '" data-psid="' + escapeHtml(c.chatId || '') + '" data-name="' + escapeHtml(c.name || c.userId) + '" onclick="openChatBox(this)" title="แชทกับ ' + escapeHtml(c.name || '') + (c.chatId ? '' : ' (ยังไม่มีแชท ส่งข้อความแรกจากคอมเมนต์ได้)') + '" class="inline-flex items-center justify-center hover:scale-110 transition' + (c.chatId ? '' : ' opacity-50') + '">' + svg + '</button>'
+                + '<button type="button" data-name="' + escapeHtml(c.name || '') + '" onclick="copyNameOpenInboxBtn(this)" title="คัดลอกชื่อ แล้วเปิดกล่องข้อความ Business Suite (กด Ctrl+V ในช่องค้นหา)" class="ml-1 inline-flex items-center justify-center w-5 h-5 rounded-full border border-slate-300 text-[11px] hover:bg-slate-100 align-middle">📋</button>';
         }
 
         function toggleAllCommenters(on) {
@@ -5664,6 +5799,90 @@ function getLiveContext(req, res) {
   const live = getLiveSessions(pageData)[req.query.sid];
   return { pageData, live };
 }
+
+// 💬 หน้าต่างแชทในแดชบอร์ด: อ่านข้อความ / ตอบลูกค้า ผ่าน Graph API
+function chatTarget(req) {
+  const pageData = usersDB[req.userId]?.pages[req.query.pageId];
+  if (!pageData) return null;
+  const uid = String(req.query.uid || '');
+  const live = req.query.sid ? getLiveSessions(pageData)[req.query.sid] : null;
+  const c = live && uid ? live.commenters.get(uid) : null;
+  const psid = String(req.query.psid || (c && c.psid) || (uid && getPsidMap(pageData).get(uid)) || '');
+  return { pageData, pid: pageData.config.pageId || req.query.pageId, uid, live, c, psid };
+}
+const convIdCache = new Map();
+async function findConversationId(pageData, pid, psid) {
+  const key = pid + ':' + psid;
+  const hit = convIdCache.get(key);
+  if (hit && Date.now() - hit.at < 6 * 3600000) return hit.id;
+  const r = await axios.get('https://graph.facebook.com/v19.0/' + encodeURIComponent(pid) + '/conversations', {
+    params: { platform: 'messenger', user_id: psid, fields: 'id', access_token: pageData.config.pageAccessToken }, timeout: 15000
+  });
+  const id = ((r.data && r.data.data) || [])[0]?.id || '';
+  if (id) { convIdCache.set(key, { id, at: Date.now() }); if (convIdCache.size > 5000) convIdCache.delete(convIdCache.keys().next().value); }
+  return id;
+}
+
+app.get('/api/chat/messages', checkAuth, async (req, res) => {
+  const t = chatTarget(req);
+  if (!t) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
+  if (!t.pageData.config.pageAccessToken) return res.json({ success: false, error: 'เพจไม่มี Token' });
+  const pending = t.c && Array.isArray(t.c.pendingComments) ? t.c.pendingComments.filter(x => Date.now() - x.time < 7 * 86400000) : [];
+  if (!t.psid) return res.json({ success: true, psid: '', messages: [], canReply: false, canPrivateReply: pending.length > 0 });
+  try {
+    const convId = await findConversationId(t.pageData, t.pid, t.psid);
+    let messages = [];
+    if (convId) {
+      const r = await axios.get('https://graph.facebook.com/v19.0/' + encodeURIComponent(convId) + '/messages', {
+        params: { fields: 'id,message,from,created_time,attachments{mime_type,name,file_url,image_data{url,preview_url}},sticker', limit: 30, access_token: t.pageData.config.pageAccessToken }, timeout: 15000
+      });
+      messages = ((r.data && r.data.data) || []).map(m => {
+        const images = [], files = [];
+        for (const a of (m.attachments && m.attachments.data) || []) {
+          if (a.image_data && (a.image_data.url || a.image_data.preview_url)) images.push(a.image_data.url || a.image_data.preview_url);
+          else if (a.file_url) files.push({ url: a.file_url, name: a.name || '' });
+        }
+        if (m.sticker) images.push(m.sticker);
+        return { id: m.id, text: m.message || '', time: Date.parse(m.created_time) || 0, fromPage: String(m.from?.id || '') === String(t.pid), images, files };
+      }).reverse();
+    }
+    const li = t.pageData.lastInbound && t.pageData.lastInbound.get(t.psid);
+    const lastCust = messages.filter(m => !m.fromPage).reduce((a, m) => Math.max(a, m.time), 0);
+    const lastInbound = Math.max(li || 0, lastCust);
+    res.json({ success: true, psid: t.psid, convId, messages, lastInbound, canReply: !!lastInbound && Date.now() - lastInbound < 24 * 3600000, canPrivateReply: false });
+  } catch (e) {
+    res.json({ success: false, error: graphErrorMessage(e) });
+  }
+});
+
+app.post('/api/chat/send', checkAuth, async (req, res) => {
+  const t = chatTarget(req);
+  if (!t) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
+  const text = String((req.body && req.body.text) || '').trim().slice(0, 2000);
+  if (!text) return res.json({ success: false, error: 'กรุณาพิมพ์ข้อความ' });
+  const token = t.pageData.config.pageAccessToken;
+  if (!token) return res.json({ success: false, error: 'เพจไม่มี Token' });
+  try {
+    if (t.psid) {
+      await fbPost('https://graph.facebook.com/v19.0/me/messages', { recipient: { id: t.psid }, messaging_type: 'RESPONSE', message: { text } }, { access_token: token });
+      return res.json({ success: true, psid: t.psid });
+    }
+    // ยังไม่มีแชท: ส่งข้อความแรกแบบตอบกลับคอมเมนต์ (Private Reply · 1 ครั้งต่อคอมเมนต์ ภายใน 7 วัน)
+    const pending = t.c && Array.isArray(t.c.pendingComments) ? t.c.pendingComments.filter(x => Date.now() - x.time < 7 * 86400000) : [];
+    const pc = pending[pending.length - 1];
+    if (!pc) return res.json({ success: false, error: 'ลูกค้ายังไม่มีแชทกับเพจ และไม่มีคอมเมนต์ที่ส่งข้อความส่วนตัวได้' });
+    const r = await fbPost('https://graph.facebook.com/v19.0/me/messages', { recipient: { comment_id: pc.id }, message: { text } }, { access_token: token });
+    t.c.pendingComments = t.c.pendingComments.filter(x => x.id !== pc.id);
+    const psid = r.data && r.data.recipient_id ? String(r.data.recipient_id) : '';
+    if (psid) { t.c.psid = psid; getPsidMap(t.pageData).set(t.uid, psid); }
+    res.json({ success: true, psid });
+  } catch (e) {
+    const code = e.response?.data?.error?.code, sub = e.response?.data?.error?.error_subcode;
+    if (code === 10 || sub === 2018278) return res.json({ success: false, error: 'ส่งไม่ได้: เกิน 24 ชม. หลังลูกค้าทักล่าสุด (กฎ Facebook) ให้รอลูกค้าทักมาก่อน' });
+    if (code === 551 || sub === 1545041) return res.json({ success: false, error: 'ส่งไม่ได้: ลูกค้าไม่รับข้อความจากเพจ หรือปิดการติดต่อ' });
+    res.json({ success: false, error: graphErrorMessage(e) });
+  }
+});
 
 // 💬 เปิดแชทของลูกค้า: หาห้องแชทจริงจาก Facebook (conversations?user_id=PSID) แล้วพาไปที่ลิงก์ของห้องนั้น
 const chatLinkCache = new Map();
