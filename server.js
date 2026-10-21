@@ -2802,7 +2802,7 @@ app.get('/', (req, res) => {
                     </div>
                 </div>
             </div>
-            <div id="chat-box" class=""hidden fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-2 sm:p-4" onclick="if(event.target===this) closeChatBox()">
+            <div id="chat-box" class="hidden fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-2 sm:p-4" onclick="if(event.target===this) closeChatBox()">
                 <div class="bg-white rounded-2xl shadow-xl border border-slate-200 w-full max-w-lg flex flex-col" style="height:min(640px,92vh)">
                     <div class="flex items-center gap-2 px-4 py-3 border-b border-slate-200">
                         <div class="w-8 h-8 rounded-full bg-[#0866FF] text-white flex items-center justify-center text-sm font-bold" id="chat-box-avatar">?</div>
