@@ -2784,7 +2784,25 @@ app.get('/', (req, res) => {
                     </div>
                 </div>
             </div>
-            <div id="chat-box" class="hidden fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-2 sm:p-4" onclick="if(event.target===this) closeChatBox()">
+            <div id="due-editor" class="hidden fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4" onclick="if(event.target===this) closeDueEditor()">
+                <div class="bg-white rounded-2xl shadow-xl border border-slate-200 p-5 w-full max-w-sm space-y-3">
+                    <h3 class="text-base font-bold text-slate-800">💰 ยอดที่ลูกค้าต้องจ่าย</h3>
+                    <div class="text-sm text-slate-600">ลูกค้า: <b id="due-editor-name"></b></div>
+                    <div class="text-xs text-slate-500">โอนมาแล้ว: <b id="due-editor-paid" class="text-emerald-700"></b></div>
+                    <label class="block text-xs font-semibold text-slate-600">ยอดที่ต้องจ่าย (บาท)
+                        <input type="number" id="due-editor-amount" min="0" step="0.01" oninput="previewDue()" class="mt-1 w-full p-2.5 text-lg border border-slate-300 rounded-xl focus:outline-none focus:border-indigo-500" placeholder="เช่น 650">
+                    </label>
+                    <div id="due-editor-preview" class="hidden text-sm font-semibold px-3 py-2 rounded-xl"></div>
+                    <div id="due-editor-msg" class="text-xs text-rose-600"></div>
+                    <div class="flex items-center gap-2 pt-1">
+                        <button type="button" id="due-editor-del" onclick="saveDueEditor(true)" class="hidden px-3 py-2 text-sm rounded-xl text-rose-600 hover:bg-rose-50">🗑️ ลบยอด</button>
+                        <div class="flex-1"></div>
+                        <button type="button" onclick="closeDueEditor()" class="px-4 py-2 text-sm rounded-xl border border-slate-300 bg-white hover:bg-slate-50">ยกเลิก</button>
+                        <button type="button" id="due-editor-save" onclick="saveDueEditor(false)" class="px-4 py-2 text-sm font-semibold rounded-xl bg-indigo-600 text-white hover:bg-indigo-700">💾 บันทึกยอด</button>
+                    </div>
+                </div>
+            </div>
+            <div id="chat-box" class=""hidden fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-2 sm:p-4" onclick="if(event.target===this) closeChatBox()">
                 <div class="bg-white rounded-2xl shadow-xl border border-slate-200 w-full max-w-lg flex flex-col" style="height:min(640px,92vh)">
                     <div class="flex items-center gap-2 px-4 py-3 border-b border-slate-200">
                         <div class="w-8 h-8 rounded-full bg-[#0866FF] text-white flex items-center justify-center text-sm font-bold" id="chat-box-avatar">?</div>
@@ -3804,22 +3822,59 @@ app.get('/', (req, res) => {
         }
 
         // 💰 ยอดที่ลูกค้าต้องจ่าย (แอดมินใส่เอง) เทียบกับยอดสลิปรวมทุกใบ
-        async function editDueAmount(btn) {
+        let dueEditUid = '';
+        function editDueAmount(btn) {
             if(!currentLiveId) return;
-            const uid = btn.getAttribute('data-uid');
-            const c = commenterList.find(function(x) { return x.userId === uid; }) || {};
-            const cur = Number(c.dueAmount) > 0 ? String(c.dueAmount) : '';
-            const v = prompt('ยอดที่ ' + (btn.getAttribute('data-name') || '') + ' ต้องจ่าย (บาท)' + NL + 'ยอดสลิปที่โอนมาแล้ว: ' + fmtMoney(Number(c.paidTotal) || 0) + ' ฿ (' + (c.slipCount || 0) + ' สลิป)' + NL + 'เว้นว่าง = ลบยอด', cur);
-            if(v === null) return;
+            dueEditUid = btn.getAttribute('data-uid');
+            const c = commenterList.find(function(x) { return x.userId === dueEditUid; }) || {};
+            document.getElementById('due-editor-name').innerText = btn.getAttribute('data-name') || dueEditUid;
+            document.getElementById('due-editor-paid').innerText = fmtMoney(Number(c.paidTotal) || 0) + ' ฿ (' + (c.slipCount || 0) + ' สลิป)';
+            document.getElementById('due-editor-amount').value = Number(c.dueAmount) > 0 ? String(c.dueAmount) : '';
+            document.getElementById('due-editor-del').classList.toggle('hidden', !(Number(c.dueAmount) > 0));
+            document.getElementById('due-editor-msg').innerText = '';
+            previewDue();
+            document.getElementById('due-editor').classList.remove('hidden');
+            setTimeout(function() { const i = document.getElementById('due-editor-amount'); i.focus(); i.select(); }, 50);
+        }
+        function closeDueEditor() {
+            document.getElementById('due-editor').classList.add('hidden');
+            dueEditUid = '';
+        }
+        function previewDue() {
+            const el = document.getElementById('due-editor-preview');
+            const c = commenterList.find(function(x) { return x.userId === dueEditUid; }) || {};
+            const due = Math.round((parseFloat(document.getElementById('due-editor-amount').value) || 0) * 100) / 100;
+            const got = Math.round((Number(c.paidTotal) || 0) * 100) / 100;
+            if(!(due > 0)) { el.classList.add('hidden'); return; }
+            el.classList.remove('hidden', 'bg-emerald-50', 'text-emerald-700', 'bg-rose-50', 'text-rose-600', 'bg-blue-50', 'text-blue-600');
+            if(got === due) { el.classList.add('bg-emerald-50', 'text-emerald-700'); el.innerText = '✔ โอนครบแล้ว'; }
+            else if(got < due) { el.classList.add('bg-rose-50', 'text-rose-600'); el.innerText = '✖ ยังขาดอีก ' + fmtMoney(due - got) + ' ฿'; }
+            else { el.classList.add('bg-blue-50', 'text-blue-600'); el.innerText = '▲ โอนเกิน ' + fmtMoney(got - due) + ' ฿'; }
+        }
+        async function saveDueEditor(remove) {
+            if(!dueEditUid || !currentLiveId) return;
+            const v = remove ? '' : document.getElementById('due-editor-amount').value;
+            const msg = document.getElementById('due-editor-msg');
+            if(!remove && !(parseFloat(v) > 0)) { msg.innerText = 'กรุณากรอกยอดเงิน'; return; }
+            const btn = document.getElementById('due-editor-save');
+            btn.disabled = true;
             try {
                 const r = await (await fetch(liveUrl('/api/live/due-amount', '&sid=' + currentLiveId), {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: uid, amount: v })
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: dueEditUid, amount: v })
                 })).json();
-                if(!r.success) return alert('❌ ' + r.error);
-                c.dueAmount = r.dueAmount;
+                if(!r.success) { msg.innerText = '❌ ' + r.error; return; }
+                const c = commenterList.find(function(x) { return x.userId === dueEditUid; });
+                if(c) c.dueAmount = r.dueAmount;
+                closeDueEditor();
                 renderCommenters();
-            } catch(e) { alert('❌ ' + e.message); }
+            } catch(e) { msg.innerText = '❌ ' + e.message; }
+            finally { btn.disabled = false; }
         }
+        document.addEventListener('keydown', function(e) {
+            if(!dueEditUid) return;
+            if(e.key === 'Escape') closeDueEditor();
+            if(e.key === 'Enter' && e.target && e.target.id === 'due-editor-amount') saveDueEditor(false);
+        });
 
         // 💬 หน้าต่างแชทในแดชบอร์ด (อ่าน + ตอบลูกค้าผ่าน Facebook API)
         let chatBoxUid = '', chatBoxPsid = '', chatBoxName = '', chatBoxPoll = null, chatBoxLastKey = '';
