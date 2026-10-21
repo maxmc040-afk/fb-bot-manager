@@ -75,6 +75,27 @@ function isStickerOrGif(message, att) {
   return false;
 }
 
+// 🧾 ดึง URL รูปสลิปจากไฟล์แนบทุกรูปแบบ
+// ปกติสลิปมาเป็น type "image" แต่ Messenger รุ่นใหม่ (ไทย) จะแปลงรูปสลิปเป็นการ์ด
+// "ตรวจสอบยืนยันสลิปธนาคารโดยอัตโนมัติ" / "ส่งการชำระเงิน" ซึ่งอาจมาเป็น template / fallback / ชนิดอื่น
+function slipImageUrlsFromMessage(message) {
+  const out = [];
+  const add = (u) => { u = typeof u === 'string' ? u.trim() : ''; if (/^https?:\/\//i.test(u) && !out.includes(u)) out.push(u); };
+  const looksImage = (u) => /\.(jpe?g|png|webp|heic)(\?|$)/i.test(String(u || '')) || /(fbcdn\.net|fbsbx\.com|scontent)/i.test(String(u || ''));
+  for (const att of (message && message.attachments) || []) {
+    if (!att) continue;
+    const p = att.payload || {};
+    if (att.type === 'image') { if (!isStickerOrGif(message, att)) add(p.url); continue; }
+    if (att.type === 'video' || att.type === 'audio' || att.type === 'file' || att.type === 'location') continue;
+    // template / fallback / payment / ชนิดใหม่ ๆ: หารูปในทุกตำแหน่งที่ Facebook ใช้
+    if (p.url && looksImage(p.url) && !/\.gif(\?|$)/i.test(p.url)) add(p.url);
+    add(p.image_url); add(p.media_url);
+    if (att.image_data) add(att.image_data.url);
+    for (const el of p.elements || []) { if (el) { add(el.image_url); if (el.media_url) add(el.media_url); } }
+    for (const m of p.media || []) { if (m) add(m.url || m.image_url); }
+  }
+  return out;
+}
 function runTask(fn, label) {
   return Promise.resolve().then(fn).catch(e => console.error('❌ [Task Error]', label || '', e?.response?.data || e?.message || e));
 }
@@ -733,8 +754,9 @@ async function verifySlipWithZwiz(imageUrl, cfg) {
   } catch (err) {
     const e = err.response?.data?.error || {};
     const errCode = e.code || e.error || (err.response ? 'HTTP_' + err.response.status : 'NETWORK_ERROR');
-    console.error('❌ [ZWIZ] ตรวจสลิปไม่สำเร็จ:', errCode, e.message || err.message);
-    return { slip: null, errCode };
+    const detail = [e.message, err.response?.data?.details?.verify?.statusCode ? 'statusCode ' + err.response.data.details.verify.statusCode : ''].filter(Boolean).join(' · ');
+    console.error('❌ [ZWIZ] ตรวจสลิปไม่สำเร็จ:', errCode, detail || err.message);
+    return { slip: null, errCode, detail };
   }
   const res = r.data?.result || {};
   const vr = res.verification_result;
@@ -749,6 +771,7 @@ async function verifySlipWithZwiz(imageUrl, cfg) {
     dateText: formatZwizDate(data.transDate, data.transTime),
     receiverAccounts: rcvAcc ? [String(rcvAcc)] : [],
     receiverNameTh: data.receiver?.displayName || data.receiver?.name || '',
+    receiverBank: data.receivingBank || '',
     isDuplicate: vr === 'duplicated',
     matchResult: vr, // matched | not_matched | duplicated | skipped
     provider: 'zwiz'
@@ -2134,6 +2157,17 @@ app.get('/', (req, res) => {
                             <span id="label-load-status" class="text-slate-500">ป้ายกำกับเลือกจากที่มีในเพจ (สร้างป้ายใหม่ได้ที่ Meta Business Suite → จัดการป้ายกำกับ)</span>
                         </div>
 
+                        <details id="slip-history" class="bg-slate-50 border border-slate-200 rounded-2xl p-4" ontoggle="if(this.open) loadSlipStatus()">
+                            <summary class="cursor-pointer select-none text-sm font-semibold text-slate-700">📜 ประวัติการตรวจสลิปล่าสุด <span class="font-normal text-xs text-slate-500">(ดูสาเหตุที่สลิปไม่ผ่าน)</span></summary>
+                            <div class="mt-3 overflow-auto max-h-96">
+                                <div class="flex justify-end mb-2"><button type="button" onclick="loadSlipStatus()" class="px-3 py-1 text-xs font-medium bg-white border border-slate-300 rounded-lg hover:bg-slate-100">🔄 รีเฟรช</button></div>
+                                <table class="w-full text-xs">
+                                    <thead class="text-left text-slate-500 border-b border-slate-200"><tr><th class="py-1.5 pr-2">เวลา</th><th class="py-1.5 pr-2">ผล</th><th class="py-1.5 pr-2 text-right">ยอด</th><th class="py-1.5 pr-2">รหัส</th><th class="py-1.5">รายละเอียด</th></tr></thead>
+                                    <tbody id="slip-history-body"><tr><td colspan="5" class="py-3 text-slate-400">ยังไม่มีประวัติ</td></tr></tbody>
+                                </table>
+                            </div>
+                        </details>
+
                         <details id="dup-tool" class="bg-amber-50/50 border border-amber-200 rounded-2xl p-4">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-amber-800">🧹 เครื่องมือป้ายชื่อซ้ำ <span class="font-normal text-xs text-amber-700">(ป้ายชื่อเดียวกันหลาย ID · ทดสอบหาตัวที่ซ่อนอยู่ แล้วลบ)</span></summary>
                             <div class="mt-3 space-y-3 text-xs">
@@ -2655,6 +2689,24 @@ app.get('/', (req, res) => {
                     </details>
                 </div>
             </main>
+            <div id="pay-editor" class="hidden fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4" onclick="if(event.target===this) closePayEditor()">
+                <div class="bg-white rounded-2xl shadow-xl border border-slate-200 p-5 w-full max-w-sm space-y-3">
+                    <h3 class="text-base font-bold text-slate-800">✍️ บันทึกการโอนเงิน (แมนนวล)</h3>
+                    <div class="text-sm text-slate-600">ลูกค้า: <b id="pay-editor-name"></b></div>
+                    <div id="pay-editor-current" class="text-xs text-slate-500"></div>
+                    <label class="block text-xs font-semibold text-slate-600">ยอดเงินที่โอน (บาท)
+                        <input type="number" id="pay-editor-amount" min="0" step="0.01" class="mt-1 w-full p-2.5 text-lg border border-slate-300 rounded-xl focus:outline-none focus:border-emerald-500" placeholder="เช่น 690">
+                    </label>
+                    <label class="block text-xs font-semibold text-slate-600">หมายเหตุ (ไม่บังคับ)
+                        <input type="text" id="pay-editor-note" maxlength="100" class="mt-1 w-full p-2 text-sm border border-slate-300 rounded-xl" placeholder="เช่น โอนกรุงเทพ ตรวจเองแล้ว">
+                    </label>
+                    <div id="pay-editor-msg" class="text-xs text-rose-600"></div>
+                    <div class="flex justify-end gap-2 pt-1">
+                        <button type="button" onclick="closePayEditor()" class="px-4 py-2 text-sm rounded-xl border border-slate-300 bg-white hover:bg-slate-50">ยกเลิก</button>
+                        <button type="button" id="pay-editor-save" onclick="savePayEditor()" class="px-4 py-2 text-sm font-semibold rounded-xl bg-emerald-600 text-white hover:bg-emerald-700">💾 บันทึก เป็นโอนแล้ว</button>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -3149,6 +3201,18 @@ app.get('/', (req, res) => {
                 if (r.quota && r.quota.remaining !== undefined && r.quota.remaining !== null) t += '📊 โควตาตรวจสลิปคงเหลือ ' + r.quota.remaining + ' ครั้ง';
                 if (r.lastError && Date.now() - r.lastError.at < 6 * 3600000) t += (t ? ' · ' : '') + '⚠️ ตรวจสลิปผิดพลาดล่าสุด: ' + r.lastError.code + ' (' + new Date(r.lastError.at).toLocaleTimeString('th-TH') + ')';
                 el.innerText = t;
+                const RES = { valid: ['✅ ผ่าน', 'text-emerald-700'], invalid: ['❌ บัญชีไม่ตรง', 'text-rose-700'], duplicate: ['🔄 สลิปซ้ำ', 'text-slate-600'], retry: ['⏳ รอธนาคาร', 'text-amber-700'], unreadable: ['⚠️ ตรวจไม่ได้', 'text-amber-700'], system: ['🛠️ ปัญหาระบบ', 'text-rose-700'], noimage: ['📎 ไม่พบรูป', 'text-slate-500'] };
+                let rows = '';
+                (r.attempts || []).forEach(function(a) {
+                    const m = RES[a.result] || [a.result, ''];
+                    rows += '<tr class="border-b border-slate-100 align-top"><td class="py-1.5 pr-2 whitespace-nowrap text-slate-500">' + new Date(a.time).toLocaleString('th-TH', { dateStyle: 'short', timeStyle: 'medium' }) + '</td>'
+                        + '<td class="py-1.5 pr-2 whitespace-nowrap font-semibold ' + m[1] + '">' + m[0] + '</td>'
+                        + '<td class="py-1.5 pr-2 text-right">' + (a.amount !== undefined && a.amount !== null ? fmtMoney(a.amount) : '-') + '</td>'
+                        + '<td class="py-1.5 pr-2 font-mono text-slate-500">' + escapeHtml(a.code || '') + '</td>'
+                        + '<td class="py-1.5 text-slate-600">' + escapeHtml(a.note || '') + '</td></tr>';
+                });
+                const hb = document.getElementById('slip-history-body');
+                if (hb) hb.innerHTML = rows || '<tr><td colspan="5" class="py-3 text-slate-400">ยังไม่มีประวัติ</td></tr>';
             } catch (e) { el.innerText = ''; }
         }
 
@@ -3516,10 +3580,63 @@ app.get('/', (req, res) => {
                 sh += '<tr class="border-b border-slate-100"><td class="py-1.5 pr-2 text-slate-500">' + fmtTime(x.time) + '</td>'
                     + '<td class="py-1.5 pr-2 font-medium text-slate-700">' + escapeHtml(x.senderName || x.senderId) + '</td>'
                     + '<td class="py-1.5 pr-2 text-right text-emerald-600 font-semibold">' + fmtMoney(x.amount) + '</td>'
-                    + '<td class="py-1.5 text-slate-500">' + escapeHtml(x.transRef) + '</td></tr>';
+                    + '<td class="py-1.5 text-slate-500">' + (x.manual
+                        ? '<span class="px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 font-semibold">✍️ แมนนวล</span>' + (x.note ? ' <span class="text-slate-400">' + escapeHtml(x.note) + '</span>' : '')
+                          + ' <button type="button" class="ml-1 text-rose-500 hover:underline" data-ref="' + escapeHtml(x.transRef) + '" onclick="deleteManualPay(this)">🗑️ ลบ</button>'
+                        : escapeHtml(x.transRef)) + '</td></tr>';
             });
             document.getElementById('lv-slips').innerHTML = sh || '<tr><td colspan="4" class="py-3 text-slate-400">ยังไม่มีสลิป</td></tr>';
         }
+
+        // ===== ✍️ แก้สถานะโอนเงินแบบแมนนวล =====
+        let payEditUid = '';
+        function openPayEditor(btn) {
+            payEditUid = btn.getAttribute('data-uid');
+            const c = commenterList.find(function(x) { return x.userId === payEditUid; }) || {};
+            document.getElementById('pay-editor-name').innerText = btn.getAttribute('data-name') || payEditUid;
+            document.getElementById('pay-editor-current').innerText = c.paid ? ('ตอนนี้: โอนแล้ว ' + fmtMoney(c.paidTotal) + ' ฿ (บันทึกเพิ่ม = รวมยอดเพิ่ม)') : 'ตอนนี้: ยังไม่โอน';
+            document.getElementById('pay-editor-amount').value = '';
+            document.getElementById('pay-editor-note').value = '';
+            document.getElementById('pay-editor-msg').innerText = '';
+            document.getElementById('pay-editor').classList.remove('hidden');
+            setTimeout(function() { document.getElementById('pay-editor-amount').focus(); }, 50);
+        }
+        function closePayEditor() {
+            document.getElementById('pay-editor').classList.add('hidden');
+            payEditUid = '';
+        }
+        async function savePayEditor() {
+            if (!payEditUid || !currentLiveId) return;
+            const amount = document.getElementById('pay-editor-amount').value;
+            const msg = document.getElementById('pay-editor-msg');
+            if (!(parseFloat(amount) > 0)) { msg.innerText = 'กรุณากรอกยอดเงิน'; return; }
+            const btn = document.getElementById('pay-editor-save');
+            btn.disabled = true;
+            try {
+                const r = await (await fetch(liveUrl('/api/live/manual-payment', '&sid=' + currentLiveId), {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ userId: payEditUid, amount: amount, note: document.getElementById('pay-editor-note').value })
+                })).json();
+                if (!r.success) { msg.innerText = '❌ ' + r.error; return; }
+                closePayEditor();
+                loadLiveDetail(false);
+            } catch (e) { msg.innerText = '❌ ' + e.message; }
+            finally { btn.disabled = false; }
+        }
+        async function deleteManualPay(btn) {
+            if (!currentLiveId) return;
+            if (!confirm('ลบรายการโอนแบบแมนนวลนี้?')) return;
+            const r = await (await fetch(liveUrl('/api/live/manual-payment/delete', '&sid=' + currentLiveId), {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ transRef: btn.getAttribute('data-ref') })
+            })).json();
+            if (!r.success) return alert('❌ ' + r.error);
+            loadLiveDetail(false);
+        }
+        document.addEventListener('keydown', function(e) {
+            if (!payEditUid) return;
+            if (e.key === 'Escape') closePayEditor();
+            if (e.key === 'Enter' && e.target && e.target.id && e.target.id.indexOf('pay-editor') === 0) savePayEditor();
+        });
 
         // ===== ตารางคนคอมเมนต์: ติ๊กเลือก + สถานะโอน + ดึงข้อมูลรายคน =====
         let commenterList = [];
@@ -3542,10 +3659,11 @@ app.get('/', (req, res) => {
             const list = filteredCommenters();
             let ch = '';
             pageSlice('cm', list).forEach(function(c) {
+                const payBtn = ' data-uid="' + escapeHtml(c.userId) + '" data-name="' + escapeHtml(c.name || c.userId) + '" onclick="openPayEditor(this)" title="คลิกเพื่อบันทึกการโอนแบบแมนนวล"';
                 const pay = c.matchedCount > 0
                     ? (c.paid
-                        ? '<span class="inline-block px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-semibold whitespace-nowrap">✅ โอนแล้ว ' + fmtMoney(c.paidTotal) + ' ฿</span>' + (c.slipCount > 1 ? '<div class="text-[10px] text-slate-400">' + c.slipCount + ' สลิป</div>' : '')
-                        : '<span class="inline-block px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-semibold whitespace-nowrap">⏳ ยังไม่โอน</span>')
+                        ? '<button type="button" class="inline-block px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-semibold whitespace-nowrap hover:ring-2 hover:ring-emerald-300"' + payBtn + '>✅ โอนแล้ว ' + fmtMoney(c.paidTotal) + ' ฿</button>' + (c.slipCount > 1 ? '<div class="text-[10px] text-slate-400">' + c.slipCount + ' รายการ</div>' : '')
+                        : '<button type="button" class="inline-block px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-semibold whitespace-nowrap hover:ring-2 hover:ring-amber-300"' + payBtn + '>⏳ ยังไม่โอน ✎</button>')
                     : '<span class="text-slate-300">-</span>';
                 ch += '<tr data-cid="' + escapeHtml(c.userId) + '" class="border-b border-slate-100">'
                     + '<td class="py-1.5 pr-2"><input type="checkbox" class="cm-sel w-4 h-4 rounded"' + (commenterSel.has(c.userId) ? ' checked' : '') + '></td>'
@@ -5067,7 +5185,7 @@ app.get('/api/page-token-status', checkAuth, async (req, res) => {
 app.get('/api/slip/status', checkAuth, (req, res) => {
   const pageData = usersDB[req.userId]?.pages[req.query.pageId];
   if (!pageData) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
-  res.json({ success: true, provider: pageData.config.slipProvider || 'zwiz', quota: pageData.slipQuota || null, lastError: pageData.lastSlipError || null });
+  res.json({ success: true, provider: pageData.config.slipProvider || 'zwiz', quota: pageData.slipQuota || null, lastError: pageData.lastSlipError || null, attempts: (pageData.slipAttempts || []).slice(0, 30) });
 });
 
 // 🏷️ รายชื่อป้ายกำกับที่มีอยู่ในเพจ (ตัวเลือกในหน้าตั้งค่าสลิป)
@@ -5486,6 +5604,41 @@ app.post('/api/live/create', checkAuth, (req, res) => {
     broadcastStatus: { isBroadcasting: false, total: 0, current: 0, success: 0, failed: 0, statusMessage: 'พร้อมใช้งาน', shouldStop: false }
   };
   res.json({ success: true, id });
+});
+
+// ✍️ บันทึกการโอนเงินแบบแมนนวล (สลิปที่ระบบตรวจไม่ได้ / โอนช่องทางอื่น)
+app.post('/api/live/manual-payment', checkAuth, (req, res) => {
+  const ctx = getLiveContext(req, res);
+  if (!ctx) return;
+  const s = ctx.live;
+  if (!s) return res.json({ success: false, error: 'ไม่พบ session นี้' });
+  const userId = String(req.body.userId || '');
+  const amount = Math.round((parseFloat(String(req.body.amount || '').replace(/[^0-9.]/g, '')) || 0) * 100) / 100;
+  if (!userId || !s.commenters.has(userId)) return res.json({ success: false, error: 'ไม่พบลูกค้าคนนี้ใน session' });
+  if (!(amount > 0) || amount > 10000000) return res.json({ success: false, error: 'กรุณากรอกยอดเงินให้ถูกต้อง' });
+  const c = s.commenters.get(userId);
+  const rec = {
+    transRef: 'MANUAL-' + Date.now().toString(36).toUpperCase() + crypto.randomBytes(2).toString('hex').toUpperCase(),
+    amount, senderId: userId, senderName: c.name || '', time: Date.now(), manual: true,
+    note: String(req.body.note || '').slice(0, 100)
+  };
+  s.slips.push(rec);
+  // ติด/ลบป้ายเหมือนสลิปผ่าน (เช่น ติด "โอนแล้ว" ลบ "ยังไม่โอน")
+  const psid = c.psid || getPsidMap(ctx.pageData).get(userId);
+  if (psid) labelSlipResult(ctx.pageData, psid, 'valid');
+  res.json({ success: true, slip: rec });
+});
+
+app.post('/api/live/manual-payment/delete', checkAuth, (req, res) => {
+  const ctx = getLiveContext(req, res);
+  if (!ctx) return;
+  const s = ctx.live;
+  if (!s) return res.json({ success: false, error: 'ไม่พบ session นี้' });
+  const ref = String(req.body.transRef || '');
+  const i = s.slips.findIndex(x => x.transRef === ref && x.manual);
+  if (i < 0) return res.json({ success: false, error: 'ลบได้เฉพาะรายการที่บันทึกแบบแมนนวล' });
+  s.slips.splice(i, 1);
+  res.json({ success: true });
 });
 
 app.get('/api/live/detail', checkAuth, (req, res) => {
@@ -6494,6 +6647,128 @@ app.get('/webhook', (req, res) => {
   }
 });
 
+// 🧾 ตรวจสลิป 1 รูป (เรียกซ้ำได้ เมื่อธนาคารยังยืนยันไม่ได้)
+async function processSlipImage(targetRecord, pageId, senderId, imageUrl, attempt = 0) {
+  const pageData = targetRecord.pageData;
+  const configStore = pageData.config;
+  const usedSlips = pageData.usedSlips || (pageData.usedSlips = new Set());
+  console.log(`🧾 [Page: ${pageId}] พบรูปภาพจากลูกค้า ID: ${senderId} กำลังตรวจสอบสลิป...` + (attempt ? ' (ลองใหม่ครั้งที่ ' + attempt + ')' : ''));
+  // ตรวจสลิปกับผู้ให้บริการที่ตั้งไว้ (ZWIZ / EasySlip)
+  const slipResult = await verifySlip(imageUrl, configStore, targetRecord.pageData);
+
+  const sendSlipReply = async (text) => {
+    if (!configStore.pageAccessToken) return;
+    try {
+      await fbPost('https://graph.facebook.com/v19.0/me/messages', {
+        recipient: { id: senderId },
+        messaging_type: 'RESPONSE',
+        message: { text }
+      }, { access_token: configStore.pageAccessToken }, 1);
+    } catch (sendErr) {
+      console.error('❌ [Send Slip Reply Error]', sendErr.response?.data || sendErr.message);
+    }
+  };
+
+  const slip = slipResult.slip || null;
+  const provider = configStore.slipProvider || 'zwiz';
+
+  if (!slip) {
+    const errCode = slipResult.errCode || '';
+    console.log(`⚠️ [Page: ${pageId}] ตรวจสลิปไม่สำเร็จ (${provider})`, errCode);
+    // อ่าน QR ได้แล้ว แต่ธนาคารยังยืนยันไม่ได้ (เช่น กรุงเทพ/ออมสิน ต้องรอสักครู่หลังโอน) -> เป็นสลิปจริงแน่ ลองใหม่อัตโนมัติ
+    const RETRYABLE = ['VERIFY_FAILED', 'UNABLE_TO_VERIFY', 'SLIP_PENDING'];
+    if (RETRYABLE.includes(errCode)) {
+      const delays = [3, 8]; // นาที
+      if (attempt < delays.length) {
+        logSlipAttempt(pageData, { senderId, provider, result: 'retry', code: errCode, note: 'ธนาคารยังยืนยันไม่ได้ จะลองใหม่ใน ' + delays[attempt] + ' นาที' + (slipResult.detail ? ' · ' + slipResult.detail : '') });
+        if (attempt === 0) await sendSlipReply('⏳ ได้รับสลิปแล้วค่ะ ระบบกำลังตรวจสอบกับธนาคาร (บางธนาคารใช้เวลาไม่กี่นาที) จะแจ้งผลให้อีกครั้งนะคะ 🙏');
+        setTimeout(() => runTask(() => processSlipImage(targetRecord, pageId, senderId, imageUrl, attempt + 1), 'slip-retry'), delays[attempt] * 60 * 1000);
+        return;
+      }
+      logSlipAttempt(pageData, { senderId, provider, result: 'unreadable', code: errCode, note: 'ลองใหม่ครบแล้ว ธนาคารยังยืนยันไม่ได้' + (slipResult.detail ? ' · ' + slipResult.detail : '') });
+      labelSlipResult(pageData, senderId, 'unreadable');
+      await sendSlipReply(configStore.msgSlipUnreadable);
+      return;
+    }
+    // ปัญหาฝั่งระบบ (key / โควตา / เซิร์ฟเวอร์ EasySlip) ไม่ใช่ความผิดลูกค้า -> ไม่แจ้งลูกค้า
+    const systemErr = ['MISSING_API_KEY', 'INVALID_API_KEY', 'QUOTA_EXCEEDED', 'INSUFFICIENT_QUOTA', 'IP_NOT_ALLOWED', 'BRANCH_INACTIVE', 'SERVICE_BANNED', 'SERVICE_DELETED', 'USER_BANNED', 'RATE_LIMIT_EXCEEDED', 'API_SERVER_ERROR', 'INTERNAL_SERVER_ERROR', 'INTERNAL_ERROR', 'IMAGE_DOWNLOAD_FAILED', 'NETWORK_ERROR', 'HTTP_500', 'HTTP_502', 'HTTP_503', 'HTTP_504'].includes(errCode);
+    if (systemErr) targetRecord.pageData.lastSlipError = { code: errCode, at: Date.now() };
+    const mode = configStore.slipUnreadableMode || 'smart';
+    const payCtx = isPaymentContext(targetRecord.pageData, senderId);
+    const notify = !systemErr && (mode === 'always' || (mode === 'smart' && payCtx));
+    logSlipAttempt(pageData, { senderId, provider, result: systemErr ? 'system' : 'unreadable', code: errCode || 'ไม่ทราบสาเหตุ', note: systemErr ? 'ปัญหาฝั่งระบบตรวจสลิป (ไม่แจ้งลูกค้า)' : (notify ? 'แจ้งลูกค้าให้ส่งใหม่' : 'ไม่ใช่สลิป/ไม่พบ QR · ไม่ตอบ') });
+    if (notify) {
+      labelSlipResult(targetRecord.pageData, senderId, 'unreadable');
+      await sendSlipReply(configStore.msgSlipUnreadable);
+    } else {
+      console.log(`🖼️ [Page: ${pageId}] รูปจาก ${senderId} ไม่ใช่สลิป/อ่านไม่ได้ -> ไม่ตอบ (${systemErr ? 'ปัญหาระบบ ' + errCode : 'ลูกค้าไม่ได้อยู่ในช่วงจ่ายเงิน'})`);
+    }
+    return;
+  }
+
+  if (usedSlips.has(slip.transRef) || slip.isDuplicate) {
+    console.log(`🔄 [Page: ${pageId}] สลิปซ้ำ ถูกใช้งานไปแล้ว`);
+    logSlipAttempt(pageData, { senderId, provider, result: 'duplicate', code: slip.transRef, amount: slip.amount });
+    labelSlipResult(targetRecord.pageData, senderId, 'duplicate');
+    await sendSlipReply(configStore.msgSlipDuplicate);
+    return;
+  }
+
+  // ZWIZ ตรวจบัญชีปลายทางให้แล้ว (matched / not_matched) ถ้าไม่ได้ตรวจ (skipped) ใช้การเทียบของระบบเอง
+  const receiverOk = slip.matchResult === 'matched' ? true
+    : slip.matchResult === 'not_matched' ? false
+    : slip.receiverAccounts.length > 0
+      ? accountMatches(configStore.merchantAccount, slip.receiverAccounts)
+      : (!configStore.merchantAccount && !configStore.merchantName) || nameMatches(configStore.merchantName, slip.receiverNameTh);
+
+  if (!receiverOk) {
+    console.log(`❌ [Page: ${pageId}] เลขบัญชีผู้รับไม่ตรงกับร้านค้า`, slip.receiverAccounts, slip.receiverNameTh);
+    logSlipAttempt(pageData, { senderId, provider, result: 'invalid', code: slip.matchResult || 'account', amount: slip.amount,
+      note: 'ปลายทางในสลิป: ' + (slip.receiverBank ? 'ธนาคาร ' + bankNameFromCode(slip.receiverBank) + ' ' : '') + (slip.receiverAccounts.join(', ') || '-') + (slip.receiverNameTh ? ' (' + slip.receiverNameTh + ')' : '')
+        + ' · ที่ตั้งไว้: ' + (configStore.merchantBank || '-') + ' ' + (configStore.merchantAccount || '-') });
+    labelSlipResult(targetRecord.pageData, senderId, 'invalid');
+    await sendSlipReply(configStore.msgSlipInvalid);
+    return;
+  }
+
+  usedSlips.add(slip.transRef);
+  logSlipAttempt(pageData, { senderId, provider, result: 'valid', code: slip.transRef, amount: slip.amount, note: attempt ? 'ผ่านหลังลองใหม่ ' + attempt + ' ครั้ง' : '' });
+  labelSlipResult(targetRecord.pageData, senderId, 'valid');
+  if (usedSlips.size > 50000) { let i = 0; for (const k of usedSlips) { usedSlips.delete(k); if (++i >= 5000) break; } }
+
+  // บันทึกสลิปที่ผ่านการตรวจไว้ระดับเพจ (ใช้ดูสถานะ "โอนแล้ว" ของลูกค้า)
+  if (!targetRecord.pageData.slipLog) targetRecord.pageData.slipLog = [];
+  targetRecord.pageData.slipLog.push({ senderId, amount: Number(slip.amount) || 0, transRef: slip.transRef, time: Date.now() });
+  if (targetRecord.pageData.slipLog.length > 5000) targetRecord.pageData.slipLog.splice(0, 1000);
+
+  // บันทึกยอดโอนเข้า session ไลฟ์ของลูกค้าคนนี้
+  const slipSession = findLiveSessionForSender(targetRecord.pageData, senderId);
+  if (slipSession) {
+    slipSession.slips.push({
+      transRef: slip.transRef,
+      amount: Number(slip.amount) || 0,
+      senderId,
+      senderName: findCommenterBySender(slipSession, senderId)?.name || '',
+      time: Date.now()
+    });
+  }
+  const replyText = (configStore.msgSlipSuccess || '')
+    .replace('{amount}', slip.amount)
+    .replace('{date}', slip.dateText);
+
+  console.log(`✅ [Page: ${pageId}] สลิปถูกต้อง ส่งข้อความตอบกลับ`);
+  await sendSlipReply(replyText);
+}
+
+// ประวัติการตรวจสลิปล่าสุด (แสดงในหน้าตั้งค่าสลิป ช่วยดูสาเหตุที่ไม่ผ่าน)
+function logSlipAttempt(pageData, rec) {
+  if (!pageData.slipAttempts) pageData.slipAttempts = [];
+  pageData.slipAttempts.unshift({ time: Date.now(), ...rec, amount: rec.amount !== undefined ? Number(rec.amount) || 0 : undefined });
+  if (pageData.slipAttempts.length > 50) pageData.slipAttempts.length = 50;
+}
+const BANK_CODE_NAMES = { '002': 'กรุงเทพ', '004': 'กสิกรไทย', '006': 'กรุงไทย', '011': 'ทีทีบี', '014': 'ไทยพาณิชย์', '022': 'ซีไอเอ็มบี', '024': 'ยูโอบี', '025': 'กรุงศรี', '030': 'ออมสิน', '033': 'อาคารสงเคราะห์', '034': 'ธ.ก.ส.', '067': 'ทิสโก้', '069': 'เกียรตินาคิน', '073': 'แลนด์แอนด์เฮ้าส์' };
+function bankNameFromCode(c) { return BANK_CODE_NAMES[String(c)] || String(c); }
+
 app.post('/webhook', async (req, res) => {
   const body = req.body;
   res.status(200).send('EVENT_RECEIVED');
@@ -6553,107 +6828,19 @@ app.post('/webhook', async (req, res) => {
             }
           }
 
-          if (msgEvent.message && msgEvent.message.attachments) {
-            for (const att of msgEvent.message.attachments) {
-              if (att.type === 'image' && configStore.enableSlipVerify) {
-                const imageUrl = att.payload?.url;
-                if (!imageUrl) continue;
-                // ข้ามสติกเกอร์ / ปุ่มไลก์ 👍 / GIF (Facebook ส่งมาเป็น "รูปภาพ" แต่ไม่ใช่สลิป)
-                if (isStickerOrGif(msgEvent.message, att)) {
-                  console.log(`🙂 [Page: ${pageId}] ข้ามสติกเกอร์/GIF จาก ${senderId} ไม่ตรวจเป็นสลิป`);
-                  continue;
-                }
-
-                console.log(`🧾 [Page: ${pageId}] พบรูปภาพจากลูกค้า ID: ${senderId} กำลังตรวจสอบสลิป...`);
-                // ตรวจสลิปกับผู้ให้บริการที่ตั้งไว้ (ZWIZ / EasySlip)
-                const slipResult = await verifySlip(imageUrl, configStore, targetRecord.pageData);
-
-                const sendSlipReply = async (text) => {
-                  if (!configStore.pageAccessToken) return;
-                  try {
-                    await fbPost('https://graph.facebook.com/v19.0/me/messages', {
-                      recipient: { id: senderId },
-                      messaging_type: 'RESPONSE',
-                      message: { text }
-                    }, { access_token: configStore.pageAccessToken }, 1);
-                  } catch (sendErr) {
-                    console.error('❌ [Send Slip Reply Error]', sendErr.response?.data || sendErr.message);
-                  }
-                };
-
-                const slip = slipResult.slip || null;
-
-                if (!slip) {
-                  const errCode = slipResult.errCode || '';
-                  console.log(`⚠️ [Page: ${pageId}] อ่านข้อมูลสลิปไม่สำเร็จจาก EasySlip`, errCode);
-                  if (errCode === 'SLIP_PENDING') {
-                    await sendSlipReply('⏳ สลิปธนาคารกรุงเทพเพิ่งโอนไม่ถึง 5 นาที กรุณารอสักครู่แล้วส่งสลิปอีกครั้งนะคะ');
-                    continue;
-                  }
-                  // ปัญหาฝั่งระบบ (key / โควตา / เซิร์ฟเวอร์ EasySlip) ไม่ใช่ความผิดลูกค้า -> ไม่แจ้งลูกค้า
-                  const systemErr = ['MISSING_API_KEY', 'INVALID_API_KEY', 'QUOTA_EXCEEDED', 'INSUFFICIENT_QUOTA', 'IP_NOT_ALLOWED', 'BRANCH_INACTIVE', 'SERVICE_BANNED', 'SERVICE_DELETED', 'USER_BANNED', 'RATE_LIMIT_EXCEEDED', 'API_SERVER_ERROR', 'INTERNAL_SERVER_ERROR', 'INTERNAL_ERROR', 'IMAGE_DOWNLOAD_FAILED', 'NETWORK_ERROR', 'HTTP_500', 'HTTP_502', 'HTTP_503', 'HTTP_504'].includes(errCode);
-                  if (systemErr) targetRecord.pageData.lastSlipError = { code: errCode, at: Date.now() };
-                  const mode = configStore.slipUnreadableMode || 'smart';
-                  const payCtx = isPaymentContext(targetRecord.pageData, senderId);
-                  const notify = !systemErr && (mode === 'always' || (mode === 'smart' && payCtx));
-                  if (notify) {
-                    labelSlipResult(targetRecord.pageData, senderId, 'unreadable');
-                    await sendSlipReply(configStore.msgSlipUnreadable);
-                  } else {
-                    console.log(`🖼️ [Page: ${pageId}] รูปจาก ${senderId} ไม่ใช่สลิป/อ่านไม่ได้ -> ไม่ตอบ (${systemErr ? 'ปัญหาระบบ ' + errCode : 'ลูกค้าไม่ได้อยู่ในช่วงจ่ายเงิน'})`);
-                  }
-                  continue;
-                }
-
-                if (usedSlips.has(slip.transRef) || slip.isDuplicate) {
-                  console.log(`🔄 [Page: ${pageId}] สลิปซ้ำ ถูกใช้งานไปแล้ว`);
-                  labelSlipResult(targetRecord.pageData, senderId, 'duplicate');
-                  await sendSlipReply(configStore.msgSlipDuplicate);
-                  continue;
-                }
-
-                // ZWIZ ตรวจบัญชีปลายทางให้แล้ว (matched / not_matched) ถ้าไม่ได้ตรวจ (skipped) ใช้การเทียบของระบบเอง
-                const receiverOk = slip.matchResult === 'matched' ? true
-                  : slip.matchResult === 'not_matched' ? false
-                  : slip.receiverAccounts.length > 0
-                    ? accountMatches(configStore.merchantAccount, slip.receiverAccounts)
-                    : (!configStore.merchantAccount && !configStore.merchantName) || nameMatches(configStore.merchantName, slip.receiverNameTh);
-
-                if (!receiverOk) {
-                  console.log(`❌ [Page: ${pageId}] เลขบัญชีผู้รับไม่ตรงกับร้านค้า`, slip.receiverAccounts, slip.receiverNameTh);
-                  labelSlipResult(targetRecord.pageData, senderId, 'invalid');
-                  await sendSlipReply(configStore.msgSlipInvalid);
-                  continue;
-                }
-
-                usedSlips.add(slip.transRef);
-                labelSlipResult(targetRecord.pageData, senderId, 'valid');
-                if (usedSlips.size > 50000) { let i = 0; for (const k of usedSlips) { usedSlips.delete(k); if (++i >= 5000) break; } }
-
-                // บันทึกสลิปที่ผ่านการตรวจไว้ระดับเพจ (ใช้ดูสถานะ "โอนแล้ว" ของลูกค้า)
-                if (!targetRecord.pageData.slipLog) targetRecord.pageData.slipLog = [];
-                targetRecord.pageData.slipLog.push({ senderId, amount: Number(slip.amount) || 0, transRef: slip.transRef, time: Date.now() });
-                if (targetRecord.pageData.slipLog.length > 5000) targetRecord.pageData.slipLog.splice(0, 1000);
-
-                // บันทึกยอดโอนเข้า session ไลฟ์ของลูกค้าคนนี้
-                const slipSession = findLiveSessionForSender(targetRecord.pageData, senderId);
-                if (slipSession) {
-                  slipSession.slips.push({
-                    transRef: slip.transRef,
-                    amount: Number(slip.amount) || 0,
-                    senderId,
-                    senderName: findCommenterBySender(slipSession, senderId)?.name || '',
-                    time: Date.now()
-                  });
-                }
-                const replyText = (configStore.msgSlipSuccess || '')
-                  .replace('{amount}', slip.amount)
-                  .replace('{date}', slip.dateText);
-
-                console.log(`✅ [Page: ${pageId}] สลิปถูกต้อง ส่งข้อความตอบกลับ`);
-                await sendSlipReply(replyText);
+          if (msgEvent.message && msgEvent.message.attachments && configStore.enableSlipVerify) {
+            const types = msgEvent.message.attachments.map(a => a && a.type).join(',');
+            const urls = slipImageUrlsFromMessage(msgEvent.message);
+            if (types !== 'image') console.log(`📎 [Page: ${pageId}] ไฟล์แนบชนิด ${types} จาก ${senderId} · พบรูป ${urls.length}`);
+            if (!urls.length) {
+              const onlyStickers = msgEvent.message.attachments.every(a => a && a.type === 'image');
+              if (!onlyStickers) {
+                // บันทึกไว้ดูในประวัติตรวจสลิป เผื่อ Facebook ส่งสลิปมาในรูปแบบที่ยังไม่รองรับ
+                let raw = ''; try { raw = JSON.stringify(msgEvent.message.attachments).slice(0, 300); } catch (e) {}
+                logSlipAttempt(targetRecord.pageData, { senderId, provider: '-', result: 'noimage', code: types, note: 'ได้รับไฟล์แนบแต่ไม่พบรูปสลิป · ' + raw });
               }
             }
+            for (const imageUrl of urls) await processSlipImage(targetRecord, pageId, senderId, imageUrl, 0);
           }
           }, 'messaging');
         }
