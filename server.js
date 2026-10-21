@@ -2427,7 +2427,7 @@ app.get('/', (req, res) => {
                                 <div id="pager-cm" class="pager-bar flex flex-wrap items-center gap-2 text-xs text-slate-600 mb-2"></div>
                                 <div class="overflow-auto max-h-96">
                                     <table class="w-full text-xs">
-                                        <thead class="text-left text-slate-500 border-b border-slate-200"><tr><th class="py-2 pr-2">✓</th><th class="py-2 pr-2">ชื่อ</th><th class="py-2 pr-2">ครั้ง</th><th class="py-2 pr-2">ตรงคำดัก</th><th class="py-2 pr-2">สถานะโอน</th><th class="py-2 pr-2">คอมเมนต์ล่าสุด</th><th class="py-2 pr-2 text-center whitespace-nowrap">แชท</th><th class="py-2">เวลา</th></tr></thead>
+                                        <thead class="text-left text-slate-500 border-b border-slate-200"><tr><th class="py-2 pr-2">✓</th><th class="py-2 pr-2">ชื่อ</th><th class="py-2 pr-2">ครั้ง</th><th class="py-2 pr-2">ตรงคำดัก</th><th class="py-2 pr-2">สถานะโอน</th><th class="py-2 pr-2">คอมเมนต์ล่าสุด</th><th class="py-2 pr-2 text-center">แชท</th><th class="py-2">เวลา</th></tr></thead>
                                         <tbody id="lv-commenters"></tbody>
                                     </table>
                                 </div>
@@ -3769,7 +3769,7 @@ app.get('/', (req, res) => {
                     + '<td class="py-1.5 pr-2">' + (c.matchedCount > 0 ? '<span class="text-blue-600 font-semibold">' + c.matchedCount + ' (' + escapeHtml(c.lastKeyword) + ')</span>' : '-') + '</td>'
                     + '<td class="py-1.5 pr-2">' + pay + '</td>'
                     + '<td class="py-1.5 pr-2 text-slate-600">' + escapeHtml(c.lastMessage) + '</td>'
-                    + '<td class="py-1.5 pr-2 text-center whitespace-nowrap">' + messengerLinkHtml(c) + '</td>'
+                    + '<td class="py-1.5 pr-2 text-center">' + messengerLinkHtml(c) + '</td>'
                     + '<td class="py-1.5 text-slate-500">' + fmtTime(c.lastTime) + '</td></tr>';
             });
             document.getElementById('lv-commenters').innerHTML = ch || '<tr><td colspan="8" class="py-3 text-slate-400">ยังไม่มีคอมเมนต์</td></tr>';
@@ -3865,40 +3865,16 @@ app.get('/', (req, res) => {
             if(e.key === 'Escape') closeChatBox();
             if(e.key === 'Enter' && !e.shiftKey && e.target && e.target.id === 'chat-box-input') { e.preventDefault(); sendChatBox(); }
         });
-        // 📋 คัดลอกชื่อลูกค้า แล้วเปิดกล่องข้อความ Business Suite (กด Ctrl+V ในช่องค้นหา)
-        function copyText(t) {
-            try { if(navigator.clipboard && window.isSecureContext) { navigator.clipboard.writeText(t); return; } } catch(e) {}
-            const ta = document.createElement('textarea');
-            ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0';
-            document.body.appendChild(ta); ta.select();
-            try { document.execCommand('copy'); } catch(e) {}
-            document.body.removeChild(ta);
-        }
-        function showToast(t) {
-            let el = document.getElementById('mini-toast');
-            if(!el) {
-                el = document.createElement('div'); el.id = 'mini-toast';
-                el.className = 'fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] px-4 py-2 rounded-xl bg-slate-800 text-white text-sm shadow-lg';
-                el.style.transform = 'translateX(-50%)'; el.style.left = '50%';
-                document.body.appendChild(el);
-            }
-            el.innerText = t; el.style.display = 'block';
-            clearTimeout(el._t); el._t = setTimeout(function() { el.style.display = 'none'; }, 3500);
-        }
-        function copyNameAndOpen(name) {
+        function copyNameOpenInbox() {
             const pid = (currentConfig && currentConfig.pageId) || currentActivePageId;
-            copyText(name || '');
+            try { navigator.clipboard.writeText(chatBoxName); } catch(e) {}
             window.open('https://business.facebook.com/latest/inbox/all?asset_id=' + encodeURIComponent(pid) + '&mailbox_id=' + encodeURIComponent(pid), '_blank');
-            showToast('📋 คัดลอก "' + name + '" แล้ว · กด Ctrl+V ในช่องค้นหาของกล่องข้อความ');
         }
-        function copyNameOpenInbox() { copyNameAndOpen(chatBoxName); }
-        function copyNameOpenInboxBtn(btn) { copyNameAndOpen(btn.getAttribute('data-name') || ''); }
 
         function messengerLinkHtml(c) {
             if(!currentActivePageId || !c.userId) return '';
             const svg = '<svg viewBox="0 0 24 24" class="w-5 h-5"><circle cx="12" cy="12" r="12" fill="#0866FF"/><path fill="#fff" d="M5.9 14.6l3.1-4.9c.5-.8 1.5-1 2.3-.4l2.4 1.8c.2.2.5.2.8 0l3.3-2.5c.4-.3 1 .2.7.6l-3.1 4.9c-.5.8-1.5 1-2.3.4l-2.4-1.8c-.2-.2-.5-.2-.8 0l-3.3 2.5c-.4.3-1-.2-.7-.6z"/></svg>';
-            return '<button type="button" data-uid="' + escapeHtml(c.userId) + '" data-psid="' + escapeHtml(c.chatId || '') + '" data-name="' + escapeHtml(c.name || c.userId) + '" onclick="openChatBox(this)" title="แชทกับ ' + escapeHtml(c.name || '') + (c.chatId ? '' : ' (ยังไม่มีแชท ส่งข้อความแรกจากคอมเมนต์ได้)') + '" class="inline-flex items-center justify-center hover:scale-110 transition' + (c.chatId ? '' : ' opacity-50') + '">' + svg + '</button>'
-                + '<button type="button" data-name="' + escapeHtml(c.name || '') + '" onclick="copyNameOpenInboxBtn(this)" title="คัดลอกชื่อ แล้วเปิดกล่องข้อความ Business Suite (กด Ctrl+V ในช่องค้นหา)" class="ml-1 inline-flex items-center justify-center w-5 h-5 rounded-full border border-slate-300 text-[11px] hover:bg-slate-100 align-middle">📋</button>';
+            return '<button type="button" data-uid="' + escapeHtml(c.userId) + '" data-psid="' + escapeHtml(c.chatId || '') + '" data-name="' + escapeHtml(c.name || c.userId) + '" onclick="openChatBox(this)" title="แชทกับ ' + escapeHtml(c.name || '') + (c.chatId ? '' : ' (ยังไม่มีแชท ส่งข้อความแรกจากคอมเมนต์ได้)') + '" class="inline-flex items-center justify-center hover:scale-110 transition' + (c.chatId ? '' : ' opacity-50') + '">' + svg + '</button>';
         }
 
         function toggleAllCommenters(on) {
