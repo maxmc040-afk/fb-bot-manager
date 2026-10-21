@@ -1739,6 +1739,18 @@ function checkAddressAgainstZip(address, postcode) {
       : (hay.includes(r.an) || (r.an.startsWith('เมือง') && hay.includes('เมือง')));
     return dOk && aOk;
   });
+  if (idx < 0) {
+    // ไม่ตรงกับรหัสไปรษณีย์นี้: อาจเป็นรหัสไปรษณีย์เก่า (เช่น ต.บางเสาธง เปลี่ยนจาก 10540 เป็น 10570)
+    // -> หาตำบลชื่อเดียวกันในจังหวัดเดียวกันจากทั้งประเทศ แล้วเสนอให้เลือก (ระบบจะแก้รหัสไปรษณีย์ให้)
+    const md = marked.district ? compactTh(marked.district) : '';
+    const provs = new Set(rows.map(r => r.pn));
+    const alts = thaiAddrDb.filter(r => r.z !== zip && r.dn.length >= 2 && (provs.has(r.pn) || hay.includes(r.pn)) &&
+      (md ? md === r.dn : countOcc(hay, r.dn) >= (r.dn === r.an ? 2 : 1)));
+    alts.sort((x, y) => (hay.includes(y.an) ? 1 : 0) - (hay.includes(x.an) ? 1 : 0));
+    if (alts.length && alts.length <= 5) {
+      return { status: 'check', zip, matchIndex: -1, altZip: true, options: alts.map(r => ({ d: r.d, a: r.a, p: r.p, z: r.z, alt: true })).concat(options) };
+    }
+  }
   return { status: idx >= 0 ? 'ok' : 'check', zip, matchIndex: idx, options };
 }
 
@@ -4388,7 +4400,10 @@ app.get('/', (req, res) => {
             const needCheck = b.addrCheck === 'check' || b.addrGuess;
             const sel = needCheck && b.addrGuess && b.addrMatch >= 0 ? -1 : b.addrMatch;
             let html = '<div class="mt-1 rounded-md ' + (needCheck ? 'bg-amber-50 border border-amber-300 p-1.5' : '') + '">';
-            if(needCheck) {
+            if(needCheck && b.addrAltZip) {
+                const a0 = opts[0];
+                html += '<div class="text-[11px] font-semibold text-amber-700 mb-1">⚠️ ต.' + escapeHtml(a0.d) + ' อ.' + escapeHtml(a0.a) + ' ใช้รหัสไปรษณีย์ ' + escapeHtml(a0.z) + ' (ลูกค้าพิมพ์ ' + escapeHtml(b.addrZip) + ' อาจเป็นรหัสเก่า) เลือกด้านล่างเพื่อแก้ให้</div>';
+            } else if(needCheck) {
                 html += '<div class="text-[11px] font-semibold text-amber-700 mb-1">⚠️ ' + (b.addrCheck === 'check'
                     ? 'ตำบล/อำเภอไม่ตรงกับรหัสไปรษณีย์ ' + escapeHtml(b.addrZip) + ' กรุณาเลือกที่ถูกต้อง'
                     : 'ระบบเดาตำบล/อำเภอให้ (ลูกค้าพิมพ์ไม่ชัด) กรุณาเลือกยืนยัน') + '</div>';
@@ -4398,7 +4413,7 @@ app.get('/', (req, res) => {
             opts.forEach(function(o, i) {
                 const isBkk = o.p.indexOf('กรุงเทพ') >= 0;
                 const label = (isBkk ? 'แขวง' : 'ต.') + o.d + ' › ' + (isBkk ? 'เขต' : 'อ.') + o.a + ' › ' + o.p + ' ' + o.z;
-                const mark = (i === b.addrMatch && !needCheck) ? '✓ ' : (i === b.addrMatch ? '★ ' : '');
+                const mark = o.alt ? '★ ' : ((i === b.addrMatch && !needCheck) ? '✓ ' : (i === b.addrMatch ? '★ ' : ''));
                 html += '<option value="' + i + '"' + (i === sel ? ' selected' : '') + '>' + escapeHtml(mark + label) + '</option>';
             });
             html += '</select></div>';
@@ -6210,7 +6225,7 @@ app.get('/api/live/buyers', checkAuth, (req, res) => {
       .filter(x => x.senderId === b.userId || (b.psid && x.senderId === b.psid))
       .reduce((sum, x) => sum + (Number(x.amount) || 0), 0);
     const chk = checkAddressAgainstZip(b.address, b.postcode);
-    return { ...b, slipTotal, addrCheck: chk.status, addrZip: chk.zip || '', addrOptions: chk.options, addrMatch: chk.matchIndex ?? -1 };
+    return { ...b, slipTotal, addrCheck: chk.status, addrZip: chk.zip || '', addrOptions: chk.options, addrMatch: chk.matchIndex ?? -1, addrAltZip: !!chk.altZip };
   });
   const job = s.buyersJob
     ? { running: s.buyersJob.running, total: s.buyersJob.total, done: s.buyersJob.done, found: s.buyersJob.found, message: s.buyersJob.message, warning: s.buyersJob.warning }
