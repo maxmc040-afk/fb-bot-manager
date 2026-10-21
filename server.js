@@ -5810,7 +5810,7 @@ app.get('/api/chat/messages', checkAuth, async (req, res) => {
     let messages = [];
     if (convId) {
       const r = await axios.get('https://graph.facebook.com/v19.0/' + encodeURIComponent(convId) + '/messages', {
-        params: { fields: 'id,message,from,created_time,attachments{mime_type,name,file_url,image_data{url,preview_url}},sticker', limit: 30, access_token: t.pageData.config.pageAccessToken }, timeout: 15000
+        params: { fields: 'id,message,from,created_time,attachments{mime_type,name,file_url,image_data{url,preview_url}},sticker', limit: 50, access_token: t.pageData.config.pageAccessToken }, timeout: 15000
       });
       messages = ((r.data && r.data.data) || []).map(m => {
         const images = [], files = [];
