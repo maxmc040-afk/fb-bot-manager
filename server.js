@@ -161,9 +161,9 @@ async function listPageLabels(pageData) {
   }
   const out = Array.from(groups.values()).sort((x, y) => x.name.localeCompare(y.name, 'th'));
   // จำไว้ใช้ตอน "ลบป้าย" / "กรองป้าย" ให้ครอบคลุมทุก ID ที่ชื่อเดียวกัน
-  pageData.labelGroups = { byId: new Map(), byName: new Map(), at: Date.now() };
+  pageData.labelGroups = { byId: new Map(), byName: new Map(), nameById: new Map(), at: Date.now() };
   for (const g of out) {
-    for (const id of g.ids) pageData.labelGroups.byId.set(id, g.ids);
+    for (const id of g.ids) { pageData.labelGroups.byId.set(id, g.ids); pageData.labelGroups.nameById.set(id, g.name); }
     pageData.labelGroups.byName.set(g.name.trim().toLowerCase(), g.ids);
   }
   return out;
@@ -183,6 +183,13 @@ async function sameNameLabelIds(pageData, id, name) {
   if (g && g.byId.has(id)) return g.byId.get(id);
   if (g && name && g.byName.has(String(name).trim().toLowerCase())) return g.byName.get(String(name).trim().toLowerCase());
   return [id];
+}
+
+// ป้ายที่จะ "ติด": ใช้ ID เดียวเท่านั้น (ติดหลาย ID จะเห็นป้ายซ้ำ / ไปติดป้ายที่ซ่อนอยู่ใน Business Suite)
+// ใช้ ID ที่เลือกไว้ ถ้ายังมีอยู่ในเพจ · ถ้าถูกลบไปแล้ว ใช้ป้ายชื่อเดียวกันตัวแรก
+async function labelIdForAdd(pageData, id, name) {
+  const ids = await sameNameLabelIds(pageData, id, name).catch(() => [String(id)]);
+  return ids.includes(String(id)) ? [String(id)] : ids.slice(0, 1);
 }
 
 // ป้ายกำกับทั้งหมดของลูกค้า 1 คน (คืนค่าเป็น Set ของ label id)
@@ -223,6 +230,27 @@ function pageCommenterRec(pageData, senderId) {
   return r;
 }
 
+// 🔎 อ่านป้ายจริงของลูกค้ากลับมาจาก Facebook เพื่อยืนยันว่าติด/ลบสำเร็จจริง
+// คืนค่า { ok, shown } หรือ null ถ้าอ่านไม่ได้ (เช่น บัญชีสมัครด้วยเบอร์โทร)
+async function verifyUserLabels(pageData, psid, addList, removeList) {
+  try {
+    await sleep(1500);
+    const have = await getUserLabelIds(pageData, psid);
+    const g = pageData.labelGroups;
+    const nameOf = (id) => (g && g.nameById && g.nameById.get(id)) || id;
+    const lc = (x) => String(x || '').trim().toLowerCase();
+    const names = new Set();
+    for (const id of have) names.add(lc(nameOf(id)));
+    const missing = addList.filter(l => !names.has(lc(l.name)) && !have.has(String(l.id))).map(l => l.name);
+    const still = removeList.filter(l => names.has(lc(l.name)) || have.has(String(l.id))).map(l => l.name);
+    const shown = Array.from(have).map(nameOf).filter(n => !/^[0-9]+$/.test(n)).join(', ') || 'ไม่มี';
+    if (missing.length || still.length) {
+      return { ok: false, shown, text: '⚠️ Facebook ตอบสำเร็จ แต่ตรวจแล้ว' + (missing.length ? ' ไม่พบป้าย ' + missing.join(', ') : '') + (still.length ? ' ป้าย ' + still.join(', ') + ' ยังอยู่' : '') + ' · ป้ายตอนนี้: ' + shown };
+    }
+    return { ok: true, shown };
+  } catch (e) { return null; }
+}
+
 // ติด / ลบป้ายให้คนที่คอมเมนต์ตรงคำดัก (ทำครั้งเดียวต่อคนต่อ session)
 // labels = ป้ายที่จะติด (array) หรือ config ของ session ({ keywordLabels, keywordRemoveLabels })
 function labelKeywordCommenter(pageData, commenter, psid, labels) {
@@ -237,17 +265,16 @@ function labelKeywordCommenter(pageData, commenter, psid, labels) {
     const errors = [];
     const done = [];
     for (const l of addList) {
-      // ป้ายชื่อเดียวกันในเพจอาจมีหลาย ID (เช่น สร้างใน Business Suite + สร้างผ่าน API) -> ติดให้ครบทุก ID
-      // เพื่อให้ป้ายขึ้นในหน้า Meta Business Suite แน่นอน
-      let ids = await sameNameLabelIds(pageData, l.id, l.name).catch(() => [l.id]);
+      let ids = await labelIdForAdd(pageData, l.id, l.name);
       let okCount = 0, lastErr = null;
       for (let round = 0; round < 2 && !okCount; round++) {
         if (round === 1) {
           // ป้ายเดิมถูกลบ (Facebook ตอบว่าไม่มีป้ายนี้) -> โหลดรายชื่อป้ายใหม่ แล้วหาจากชื่อ
           if (lastErr?.response?.data?.error?.code !== 100) break;
           pageData.labelGroups = null;
-          const again = await sameNameLabelIds(pageData, l.id, l.name).catch(() => ids);
-          if (again.join() === ids.join()) break;
+          const all = await sameNameLabelIds(pageData, '__deleted__', l.name).catch(() => ids);
+          const again = all.filter(x => !ids.includes(x)).slice(0, 1);
+          if (!again.length) break;
           ids = again;
         }
         for (const id of ids) {
@@ -284,11 +311,18 @@ function labelKeywordCommenter(pageData, commenter, psid, labels) {
       commenter.kwLabeled = true;
       commenter.kwLabelStatus = '✅ ' + done.join(' ');
       pageData.lastLabelError = ''; // ติดป้ายสำเร็จแล้ว ล้างคำเตือนเดิม
+      const v = await verifyUserLabels(pageData, psid, addList, removeList);
+      if (v && !v.ok) {
+        commenter.kwLabelStatus = v.text;
+        pageData.lastLabelError = v.text; pageData.lastLabelErrorAt = Date.now();
+        commenter.kwLabeled = false;
+      } else if (v) commenter.kwLabelStatus = '✅ ' + done.join(' ') + ' · ป้ายตอนนี้: ' + v.shown;
     }
   }, 'kw-label');
 }
 
 // ติด/ลบป้ายตามที่แอดมินเลือกไว้ในแต่ละผลตรวจสลิป: result = 'valid' | 'invalid' | 'unreadable' | 'duplicate'
+const SLIP_RESULT_TH = { valid: 'สลิปถูกต้อง', invalid: 'สลิปไม่ถูกต้อง', unreadable: 'สลิปตรวจสอบไม่ได้', duplicate: 'สลิปซ้ำ' };
 function labelSlipResult(pageData, psid, result) {
   const cfg = pageData.config;
   const rule = (cfg.slipLabels || {})[result] || {};
@@ -296,26 +330,49 @@ function labelSlipResult(pageData, psid, result) {
   const remove = Array.isArray(rule.remove) ? rule.remove.filter(l => l && l.id) : [];
   if (!psid || !cfg.pageAccessToken || (!add.length && !remove.length)) return;
   runTask(async () => {
-    for (const l of add) {
-      let ids = await sameNameLabelIds(pageData, l.id, l.name).catch(() => [l.id]);
-      let okCount = 0, lastErr = null;
-      for (const id of ids) { try { await setInboxLabelById(pageData, psid, id); okCount++; } catch (e) { lastErr = e; } }
-      if (!okCount && lastErr?.response?.data?.error?.code === 100) {
-        // ป้ายเดิมถูกลบ -> โหลดใหม่แล้วหาจากชื่อ
-        pageData.labelGroups = null;
-        ids = await sameNameLabelIds(pageData, l.id, l.name).catch(() => []);
-        for (const id of ids) { try { await setInboxLabelById(pageData, psid, id); okCount++; } catch (e) { lastErr = e; } }
+    const errors = [], done = [];
+    const trySet = async (id, del) => {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try { await setInboxLabelById(pageData, psid, id, del); return null; }
+        catch (e) { if (attempt === 1 || !isTransientFbError(e)) return e; await sleep(800); }
       }
-      if (okCount) console.log('🏷️ [Label] ติดป้าย "' + l.name + '" ให้ ' + psid + ' (' + okCount + '/' + ids.length + ' ID)');
-      else { pageData.lastLabelError = '"' + l.name + '": ' + graphErrorMessage(lastErr); pageData.lastLabelErrorAt = Date.now(); console.error('❌ [Label Error]', pageData.lastLabelError); }
+    };
+    for (const l of add) {
+      // ติด ID เดียว (ไม่ไปติดป้ายชื่อซ้ำที่ซ่อนอยู่ใน Business Suite)
+      let ids = await labelIdForAdd(pageData, l.id, l.name);
+      let lastErr = null, ok = false;
+      for (const id of ids) { lastErr = await trySet(id); if (!lastErr) { ok = true; break; } }
+      if (!ok && lastErr?.response?.data?.error?.code === 100) {
+        // ป้ายเดิมถูกลบ -> โหลดใหม่แล้วหาจากชื่อ (ใช้ตัวเดียว)
+        pageData.labelGroups = null;
+        ids = (await sameNameLabelIds(pageData, '__deleted__', l.name).catch(() => [])).filter(x => !ids.includes(x)).slice(0, 1);
+        for (const id of ids) { lastErr = await trySet(id); if (!lastErr) { ok = true; break; } }
+      }
+      if (ok) { done.push('+' + l.name); console.log('🏷️ [Label] สลิป: ติดป้าย "' + l.name + '" ให้ ' + psid); }
+      else errors.push('ติด "' + l.name + '": ' + graphErrorMessage(lastErr));
     }
     for (const l of remove) {
-      try {
-        for (const id of await sameNameLabelIds(pageData, l.id, l.name)) { try { await setInboxLabelById(pageData, psid, id, true); } catch (e) {} }
-        console.log('🏷️ [Label] ลบป้าย "' + l.name + '" ของ ' + psid);
+      // ลบทุก ID ที่ชื่อเดียวกัน ให้ป้ายหายจริง
+      for (const id of await sameNameLabelIds(pageData, l.id, l.name).catch(() => [l.id])) {
+        const e = await trySet(id, true);
+        if (e && e.response?.data?.error?.code !== 100) errors.push('ลบ "' + l.name + '": ' + graphErrorMessage(e));
       }
-      catch (e) { /* ลูกค้าไม่มีป้ายนี้อยู่แล้ว ไม่เป็นไร */ }
+      done.push('-' + l.name);
     }
+    let status;
+    if (errors.length) status = '❌ ' + errors.join(' · ').slice(0, 300);
+    else {
+      const v = await verifyUserLabels(pageData, psid, add, remove);
+      status = v ? (v.ok ? '✅ ' + done.join(' ') + ' · ป้ายตอนนี้: ' + v.shown : v.text) : '✅ ' + done.join(' ');
+    }
+    if (status.charAt(0) !== '✅') {
+      pageData.lastLabelError = (SLIP_RESULT_TH[result] || result) + ': ' + status;
+      pageData.lastLabelErrorAt = Date.now();
+      console.error('❌ [Label Error]', pageData.lastLabelError);
+    }
+    // แสดงผลการติดป้ายในประวัติตรวจสลิป (รายการล่าสุดของลูกค้าคนนี้)
+    const at = (pageData.slipAttempts || []).find(a => a.senderId === psid && Date.now() - a.time < 10 * 60000);
+    if (at) at.labelStatus = status;
   }, 'label');
 }
 
@@ -3209,7 +3266,7 @@ app.get('/', (req, res) => {
                         + '<td class="py-1.5 pr-2 whitespace-nowrap font-semibold ' + m[1] + '">' + m[0] + '</td>'
                         + '<td class="py-1.5 pr-2 text-right">' + (a.amount !== undefined && a.amount !== null ? fmtMoney(a.amount) : '-') + '</td>'
                         + '<td class="py-1.5 pr-2 font-mono text-slate-500">' + escapeHtml(a.code || '') + '</td>'
-                        + '<td class="py-1.5 text-slate-600">' + escapeHtml(a.note || '') + '</td></tr>';
+                        + '<td class="py-1.5 text-slate-600">' + escapeHtml(a.note || '') + (a.labelStatus ? '<div class="text-[11px] ' + (a.labelStatus.charAt(0) === '✅' ? 'text-pink-600' : 'text-rose-600') + '">🏷️ ' + escapeHtml(a.labelStatus) + '</div>' : '') + '</td></tr>';
                 });
                 const hb = document.getElementById('slip-history-body');
                 if (hb) hb.innerHTML = rows || '<tr><td colspan="5" class="py-3 text-slate-400">ยังไม่มีประวัติ</td></tr>';
