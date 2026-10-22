@@ -1631,6 +1631,21 @@ function formatThaiAddress(parts) {
 }
 
 // แยกที่อยู่แบบฉลาด: ใช้ ต./อ./จ. ถ้ามี ไม่มีก็จับคู่กับฐานข้อมูลตำบลด้วยรหัสไปรษณีย์และชื่อ
+// ลูกค้าพิมพ์แค่ อำเภอ/เขต ไม่มีตำบล/แขวง (เช่น "ลาดพร้าว80 วังทองหลาง กรุงเทพฯ 10310")
+// -> ใช้ตำบล/แขวงที่ชื่อเดียวกับอำเภอ (ตำบลหลักของอำเภอ) ถ้าไม่พบชื่อตำบลอื่นของอำเภอนั้นในข้อความ
+function sameNameTambonOnly(rows, r, hay, raw) {
+  if (r.dn !== r.an || countOcc(hay, r.dn) < 1) return false;
+  if (rows.some(x => x !== r && x.an === r.an && x.dn !== r.dn && x.dn.length >= 2 && hay.includes(x.dn))) return false;
+  // คำที่อยู่ก่อนชื่ออำเภอต้องเป็นส่วนบ้านเลขที่/ซอย/ถนน (มีตัวเลข หรือขึ้นต้นด้วย ถ./ซ./ม.)
+  // ถ้าเป็นคำไทยอื่น อาจเป็นชื่อตำบลที่พิมพ์ผิด/อยู่คนละรหัส -> ไม่เดา ให้แอดมินเลือกเอง
+  const t = String(raw || '');
+  const i = t.indexOf(r.a);
+  if (i < 0) return true;
+  const toks = t.slice(0, i).replace(/(อำเภอ|เขต|อ\.)\s*$/, '').trim().split(/[\s,]+/).filter(Boolean);
+  const prev = toks[toks.length - 1] || '';
+  return !prev || /\d/.test(prev) || /^(ถ\.|ซ\.|ถนน|ซอย|ม\.|หมู่)/.test(prev);
+}
+
 function smartThaiAddress(text, postcode) {
   const raw = applyProvinceAliases(normalizeMarkers(String(text || '').replace(PHONE_RE_G, ' ').replace(RANK_MASK_RE, '$1'))).replace(/\s+/g, ' ').trim();
   const marked = parseThaiAddress(raw, postcode);
@@ -1645,7 +1660,7 @@ function smartThaiAddress(text, postcode) {
       let sc = 0;
       // ตำบลชื่อเดียวกับอำเภอ (เช่น ปากพะยูน) ต้องพบชื่อนั้น 2 ครั้ง หรือมี ต. นำหน้า จึงนับเป็นตำบล
       const dCount = countOcc(hay, r.dn);
-      const dHit = r.dn === r.an ? (dCount >= 2 || (marked.district && compactTh(marked.district) === r.dn)) : dCount >= 1;
+      const dHit = r.dn === r.an ? (dCount >= 2 || (marked.district && compactTh(marked.district) === r.dn) || sameNameTambonOnly(rows, r, hay, raw)) : dCount >= 1;
       if (dHit) sc += 4;
       const amphoeShort = r.an.replace(/^เมือง/, '');
       let aHit = false;
@@ -1737,7 +1752,7 @@ function checkAddressAgainstZip(address, postcode) {
   const hay = compactTh(raw.replace(/(ตำบล|แขวง|อำเภอ|เขต|จังหวัด|ต\.|อ\.|จ\.)/g, ' '));
   const idx = rows.findIndex(r => {
     const dOk = marked.district ? compactTh(marked.district) === r.dn
-      : countOcc(hay, r.dn) >= (r.dn === r.an ? 2 : 1);
+      : (countOcc(hay, r.dn) >= (r.dn === r.an ? 2 : 1) || sameNameTambonOnly(rows, r, hay, raw));
     const mc = compactTh(marked.city);
     const aOk = marked.city ? (mc === r.an || (r.an.startsWith('เมือง') && (mc === 'เมือง' || mc === r.an.replace(/^เมือง/, ''))))
       : (hay.includes(r.an) || (r.an.startsWith('เมือง') && hay.includes('เมือง')));
@@ -5979,7 +5994,7 @@ function chatTarget(req) {
   return { pageData, pid: pageData.config.pageId || req.query.pageId, uid, live, c, psid };
 }
 const convIdCache = new Map();
-async function findConversationId(pageData, pid, psid) {
+async function findChatConversationId(pageData, pid, psid) {
   const key = pid + ':' + psid;
   const hit = convIdCache.get(key);
   if (hit && Date.now() - hit.at < 6 * 3600000) return hit.id;
@@ -5998,7 +6013,7 @@ app.get('/api/chat/messages', checkAuth, async (req, res) => {
   const pending = t.c && Array.isArray(t.c.pendingComments) ? t.c.pendingComments.filter(x => Date.now() - x.time < 7 * 86400000) : [];
   if (!t.psid) return res.json({ success: true, psid: '', messages: [], canReply: false, canPrivateReply: pending.length > 0 });
   try {
-    const convId = await findConversationId(t.pageData, t.pid, t.psid);
+    const convId = await findChatConversationId(t.pageData, t.pid, t.psid);
     let messages = [];
     if (convId) {
       const r = await axios.get('https://graph.facebook.com/v19.0/' + encodeURIComponent(convId) + '/messages', {
