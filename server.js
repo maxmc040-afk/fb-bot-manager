@@ -5967,7 +5967,7 @@ app.get('/api/labels/duplicates', checkAuth, async (req, res) => {
 app.post('/api/labels/test', checkAuth, async (req, res) => {
   const pageData = usersDB[req.userId]?.pages[req.query.pageId];
   if (!pageData) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
-  const labelId = String(req.body.labelId || '');
+  const labelId = String((req.body || {}).labelId || '');
   const psid = String(req.body.psid || '').trim();
   if (!labelId || !psid) return res.json({ success: false, error: 'กรุณาเลือกบัญชีทดสอบ' });
   try {
@@ -5982,7 +5982,7 @@ app.post('/api/labels/test', checkAuth, async (req, res) => {
 app.post('/api/labels/delete', checkAuth, async (req, res) => {
   const pageData = usersDB[req.userId]?.pages[req.query.pageId];
   if (!pageData) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
-  const labelId = String(req.body.labelId || '');
+  const labelId = String((req.body || {}).labelId || '');
   try {
     const labels = await listPageLabels(pageData);
     const group = labels.find(l => l.ids.includes(labelId));
@@ -6321,6 +6321,9 @@ async function pendingCommentsFor(t) {
   const fresh = (list) => (list || []).filter(x => Date.now() - x.time < 7 * 86400000);
   let pending = t.c && Array.isArray(t.c.pendingComments) ? fresh(t.c.pendingComments) : [];
   if (pending.length || !t.c || !t.uid) return pending;
+  // กันดึงซ้ำทุก 5 วิ ตอนหน้าต่างแชทเปิดค้าง (ดึงได้ทุก 1 นาที)
+  if (t.c.pendingFetchAt && Date.now() - t.c.pendingFetchAt < 60000) return pending;
+  t.c.pendingFetchAt = Date.now();
   const objects = Array.from(new Set([t.c.lastPostId, t.live && t.live.videoId].filter(Boolean).map(String)));
   const found = [];
   for (const obj of objects) {
