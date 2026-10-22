@@ -7845,6 +7845,8 @@ app.post('/webhook', async (req, res) => {
                   await sleep(3000);
                   const c = liveSession.commenters.get(senderId);
                   const win = auctionAmountFor(liveSession, senderId, commentAt);
+                  // ข้อความส่งเข้าแชทไม่มี {amount} -> เติมบรรทัดยอดประมูลไว้บนสุดให้อัตโนมัติ
+                  if (inboxMsg && !/\{amount\}/i.test(inboxMsg)) inboxMsg = '🔨 ยอดประมูล {amount} บาท\n\n' + inboxMsg;
                   if (win) {
                     const amountText = Number(win.amount).toLocaleString('en-US');
                     inboxMsg = inboxMsg.replace(/\{amount\}/gi, amountText);
