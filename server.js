@@ -96,6 +96,29 @@ function slipImageUrlsFromMessage(message) {
   }
   return out;
 }
+// 🧾 การ์ด "ตรวจสอบยืนยันสลิป" ของ Messenger ที่มาเปล่า ๆ: ขอรูปจากข้อความนั้นผ่าน Graph API
+async function fetchSlipFromCard(targetRecord, pageId, senderId, mid) {
+  const pd = targetRecord.pageData;
+  // มีรูปสลิปของลูกค้าคนนี้เข้ามาตรวจแล้วในช่วงนี้ -> ไม่ต้องทำซ้ำ
+  if ((pd.slipAttempts || []).some(a => a.senderId === senderId && a.result !== 'noimage' && Date.now() - a.time < 90000)) return;
+  let urls = [], err = '';
+  try {
+    const r = await axios.get('https://graph.facebook.com/v19.0/' + encodeURIComponent(mid), {
+      params: { fields: 'message,attachments{mime_type,name,file_url,image_data{url,preview_url}}', access_token: pd.config.pageAccessToken }, timeout: 15000
+    });
+    for (const a of (r.data && r.data.attachments && r.data.attachments.data) || []) {
+      const u = (a.image_data && (a.image_data.url || a.image_data.preview_url)) || (/^image\//.test(a.mime_type || '') ? a.file_url : '');
+      if (u && !urls.includes(u)) urls.push(u);
+    }
+  } catch (e) { err = graphErrorMessage(e); }
+  if (!urls.length) {
+    logSlipAttempt(pd, { senderId, provider: '-', result: 'noimage', code: 'card',
+      note: 'ลูกค้าส่งสลิปแต่ Messenger แปลงเป็นการ์ด "ตรวจสอบยืนยันสลิป" และ Facebook ไม่ส่งรูปมาให้' + (err ? ' (' + err + ')' : '') + ' · ตรวจในแชทแล้วบันทึกแบบแมนนวล' });
+    return;
+  }
+  for (const u of urls) await processSlipImage(targetRecord, pageId, senderId, u, 0);
+}
+
 function runTask(fn, label) {
   return Promise.resolve().then(fn).catch(e => console.error('❌ [Task Error]', label || '', e?.response?.data || e?.message || e));
 }
@@ -3365,7 +3388,7 @@ app.get('/', (req, res) => {
                         + '<td class="py-1.5 pr-2 whitespace-nowrap font-semibold ' + m[1] + '">' + m[0] + '</td>'
                         + '<td class="py-1.5 pr-2 text-right">' + (a.amount !== undefined && a.amount !== null ? fmtMoney(a.amount) : '-') + '</td>'
                         + '<td class="py-1.5 pr-2 font-mono text-slate-500">' + escapeHtml(a.code || '') + '</td>'
-                        + '<td class="py-1.5 text-slate-600">' + escapeHtml(a.note || '') + (a.labelStatus ? '<div class="text-[11px] ' + (a.labelStatus.charAt(0) === '✅' ? 'text-pink-600' : 'text-rose-600') + '">🏷️ ' + escapeHtml(a.labelStatus) + '</div>' : '') + '</td></tr>';
+                        + '<td class="py-1.5 text-slate-600">' + escapeHtml(a.note || '') + (a.labelStatus ? '<div class="text-[11px] ' + (a.labelStatus.charAt(0) === '✅' ? 'text-pink-600' : 'text-rose-600') + '">🏷️ ' + escapeHtml(a.labelStatus) + '</div>' : '') + (a.replyStatus ? '<div class="text-[11px] ' + (a.replyStatus.charAt(0) === '💬' ? 'text-blue-600' : 'text-rose-600 font-semibold') + '">' + escapeHtml(a.replyStatus) + '</div>' : '') + '</td></tr>';
                 });
                 const hb = document.getElementById('slip-history-body');
                 if (hb) hb.innerHTML = rows || '<tr><td colspan="6" class="py-3 text-slate-400">ยังไม่มีประวัติ</td></tr>';
@@ -7388,15 +7411,24 @@ async function processSlipImage(targetRecord, pageId, senderId, imageUrl, attemp
   // ตรวจสลิปกับผู้ให้บริการที่ตั้งไว้ (ZWIZ / EasySlip)
   const slipResult = await verifySlip(imageUrl, configStore, targetRecord.pageData);
 
+  // ส่งข้อความตอบลูกค้า + บันทึกผลการส่งไว้ในประวัติตรวจสลิป (รายการล่าสุดของลูกค้าคนนี้)
   const sendSlipReply = async (text) => {
-    if (!configStore.pageAccessToken) return;
+    const at = (pageData.slipAttempts || []).find(a => a.senderId === senderId && a.result !== 'noimage' && Date.now() - a.time < 5 * 60000);
+    const mark = (st) => { if (at) at.replyStatus = st; };
+    if (!configStore.pageAccessToken) { mark('❌ ไม่ได้ส่งข้อความ: เพจไม่มี Token'); return; }
+    if (!String(text || '').trim()) { mark('⚠️ ไม่ได้ส่งข้อความ: ยังไม่ได้ตั้งข้อความตอบกลับของผลนี้ (หน้าตั้งค่าตรวจสลิป)'); return; }
     try {
       await fbPost('https://graph.facebook.com/v19.0/me/messages', {
         recipient: { id: senderId },
         messaging_type: 'RESPONSE',
-        message: { text }
-      }, { access_token: configStore.pageAccessToken }, 1);
+        message: { text: String(text).slice(0, 2000) }
+      }, { access_token: configStore.pageAccessToken }, 2);
+      mark('💬 ส่งข้อความตอบลูกค้าแล้ว');
     } catch (sendErr) {
+      if (isFbSpamBlock(sendErr)) setFbPause(pageData, 'inbox', sendErr);
+      const em = graphErrorMessage(sendErr);
+      mark('❌ ส่งข้อความตอบลูกค้าไม่สำเร็จ: ' + em);
+      pageData.lastSlipError = { code: 'REPLY: ' + em.slice(0, 120), at: Date.now() };
       console.error('❌ [Send Slip Reply Error]', sendErr.response?.data || sendErr.message);
     }
   };
@@ -7438,6 +7470,11 @@ async function processSlipImage(targetRecord, pageId, senderId, imageUrl, attemp
     return;
   }
 
+  // สลิปใบเดิมจากลูกค้าคนเดิมภายใน 10 นาที (เช่น รูป + การ์ดสลิปของ Messenger มาคู่กัน) -> ข้ามเงียบ ๆ ไม่ตอบว่าซ้ำ
+  if (usedSlips.has(slip.transRef) && (pageData.slipLog || []).some(x => x.transRef === slip.transRef && x.senderId === senderId && Date.now() - x.time < 10 * 60000)) {
+    console.log(`🔁 [Page: ${pageId}] สลิปเดิมจาก ${senderId} ส่งเข้ามาซ้ำในไม่กี่นาที ข้าม`);
+    return;
+  }
   if (usedSlips.has(slip.transRef) || slip.isDuplicate) {
     console.log(`🔄 [Page: ${pageId}] สลิปซ้ำ ถูกใช้งานไปแล้ว`);
     logSlipAttempt(pageData, { senderId, provider, result: 'duplicate', code: slip.transRef, amount: slip.amount });
@@ -7569,6 +7606,12 @@ app.post('/webhook', async (req, res) => {
               const onlyStickers = msgEvent.message.attachments.every(a => a && a.type === 'image');
               // การ์ด template ที่ไม่มีข้อมูล (Messenger แปลงสลิปเป็นการ์ด "ตรวจสอบยืนยันสลิป") -> รูปสลิปตัวจริงมาเป็นอีกข้อความ ไม่ต้องบันทึก
               const emptyCards = msgEvent.message.attachments.every(a => a && a.type !== 'image' && (!a.payload || !Object.keys(a.payload).length));
+              if (emptyCards && msgEvent.message.mid) {
+                // บางครั้ง Facebook ส่งมาแค่การ์ดเปล่า ไม่ส่งรูปสลิปตามมา -> รอ 15 วิ ถ้ายังไม่มีรูปสลิปของลูกค้าคนนี้
+                // ให้ถามรูปจาก Facebook ด้วย ID ข้อความ แล้วตรวจสลิปเอง
+                const mid = msgEvent.message.mid, pd = targetRecord.pageData;
+                setTimeout(() => runTask(() => fetchSlipFromCard(targetRecord, pageId, senderId, mid), 'slip-card'), 15000);
+              }
               if (!onlyStickers && !emptyCards) {
                 // บันทึกไว้ดูในประวัติตรวจสลิป เผื่อ Facebook ส่งสลิปมาในรูปแบบที่ยังไม่รองรับ
                 let raw = ''; try { raw = JSON.stringify(msgEvent.message.attachments).slice(0, 300); } catch (e) {}
