@@ -2826,9 +2826,10 @@ app.get('/', (req, res) => {
                     <h3 class="text-base font-bold text-slate-800">💰 ยอดที่ลูกค้าต้องจ่าย</h3>
                     <div class="text-sm text-slate-600">ลูกค้า: <b id="due-editor-name"></b></div>
                     <div class="text-xs text-slate-500">โอนมาแล้ว: <b id="due-editor-paid" class="text-emerald-700"></b></div>
-                    <label class="block text-xs font-semibold text-slate-600">ยอดที่ต้องจ่าย (บาท)
-                        <input type="number" id="due-editor-amount" min="0" step="0.01" oninput="previewDue()" class="mt-1 w-full p-2.5 text-lg border border-slate-300 rounded-xl focus:outline-none focus:border-indigo-500" placeholder="เช่น 650">
+                    <label class="block text-xs font-semibold text-slate-600">ยอดที่ต้องจ่าย (บาท) <span class="font-normal text-slate-400">· บวกหลายรายการได้ เช่น 250+300+100</span>
+                        <input type="text" inputmode="decimal" autocomplete="off" id="due-editor-amount" oninput="previewDue()" class="mt-1 w-full p-2.5 text-lg border border-slate-300 rounded-xl focus:outline-none focus:border-indigo-500" placeholder="เช่น 650 หรือ 250+300+100">
                     </label>
+                    <div id="due-editor-sum" class="hidden text-sm text-slate-600 px-1"></div>
                     <div id="due-editor-preview" class="hidden text-sm font-semibold px-3 py-2 rounded-xl"></div>
                     <div id="due-editor-msg" class="text-xs text-rose-600"></div>
                     <div class="flex items-center gap-2 pt-1">
@@ -3834,7 +3835,7 @@ app.get('/', (req, res) => {
                     : '<span class="text-slate-300">-</span>';
                 const due = Number(c.dueAmount) || 0, got = Math.round((Number(c.paidTotal) || 0) * 100) / 100;
                 const dueCell = '<button type="button" data-uid="' + escapeHtml(c.userId) + '" data-name="' + escapeHtml(c.name || c.userId) + '" onclick="editDueAmount(this)" title="คลิกเพื่อใส่/แก้ยอดที่ลูกค้าต้องจ่าย" class="px-2 py-0.5 rounded-md border whitespace-nowrap '
-                    + (due > 0 ? 'border-slate-300 bg-white text-slate-800 font-semibold hover:bg-slate-50">' + fmtMoney(due) + ' ฿ ✎' : 'border-dashed border-slate-300 text-slate-400 hover:bg-slate-50">+ ใส่ยอด') + '</button>';
+                    + (due > 0 ? 'border-slate-300 bg-white text-slate-800 font-semibold hover:bg-slate-50">' + fmtMoney(due) + ' ฿ ✎' + (c.dueExpr ? '<div class="text-[10px] font-normal text-slate-400">' + escapeHtml(c.dueExpr) + '</div>' : '') : 'border-dashed border-slate-300 text-slate-400 hover:bg-slate-50">+ ใส่ยอด') + '</button>';
                 let cmp = '';
                 if(due > 0) {
                     if(got === due) cmp = '<div class="mt-0.5 text-[11px] font-semibold text-emerald-700">✔ โอนครบ</div>';
@@ -3904,7 +3905,7 @@ app.get('/', (req, res) => {
             const c = commenterList.find(function(x) { return x.userId === dueEditUid; }) || {};
             document.getElementById('due-editor-name').innerText = btn.getAttribute('data-name') || dueEditUid;
             document.getElementById('due-editor-paid').innerText = fmtMoney(Number(c.paidTotal) || 0) + ' ฿ (' + (c.slipCount || 0) + ' สลิป)';
-            document.getElementById('due-editor-amount').value = Number(c.dueAmount) > 0 ? String(c.dueAmount) : '';
+            document.getElementById('due-editor-amount').value = Number(c.dueAmount) > 0 ? String(c.dueExpr || c.dueAmount) : '';
             document.getElementById('due-editor-del').classList.toggle('hidden', !(Number(c.dueAmount) > 0));
             document.getElementById('due-editor-msg').innerText = '';
             previewDue();
@@ -3915,11 +3916,27 @@ app.get('/', (req, res) => {
             document.getElementById('due-editor').classList.add('hidden');
             dueEditUid = '';
         }
+        // แปลงข้อความยอด เช่น "2+3+5", "250 + 300 - 50", "๑,๒๐๐" -> ผลรวม (ไม่ถูกต้อง = NaN)
+        function parseDueExpr(str) {
+            const t = String(str || '').replace(/[๐-๙]/g, function(d) { return String('๐๑๒๓๔๕๖๗๘๙'.indexOf(d)); }).replace(/[, ฿]|บาท/g, '');
+            if(!t) return 0;
+            if(!/^[+-]?[0-9]+([.][0-9]+)?([+-][0-9]+([.][0-9]+)?)*$/.test(t)) return NaN;
+            let sum = 0;
+            (t.match(/[+-]?[0-9]+([.][0-9]+)?/g) || []).forEach(function(x) { sum += parseFloat(x); });
+            return Math.round(sum * 100) / 100;
+        }
         function previewDue() {
             const el = document.getElementById('due-editor-preview');
+            const sumEl = document.getElementById('due-editor-sum');
             const c = commenterList.find(function(x) { return x.userId === dueEditUid; }) || {};
-            const due = Math.round((parseFloat(document.getElementById('due-editor-amount').value) || 0) * 100) / 100;
+            const raw = document.getElementById('due-editor-amount').value;
+            const due = parseDueExpr(raw);
             const got = Math.round((Number(c.paidTotal) || 0) * 100) / 100;
+            const norm = String(raw || '').replace(/[๐-๙]/g, function(d) { return String('๐๑๒๓๔๕๖๗๘๙'.indexOf(d)); });
+            const isExpr = /[0-9,] *[+-] *[0-9]/.test(norm);
+            if(isNaN(due)) { sumEl.classList.remove('hidden'); sumEl.innerHTML = '<span class="text-rose-600">⚠️ ใส่ได้เฉพาะตัวเลข และเครื่องหมาย + หรือ -</span>'; el.classList.add('hidden'); return; }
+            if(isExpr) { sumEl.classList.remove('hidden'); sumEl.innerHTML = '🧮 ' + escapeHtml(raw.replace(/ +/g, '').split('+').join(' + ').split('-').join(' - ')) + ' = <b class="text-lg text-indigo-700">' + fmtMoney(due) + ' ฿</b>'; }
+            else sumEl.classList.add('hidden');
             if(!(due > 0)) { el.classList.add('hidden'); return; }
             el.classList.remove('hidden', 'bg-emerald-50', 'text-emerald-700', 'bg-rose-50', 'text-rose-600', 'bg-blue-50', 'text-blue-600');
             if(got === due) { el.classList.add('bg-emerald-50', 'text-emerald-700'); el.innerText = '✔ โอนครบแล้ว'; }
@@ -3928,18 +3945,21 @@ app.get('/', (req, res) => {
         }
         async function saveDueEditor(remove) {
             if(!dueEditUid || !currentLiveId) return;
-            const v = remove ? '' : document.getElementById('due-editor-amount').value;
+            const expr = remove ? '' : document.getElementById('due-editor-amount').value.trim();
+            const total = parseDueExpr(expr);
             const msg = document.getElementById('due-editor-msg');
-            if(!remove && !(parseFloat(v) > 0)) { msg.innerText = 'กรุณากรอกยอดเงิน'; return; }
+            if(!remove && isNaN(total)) { msg.innerText = 'ใส่ได้เฉพาะตัวเลข และเครื่องหมาย + หรือ -'; return; }
+            if(!remove && !(total > 0)) { msg.innerText = 'กรุณากรอกยอดเงิน'; return; }
+            const v = remove ? '' : String(total);
             const btn = document.getElementById('due-editor-save');
             btn.disabled = true;
             try {
                 const r = await (await fetch(liveUrl('/api/live/due-amount', '&sid=' + currentLiveId), {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: dueEditUid, amount: v })
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: dueEditUid, amount: v, expr: /[0-9๐-๙,] *[+-] *[0-9๐-๙]/.test(expr) ? expr : '' })
                 })).json();
                 if(!r.success) { msg.innerText = '❌ ' + r.error; return; }
                 const c = commenterList.find(function(x) { return x.userId === dueEditUid; });
-                if(c) c.dueAmount = r.dueAmount;
+                if(c) { c.dueAmount = r.dueAmount; c.dueExpr = r.dueExpr || ''; }
                 closeDueEditor();
                 renderCommenters();
                 loadLiveDetail(false); // อัปเดตการ์ด "ยอดที่ยังขาด" ด้านบน
@@ -6238,11 +6258,14 @@ app.post('/api/live/due-amount', checkAuth, (req, res) => {
   const c = s.commenters.get(String(req.body.userId || ''));
   if (!c) return res.json({ success: false, error: 'ไม่พบลูกค้าคนนี้ใน session' });
   const raw = String(req.body.amount ?? '').replace(/[๐-๙]/g, d => String('๐๑๒๓๔๕๖๗๘๙'.indexOf(d))).replace(/[^0-9.]/g, '');
-  if (!raw) { delete c.dueAmount; return res.json({ success: true, dueAmount: 0 }); }
+  if (!raw) { delete c.dueAmount; delete c.dueExpr; return res.json({ success: true, dueAmount: 0 }); }
   const amount = Math.round(parseFloat(raw) * 100) / 100;
   if (!(amount > 0) || amount > 10000000) return res.json({ success: false, error: 'กรุณาใส่ยอดเงินให้ถูกต้อง' });
   c.dueAmount = amount;
-  res.json({ success: true, dueAmount: amount });
+  // เก็บสูตรที่แอดมินพิมพ์ (เช่น 250+300+100) ไว้แก้ไขภายหลัง
+  const expr = String(req.body.expr || '').replace(/[^0-9๐-๙+\-., ]/g, '').trim().slice(0, 200);
+  if (expr) c.dueExpr = expr; else delete c.dueExpr;
+  res.json({ success: true, dueAmount: amount, dueExpr: c.dueExpr || '' });
 });
 
 // 🗑️ ลบรายชื่อคนคอมเมนต์ออกจากตาราง (ไม่ลบสลิป · คอมเมนต์ใหม่จะกลับมาเอง)
