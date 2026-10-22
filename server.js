@@ -166,13 +166,13 @@ function auctionAmountFor(session, uid, at) {
     const lotBids = log.filter(b => b.time > lotStart && b.time <= lotClose).sort((x, y) => x.time - y.time);
     const mine = lotBids.filter(b => b.uid === uid);
     if (mine.length) {
-      // ใช้ "ราคาล่าสุด" ที่คนนี้บิดก่อนสัญญาณปิด (ไม่ใช่ราคาสูงสุดของเขา)
-      const myTop = mine[mine.length - 1];
+      // 1 รายการประมูล = ช่วงระหว่าง ❤️ ครั้งก่อน ถึง ❤️ ครั้งนี้ -> ใช้ "ราคาสูงสุด" ที่ผู้ชนะ (คนกด 1) บิดในช่วงนี้
+      const myTop = mine.reduce((m, b) => b.amount > m.amount ? b : m, mine[0]);
       const later = lotBids.filter(b => b.time >= myTop.time);
       const top = later.reduce((m, b) => b.amount > m.amount ? b : m, later[0]);
       const dupLot = Array.isArray(c.wonLots) && c.wonLots.includes(lotClose);
       return {
-        amount: myTop.amount, bidTime: myTop.time, lot: lotClose, dupLot,
+        amount: myTop.amount, bidTime: myTop.time, bidText: String(myTop.amount), lot: lotClose, lotStart, dupLot, source: 'lot',
         warning: dupLot ? 'กด 1 ซ้ำในรอบเดิม (ไม่บวกยอดซ้ำ)'
           : top.amount > myTop.amount ? ('ราคาสูงสุดก่อนปิดคือ ' + (top.name || top.uid) + ' ' + top.amount.toLocaleString('en-US')) : ''
       };
@@ -183,10 +183,10 @@ function auctionAmountFor(session, uid, at) {
   const from = Math.max(c.lastWinAt || 0, 0);
   const own = c.bids.filter(b => b.time > from && b.time <= at);
   if (!own.length) return null;
-  const bid = own[own.length - 1];
+  const bid = own.reduce((m, b) => b.amount > m.amount ? b : m, own[0]); // ราคาสูงสุดของคนนี้
   const higher = log.filter(b => b.uid !== uid && b.time >= bid.time && b.time <= at && b.amount > bid.amount)
     .sort((x, y) => y.amount - x.amount)[0];
-  return { amount: bid.amount, bidTime: bid.time, lot: 0,
+  return { amount: bid.amount, bidTime: bid.time, lot: 0, lotStart: from, source: 'latest',
     warning: [lotClose ? (wonThisLot ? 'ยังไม่มีสัญญาณปิด (หัวใจ) ของรอบนี้ ใช้ราคาล่าสุด' : 'ไม่พบราคาที่บิดก่อนสัญญาณปิดล่าสุด ใช้ราคาล่าสุดแทน') : '',
       higher ? ('มีคนบิดสูงกว่า: ' + (higher.name || higher.uid) + ' ' + higher.amount.toLocaleString('en-US')) : ''].filter(Boolean).join(' · ') };
 }
@@ -3018,6 +3018,7 @@ app.get('/', (req, res) => {
                     <h3 class="text-base font-bold text-slate-800">💰 ยอดที่ลูกค้าต้องจ่าย</h3>
                     <div class="text-sm text-slate-600">ลูกค้า: <b id="due-editor-name"></b></div>
                     <div class="text-xs text-slate-500">โอนมาแล้ว: <b id="due-editor-paid" class="text-emerald-700"></b></div>
+                    <div id="due-editor-trace" class="hidden text-[11px] text-slate-600 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1.5 space-y-0.5"></div>
                     <div id="due-editor-warn" class="hidden text-xs text-rose-600 bg-rose-50 border border-rose-200 rounded-lg px-2 py-1.5"></div>
                     <label class="block text-xs font-semibold text-slate-600">ยอดที่ต้องจ่าย (บาท) <span class="font-normal text-slate-400">· บวกหลายรายการได้ เช่น 250+300+100</span>
                         <input type="text" inputmode="decimal" autocomplete="off" id="due-editor-amount" oninput="previewDue()" class="mt-1 w-full p-2.5 text-lg border border-slate-300 rounded-xl focus:outline-none focus:border-indigo-500" placeholder="เช่น 650 หรือ 250+300+100">
@@ -4128,6 +4129,18 @@ app.get('/', (req, res) => {
             document.getElementById('due-editor-amount').value = Number(c.dueAmount) > 0 ? String(c.dueExpr || c.dueAmount) : '';
             document.getElementById('due-editor-del').classList.toggle('hidden', !(Number(c.dueAmount) > 0));
             document.getElementById('due-editor-msg').innerText = '';
+            const tEl = document.getElementById('due-editor-trace');
+            const tr = (c.auctionTrace || []);
+            let th = '';
+            tr.forEach(function(w, i) {
+                const tm = function(x) { return x ? new Date(x).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '-'; };
+                th += '<div>' + (w.dup ? '⏭️ ' : '🔨 ') + '<b>' + (w.amount ? fmtMoney(w.amount) + ' ฿' : 'ไม่พบราคา') + '</b>'
+                    + (w.bidTime ? ' ← คอมเมนต์ราคาเวลา <b>' + tm(w.bidTime) + '</b>' : '')
+                    + (w.closeAt ? ' · ปิดรอบ ❤️ ' + tm(w.closeAt) : (w.source === 'latest' ? ' · (ไม่มีสัญญาณปิด ใช้ราคาล่าสุด)' : ''))
+                    + ' · กด 1 เวลา ' + tm(w.pressAt) + (w.dup ? ' (ซ้ำ ไม่บวกยอด)' : '') + '</div>';
+            });
+            tEl.innerHTML = th ? '<div class="font-semibold text-amber-800">ที่มาของยอดประมูล (ตรวจกับเวลาในคอมเมนต์ไลฟ์ได้)</div>' + th : '';
+            tEl.classList.toggle('hidden', !th);
             const wEl = document.getElementById('due-editor-warn');
             wEl.innerText = c.auctionWarn ? ('⚠️ ' + c.auctionWarn + ' · ตรวจยอดแล้วกดบันทึก คำเตือนจะหายไป') : '';
             wEl.classList.toggle('hidden', !c.auctionWarn);
@@ -6543,6 +6556,8 @@ app.get('/api/live/detail', checkAuth, (req, res) => {
       pub.auctionWins = wins.length;
       // แสดงเฉพาะคำเตือนที่ยังไม่ได้ตรวจ ตัดคำซ้ำ และเก็บรูปแบบเก่าให้อ่านง่าย
       pub.auctionWarn = Array.from(new Set(wins.filter(w => !w.ack).map(w => String(w.warning || '').split('·').map(x => x.trim()).filter(Boolean).join(' · ')).filter(Boolean))).slice(-2).join(' / ');
+      // ที่มาของยอดประมูล (ให้แอดมินตรวจได้ว่าเอาราคามาจากคอมเมนต์ไหน)
+      pub.auctionTrace = wins.slice(-5).map(w => ({ amount: w.amount, pressAt: w.time, bidTime: w.bidTime || 0, closeAt: w.lot || 0, lotStart: w.lotStart || 0, source: w.source || '', dup: !!w.dup, warning: w.warning || '' }));
       delete pub.wins;
       return {
         userId, ...pub,
@@ -7970,7 +7985,7 @@ app.post('/webhook', async (req, res) => {
                   }
                   if (c) {
                     if (!Array.isArray(c.wins)) c.wins = [];
-                    c.wins.push({ amount: win ? win.amount : 0, time: commentAt, lot: win ? win.lot : 0, dup: !!(win && win.dupLot), warning: win ? win.warning : 'กด 1 แต่ไม่พบราคาที่บิด (ลงท้ายด้วย 0)', commentId });
+                    c.wins.push({ amount: win ? win.amount : 0, time: commentAt, lot: win ? win.lot : 0, bidTime: win ? win.bidTime : 0, lotStart: win ? win.lotStart || 0 : 0, source: win ? win.source : '', dup: !!(win && win.dupLot), warning: win ? win.warning : 'กด 1 แต่ไม่พบราคาที่บิด (ลงท้ายด้วย 0)', commentId });
                     if (c.wins.length > 30) c.wins.shift();
                     c.lastWinAt = commentAt;
                     if (win && win.lot) { if (!Array.isArray(c.wonLots)) c.wonLots = []; if (!c.wonLots.includes(win.lot)) c.wonLots.push(win.lot); if (c.wonLots.length > 100) c.wonLots.shift(); }
