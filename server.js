@@ -133,7 +133,13 @@ function parseBid(text) {
   return n;
 }
 // 🔔 สัญญาณปิดการประมูล = เพจคอมเมนต์อีโมจิหัวใจ (เช่น ❤️❤️❤️❤️🙏)
-function isAuctionCloseSignal(text) {
+function isAuctionCloseSignal(text, cfg) {
+  cfg = cfg || {};
+  // คีย์เวิร์ดปิดประมูลที่แอดมินตั้งเอง (เช่น ปิด, จบ, sold) -> คอมเมนต์ของเพจที่มีคำนี้ = ปิดรอบ
+  const raw = String(text || '').trim().toLowerCase();
+  const words = Array.isArray(cfg.auctionCloseWords) ? cfg.auctionCloseWords : [];
+  if (raw && words.some(w => { w = String(w || '').trim().toLowerCase(); return w && raw.includes(w); })) return true;
+  if (cfg.auctionCloseHearts === false) return false;
   const t = String(text || '').replace(/[\uFE0F\u200D\s]/g, '');
   if (!t || t.length > 60) return false;
   if (!/[❤♥💖💗💓💕💞💘💝🧡💛💚💙💜🤍🖤🤎❣]/u.test(t)) return false;
@@ -155,11 +161,15 @@ function auctionAmountFor(session, uid, at) {
   const wonThisLot = Array.isArray(c.wonLots) && c.wonLots.includes(lotClose);
   if (lotClose && !(wonThisLot && openBids.length)) {
     const prevClose = closes.length > 1 ? closes[closes.length - 2] : 0;
-    const lotBids = log.filter(b => b.time > prevClose && b.time <= lotClose);
+    // เริ่มนับรอบหลังสัญญาณปิดครั้งก่อน และหลังการชนะครั้งก่อนของคนนี้ (กันราคาจากรอบเก่าหลุดเข้ามา ถ้าสัญญาณปิดครั้งก่อนตกหล่น)
+    const lotStart = Math.max(prevClose, c.lastWinAt || 0);
+    const lotBids = log.filter(b => b.time > lotStart && b.time <= lotClose);
     const mine = lotBids.filter(b => b.uid === uid);
     if (mine.length) {
-      const myTop = mine.reduce((m, b) => b.amount > m.amount ? b : m, mine[0]);
-      const top = lotBids.reduce((m, b) => b.amount > m.amount ? b : m, lotBids[0]);
+      // ใช้ "ราคาล่าสุด" ที่คนนี้บิดก่อนสัญญาณปิด (ไม่ใช่ราคาสูงสุดของเขา)
+      const myTop = mine[mine.length - 1];
+      const later = lotBids.filter(b => b.time >= myTop.time);
+      const top = later.reduce((m, b) => b.amount > m.amount ? b : m, later[0]);
       const dupLot = Array.isArray(c.wonLots) && c.wonLots.includes(lotClose);
       return {
         amount: myTop.amount, bidTime: myTop.time, lot: lotClose, dupLot,
@@ -177,7 +187,7 @@ function auctionAmountFor(session, uid, at) {
   const higher = log.filter(b => b.uid !== uid && b.time >= bid.time && b.time <= at && b.amount > bid.amount)
     .sort((x, y) => y.amount - x.amount)[0];
   return { amount: bid.amount, bidTime: bid.time, lot: 0,
-    warning: [lotClose ? (wonThisLot ? 'รอบใหม่ยังไม่มีหัวใจปิดรอบ ใช้ราคาล่าสุด' : 'ไม่ได้บิดในรอบที่เพิ่งปิด') : '',
+    warning: [lotClose ? (wonThisLot ? 'ยังไม่มีสัญญาณปิด (หัวใจ) ของรอบนี้ ใช้ราคาล่าสุด' : 'ไม่พบราคาที่บิดก่อนสัญญาณปิดล่าสุด ใช้ราคาล่าสุดแทน') : '',
       higher ? ('มีคนบิดสูงกว่า: ' + (higher.name || higher.uid) + ' ' + higher.amount.toLocaleString('en-US')) : ''].filter(Boolean).join(' · ') };
 }
 
@@ -2491,7 +2501,7 @@ app.get('/', (req, res) => {
                                 <div class="bg-rose-50 border border-rose-200 rounded-xl p-3" title="รวมเฉพาะลูกค้าที่ใส่ 'ยอดที่ต้องจ่าย' ไว้ในตารางรายชื่อคนคอมเมนต์"><div class="text-xs text-rose-600">ยอดที่ยังขาด (บาท)</div><div id="lv-stat-short" class="text-xl font-bold text-rose-600">0</div><div id="lv-stat-short-sub" class="text-[10px] text-rose-500 mt-0.5"></div></div>
                             </div>
                             <details id="lv-auction-box" class="hidden mt-3 bg-amber-50/60 border border-amber-200 rounded-xl p-3" open>
-                                <summary class="cursor-pointer select-none text-sm font-bold text-amber-800">🔨 ผลประมูลแต่ละรอบ <span class="font-normal text-xs text-slate-500">(ปิดรอบเมื่อเพจคอมเมนต์ ❤️)</span></summary>
+                                <summary class="cursor-pointer select-none text-sm font-bold text-amber-800">🔨 ผลประมูลแต่ละรอบ <span class="font-normal text-xs text-slate-500">(ปิดรอบเมื่อเพจคอมเมนต์ ❤️ หรือคีย์เวิร์ดปิดประมูล)</span></summary>
                                 <div class="overflow-auto max-h-64 mt-2">
                                     <table class="w-full text-xs">
                                         <thead class="text-left text-slate-500 border-b border-amber-200"><tr><th class="py-1.5 pr-2">ปิดรอบ</th><th class="py-1.5 pr-2 text-right">ราคาสูงสุด</th><th class="py-1.5 pr-2">คนบิดสูงสุด</th><th class="py-1.5 pr-2">คนกด 1 (ยอด)</th><th class="py-1.5">บิด</th></tr></thead>
@@ -2543,6 +2553,13 @@ app.get('/', (req, res) => {
                                 </label>
                                 <p class="text-xs text-slate-600 pl-6">ลูกค้าบิดราคาที่ <b>ลงท้ายด้วย 0</b> (เช่น 380, 1,500) → ผู้ชนะกด <b>1</b> → ระบบหาราคาล่าสุดที่คนนั้นบิด ใส่แทน <b>{amount}</b> ในข้อความ และบวกเข้า <b>"ยอดที่ต้องจ่าย"</b> ให้อัตโนมัติ (รอ 3 วินาทีก่อนส่ง เผื่อคอมเมนต์ราคามาช้า)</p>
                                 <div class="pl-6 pt-2 grid grid-cols-1 md:grid-cols-2 gap-3">
+                                    <div class="md:col-span-2 bg-white/70 border border-amber-200 rounded-lg p-3 space-y-2">
+                                        <div class="text-xs font-semibold text-amber-800">🔔 สัญญาณปิดการประมูล <span class="font-normal text-slate-500">(นับเฉพาะคอมเมนต์ของเพจ · ราคาที่บิดหลังสัญญาณนี้ไม่นับ)</span></div>
+                                        <label class="flex items-center gap-2 text-sm text-slate-700 cursor-pointer"><input type="checkbox" id="lv-auction-hearts" class="w-4 h-4 rounded"> ❤️ อีโมจิหัวใจ (เช่น ❤️❤️❤️🙏)</label>
+                                        <label class="block text-xs font-semibold text-slate-600">🔑 คีย์เวิร์ดปิดประมูล <span class="font-normal text-slate-400">· คั่นด้วยเครื่องหมายจุลภาค เช่น ปิด, จบ, sold · คอมเมนต์ของเพจที่มีคำนี้ = ปิดรอบ</span>
+                                            <input type="text" id="lv-auction-words" class="mt-1 w-full p-2 text-sm font-normal border border-amber-300 rounded-lg bg-white focus:outline-none focus:border-amber-500" placeholder="เช่น ปิด, จบ, sold, 🔨">
+                                        </label>
+                                    </div>
                                     <label class="block text-xs font-semibold text-amber-800">✏️ ข้อความแจ้งยอดประมูล (ส่งให้ผู้ชนะ)
                                         <textarea id="lv-auction-text" rows="3" class="mt-1 w-full p-2 text-sm font-normal border border-amber-300 rounded-lg bg-white focus:outline-none focus:border-amber-500" placeholder="🔨 ยอดประมูล {amount} บาท"></textarea>
                                         <span class="block text-[11px] font-normal text-slate-500 mt-0.5">ใส่ <b>{amount}</b> = ยอดที่ชนะ · <b>{name}</b> = ชื่อลูกค้า · ระบบวางข้อความนี้ไว้บนสุด ตามด้วย "ข้อความส่งเข้าแชทส่วนตัว" (ถ้าในข้อความส่งเข้าแชทมี {amount} อยู่แล้ว จะไม่ใส่ข้อความนี้ซ้ำ)</span>
@@ -2955,6 +2972,7 @@ app.get('/', (req, res) => {
                     <h3 class="text-base font-bold text-slate-800">💰 ยอดที่ลูกค้าต้องจ่าย</h3>
                     <div class="text-sm text-slate-600">ลูกค้า: <b id="due-editor-name"></b></div>
                     <div class="text-xs text-slate-500">โอนมาแล้ว: <b id="due-editor-paid" class="text-emerald-700"></b></div>
+                    <div id="due-editor-warn" class="hidden text-xs text-rose-600 bg-rose-50 border border-rose-200 rounded-lg px-2 py-1.5"></div>
                     <label class="block text-xs font-semibold text-slate-600">ยอดที่ต้องจ่าย (บาท) <span class="font-normal text-slate-400">· บวกหลายรายการได้ เช่น 250+300+100</span>
                         <input type="text" inputmode="decimal" autocomplete="off" id="due-editor-amount" oninput="previewDue()" class="mt-1 w-full p-2.5 text-lg border border-slate-300 rounded-xl focus:outline-none focus:border-indigo-500" placeholder="เช่น 650 หรือ 250+300+100">
                     </label>
@@ -3717,6 +3735,8 @@ app.get('/', (req, res) => {
             document.getElementById('lv-auction-mode').checked = !!liveCfg.auctionMode;
             document.getElementById('lv-auction-text').value = typeof liveCfg.auctionText === 'string' ? liveCfg.auctionText : '🔨 ยอดประมูล {amount} บาท';
             document.getElementById('lv-auction-nobid').value = liveCfg.auctionNoBidText || 'รอแอดมินแจ้งยอด';
+            document.getElementById('lv-auction-hearts').checked = liveCfg.auctionCloseHearts !== false;
+            document.getElementById('lv-auction-words').value = (liveCfg.auctionCloseWords || []).join(', ');
             if (!Array.isArray(liveCfg.keywordLabels)) liveCfg.keywordLabels = [];
             if (!Array.isArray(liveCfg.keywordRemoveLabels)) liveCfg.keywordRemoveLabels = [];
             renderLiveKeywords();
@@ -4062,6 +4082,9 @@ app.get('/', (req, res) => {
             document.getElementById('due-editor-amount').value = Number(c.dueAmount) > 0 ? String(c.dueExpr || c.dueAmount) : '';
             document.getElementById('due-editor-del').classList.toggle('hidden', !(Number(c.dueAmount) > 0));
             document.getElementById('due-editor-msg').innerText = '';
+            const wEl = document.getElementById('due-editor-warn');
+            wEl.innerText = c.auctionWarn ? ('⚠️ ' + c.auctionWarn + ' · ตรวจยอดแล้วกดบันทึก คำเตือนจะหายไป') : '';
+            wEl.classList.toggle('hidden', !c.auctionWarn);
             previewDue();
             document.getElementById('due-editor').classList.remove('hidden');
             setTimeout(function() { const i = document.getElementById('due-editor-amount'); i.focus(); i.select(); }, 50);
@@ -4285,6 +4308,8 @@ app.get('/', (req, res) => {
                 replyCooldownMin: parseInt(document.getElementById('lv-reply-cooldown').value, 10) || 0,
                 auctionMode: document.getElementById('lv-auction-mode').checked,
                 auctionText: document.getElementById('lv-auction-text').value,
+                auctionCloseHearts: document.getElementById('lv-auction-hearts').checked,
+                auctionCloseWords: document.getElementById('lv-auction-words').value.split(',').map(function(w) { return w.trim(); }).filter(Boolean),
                 auctionNoBidText: document.getElementById('lv-auction-nobid').value
             };
             const res = await fetch(liveUrl('/api/live/config', '&sid=' + currentLiveId), {
@@ -6358,7 +6383,9 @@ app.post('/api/live/create', checkAuth, (req, res) => {
       replyCooldownMin: Number(c.replyCooldownMin) || 0,
       auctionMode: !!c.auctionMode,
       auctionNoBidText: c.auctionNoBidText || 'รอแอดมินแจ้งยอด',
-      auctionText: typeof c.auctionText === 'string' ? c.auctionText : '🔨 ยอดประมูล {amount} บาท'
+      auctionText: typeof c.auctionText === 'string' ? c.auctionText : '🔨 ยอดประมูล {amount} บาท',
+      auctionCloseHearts: c.auctionCloseHearts !== false,
+      auctionCloseWords: Array.isArray(c.auctionCloseWords) ? c.auctionCloseWords.slice() : []
     },
     stats: { comments: 0, matched: 0 },
     commenters: new Map(),
@@ -6422,6 +6449,8 @@ app.post('/api/live/due-amount', checkAuth, (req, res) => {
   const amount = Math.round(parseFloat(raw) * 100) / 100;
   if (!(amount > 0) || amount > 10000000) return res.json({ success: false, error: 'กรุณาใส่ยอดเงินให้ถูกต้อง' });
   c.dueAmount = amount;
+  // แอดมินตรวจ/แก้ยอดแล้ว -> ซ่อนคำเตือนประมูลเดิม
+  if (Array.isArray(c.wins)) c.wins.forEach(w => { w.ack = true; });
   // เก็บสูตรที่แอดมินพิมพ์ (เช่น 250+300+100) ไว้แก้ไขภายหลัง
   const expr = String(req.body.expr || '').replace(/[^0-9๐-๙+\-., ]/g, '').trim().slice(0, 200);
   if (expr) c.dueExpr = expr; else delete c.dueExpr;
@@ -6466,7 +6495,8 @@ app.get('/api/live/detail', checkAuth, (req, res) => {
       const { pendingComments, kwLabeled, kwLabelBusy, bids, wonLots, ...pub } = c; // ข้อมูลภายใน ไม่ต้องส่งไปหน้าเว็บ
       const wins = Array.isArray(c.wins) ? c.wins : [];
       pub.auctionWins = wins.length;
-      pub.auctionWarn = wins.map(w => w.warning).filter(Boolean).slice(-2).join(' · ');
+      // แสดงเฉพาะคำเตือนที่ยังไม่ได้ตรวจ ตัดคำซ้ำ และเก็บรูปแบบเก่าให้อ่านง่าย
+      pub.auctionWarn = Array.from(new Set(wins.filter(w => !w.ack).map(w => String(w.warning || '').split('·').map(x => x.trim()).filter(Boolean).join(' · ')).filter(Boolean))).slice(-2).join(' / ');
       delete pub.wins;
       return {
         userId, ...pub,
@@ -6519,6 +6549,11 @@ app.post('/api/live/config', checkAuth, (req, res) => {
   if (typeof b.enableInbox === 'boolean') s.config.enableInbox = b.enableInbox;
   if (typeof b.enableAutoLike === 'boolean') s.config.enableAutoLike = b.enableAutoLike;
   if (typeof b.auctionMode === 'boolean') { s.config.auctionMode = b.auctionMode; ctx.pageData.config.auctionMode = b.auctionMode; }
+  if (typeof b.auctionCloseHearts === 'boolean') { s.config.auctionCloseHearts = b.auctionCloseHearts; ctx.pageData.config.auctionCloseHearts = b.auctionCloseHearts; }
+  if (Array.isArray(b.auctionCloseWords)) {
+    s.config.auctionCloseWords = Array.from(new Set(b.auctionCloseWords.map(w => String(w || '').trim()).filter(w => w && w !== '1'))).slice(0, 20).map(w => w.slice(0, 40));
+    ctx.pageData.config.auctionCloseWords = s.config.auctionCloseWords;
+  }
   if (typeof b.auctionText === 'string') { s.config.auctionText = b.auctionText.slice(0, 1000); ctx.pageData.config.auctionText = s.config.auctionText; }
   if (typeof b.auctionNoBidText === 'string') { s.config.auctionNoBidText = b.auctionNoBidText.trim().slice(0, 200) || 'รอแอดมินแจ้งยอด'; ctx.pageData.config.auctionNoBidText = s.config.auctionNoBidText; }
   if (b.replyCooldownMin !== undefined) {
@@ -7778,9 +7813,9 @@ app.post('/webhook', async (req, res) => {
             // ข้ามคอมเมนต์ที่เพจตอบเอง (ไม่นับเป็นลูกค้า และกันบอตตอบวนซ้ำ)
             if (senderId && (senderId === pageId || senderId === configStore.pageId)) {
               // 🔔 เพจคอมเมนต์หัวใจในไลฟ์ที่เปิดโหมดประมูล = ปิดการประมูลรอบนี้
-              if (isAuctionCloseSignal(comment.message) && !seenComment(targetRecord.pageData, comment.comment_id)) {
-                const ls = findLiveSessionForComment(targetRecord.pageData, comment.post_id, comment.video_id);
-                if (ls && ls.config.auctionMode) {
+              const ls = findLiveSessionForComment(targetRecord.pageData, comment.post_id, comment.video_id);
+              if (ls && ls.config.auctionMode && isAuctionCloseSignal(comment.message, ls.config) && !seenComment(targetRecord.pageData, comment.comment_id)) {
+                {
                   const at = comment.created_time ? Number(comment.created_time) * 1000 || Date.now() : Date.now();
                   if (!Array.isArray(ls.auctionCloses)) ls.auctionCloses = [];
                   ls.auctionCloses.push(at);
@@ -7862,7 +7897,13 @@ app.post('/webhook', async (req, res) => {
                   // 🔨 รอ 3 วิ เผื่อคอมเมนต์ราคาที่พิมพ์ก่อนกด 1 ยังมาไม่ถึง แล้วหายอดจบประมูล
                   await sleep(3000);
                   const c = liveSession.commenters.get(senderId);
-                  const win = auctionAmountFor(liveSession, senderId, commentAt);
+                  let win = auctionAmountFor(liveSession, senderId, commentAt);
+                  // ลูกค้ากด 1 ซ้ำภายใน 1 นาที หลังกด 1 ครั้งแรก -> ถือเป็นคอมเมนต์ซ้ำ ไม่ส่งข้อความ/ไม่บวกยอด
+                  if (c && c.lastWinAt && commentAt >= c.lastWinAt && commentAt - c.lastWinAt <= 60000) {
+                    c.dupPresses = (c.dupPresses || 0) + 1;
+                    console.log('🔁 [Auction] ' + customerName + ' กด 1 ซ้ำ (ข้าม)');
+                    return;
+                  }
                   // ข้อความส่งเข้าแชทไม่มี {amount} -> เติมบรรทัดยอดประมูลไว้บนสุดให้อัตโนมัติ
                   const aText = renderReplyText(typeof liveSession.config.auctionText === 'string' ? liveSession.config.auctionText : '🔨 ยอดประมูล {amount} บาท', customerName);
                   if (inboxMsg && aText.trim() && !/\{amount\}/i.test(inboxMsg)) inboxMsg = aText.trim() + '\n\n' + inboxMsg;
