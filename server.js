@@ -150,9 +150,10 @@ function auctionAmountFor(session, uid, at) {
   const log = session.bidLog || [];
   const closes = (session.auctionCloses || []).filter(t => t <= at);
   const lotClose = closes.length ? closes[closes.length - 1] : 0;
-  // มีราคาใหม่ที่บิดหลังสัญญาณปิดล่าสุด (รอบใหม่ที่ยังไม่ปิด) -> ใช้ราคาล่าสุดแทน
+  // ราคาที่บิดหลังหัวใจล่าสุด ไม่นับ (ปิดรอบไปแล้ว) ยกเว้นคนนี้ชนะรอบนั้นไปแล้วและบิดรอบใหม่ (แอดมินลืมส่งหัวใจ)
   const openBids = (c.bids || []).filter(b => b.time > Math.max(lotClose, c.lastWinAt || 0) && b.time <= at);
-  if (lotClose && !openBids.length) {
+  const wonThisLot = Array.isArray(c.wonLots) && c.wonLots.includes(lotClose);
+  if (lotClose && !(wonThisLot && openBids.length)) {
     const prevClose = closes.length > 1 ? closes[closes.length - 2] : 0;
     const lotBids = log.filter(b => b.time > prevClose && b.time <= lotClose);
     const mine = lotBids.filter(b => b.uid === uid);
@@ -176,7 +177,8 @@ function auctionAmountFor(session, uid, at) {
   const higher = log.filter(b => b.uid !== uid && b.time >= bid.time && b.time <= at && b.amount > bid.amount)
     .sort((x, y) => y.amount - x.amount)[0];
   return { amount: bid.amount, bidTime: bid.time, lot: 0,
-    warning: (lotClose ? 'ไม่ได้บิดในรอบที่เพิ่งปิด · ' : '') + (higher ? ('มีคนบิดสูงกว่า: ' + (higher.name || higher.uid) + ' ' + higher.amount.toLocaleString('en-US')) : '') };
+    warning: [lotClose ? (wonThisLot ? 'รอบใหม่ยังไม่มีหัวใจปิดรอบ ใช้ราคาล่าสุด' : 'ไม่ได้บิดในรอบที่เพิ่งปิด') : '',
+      higher ? ('มีคนบิดสูงกว่า: ' + (higher.name || higher.uid) + ' ' + higher.amount.toLocaleString('en-US')) : ''].filter(Boolean).join(' · ') };
 }
 
 // สรุปแต่ละรอบประมูล (ใช้แสดงในหน้า session)
