@@ -163,7 +163,7 @@ function auctionAmountFor(session, uid, at) {
     const prevClose = closes.length > 1 ? closes[closes.length - 2] : 0;
     // เริ่มนับรอบหลังสัญญาณปิดครั้งก่อน และหลังการชนะครั้งก่อนของคนนี้ (กันราคาจากรอบเก่าหลุดเข้ามา ถ้าสัญญาณปิดครั้งก่อนตกหล่น)
     const lotStart = Math.max(prevClose, c.lastWinAt || 0);
-    const lotBids = log.filter(b => b.time > lotStart && b.time <= lotClose);
+    const lotBids = log.filter(b => b.time > lotStart && b.time <= lotClose).sort((x, y) => x.time - y.time);
     const mine = lotBids.filter(b => b.uid === uid);
     if (mine.length) {
       // ใช้ "ราคาล่าสุด" ที่คนนี้บิดก่อนสัญญาณปิด (ไม่ใช่ราคาสูงสุดของเขา)
@@ -189,6 +189,52 @@ function auctionAmountFor(session, uid, at) {
   return { amount: bid.amount, bidTime: bid.time, lot: 0,
     warning: [lotClose ? (wonThisLot ? 'ยังไม่มีสัญญาณปิด (หัวใจ) ของรอบนี้ ใช้ราคาล่าสุด' : 'ไม่พบราคาที่บิดก่อนสัญญาณปิดล่าสุด ใช้ราคาล่าสุดแทน') : '',
       higher ? ('มีคนบิดสูงกว่า: ' + (higher.name || higher.uid) + ' ' + higher.amount.toLocaleString('en-US')) : ''].filter(Boolean).join(' · ') };
+}
+
+// 🔄 ดึงคอมเมนต์ล่าสุดของไลฟ์จาก Facebook โดยตรง แล้วเติมราคาบิด/สัญญาณปิดที่ Webhook ส่งมาไม่ครบ
+// (ระหว่างไลฟ์ Facebook อาจส่ง Webhook คอมเมนต์ช้า หรือตกหล่นบางคอมเมนต์)
+async function syncAuctionFromGraph(pageData, ls, objectId, pageIds) {
+  const token = pageData.config.pageAccessToken;
+  if (!token || !objectId) return 0;
+  const r = await axios.get('https://graph.facebook.com/v19.0/' + encodeURIComponent(objectId) + '/comments', {
+    params: { order: 'reverse_chronological', filter: 'stream', limit: 100, fields: 'id,message,created_time,from{id,name}', access_token: token }, timeout: 8000
+  });
+  const list = ((r.data && r.data.data) || []).slice().reverse();
+  if (!Array.isArray(ls.bidLog)) ls.bidLog = [];
+  if (!Array.isArray(ls.auctionCloses)) ls.auctionCloses = [];
+  if (!Array.isArray(ls.auctionCloseIds)) ls.auctionCloseIds = [];
+  const knownBid = new Set(ls.bidLog.map(b => b.cid).filter(Boolean));
+  let added = 0;
+  for (const cm of list) {
+    const t = Date.parse(cm.created_time) || 0;
+    const fid = String((cm.from && cm.from.id) || '');
+    if (!t) continue;
+    if (fid && pageIds.includes(fid)) {
+      if (isAuctionCloseSignal(cm.message, ls.config) && !ls.auctionCloseIds.includes(cm.id) && !ls.auctionCloses.some(x => Math.abs(x - t) <= 2000)) {
+        ls.auctionCloses.push(t); ls.auctionCloseIds.push(cm.id); added++;
+      }
+      continue;
+    }
+    if (!fid) continue;
+    const amt = parseBid(cm.message);
+    if (amt === null || knownBid.has(cm.id)) continue;
+    if (ls.bidLog.some(b => b.uid === fid && b.amount === amt && Math.abs(b.time - t) <= 2000)) continue;
+    const name = (cm.from && cm.from.name) || '';
+    ls.bidLog.push({ uid: fid, name, amount: amt, time: t, cid: cm.id });
+    const c = ls.commenters.get(fid) || { name, count: 0, matchedCount: 0, lastMessage: '', lastKeyword: '', lastTime: 0, psid: '' };
+    if (!Array.isArray(c.bids)) c.bids = [];
+    c.bids.push({ amount: amt, time: t });
+    c.bids.sort((x, y) => x.time - y.time);
+    if (c.bids.length > 30) c.bids.splice(0, c.bids.length - 30);
+    if (!ls.commenters.has(fid)) { c.count = 1; c.lastMessage = String(cm.message || '').slice(0, 200); c.lastTime = t; ls.commenters.set(fid, c); }
+    added++;
+  }
+  if (added) {
+    ls.bidLog.sort((x, y) => x.time - y.time);
+    ls.auctionCloses.sort((x, y) => x - y);
+    console.log('🔄 [Auction] เติมคอมเมนต์ที่ Webhook ตกหล่นจาก Facebook ' + added + ' รายการ');
+  }
+  return added;
 }
 
 // สรุปแต่ละรอบประมูล (ใช้แสดงในหน้า session)
@@ -7819,6 +7865,8 @@ app.post('/webhook', async (req, res) => {
                   const at = comment.created_time ? Number(comment.created_time) * 1000 || Date.now() : Date.now();
                   if (!Array.isArray(ls.auctionCloses)) ls.auctionCloses = [];
                   ls.auctionCloses.push(at);
+                  if (!Array.isArray(ls.auctionCloseIds)) ls.auctionCloseIds = [];
+                  if (comment.comment_id) { ls.auctionCloseIds.push(comment.comment_id); if (ls.auctionCloseIds.length > 500) ls.auctionCloseIds.splice(0, 100); }
                   ls.auctionCloses.sort((x, y) => x - y);
                   if (ls.auctionCloses.length > 500) ls.auctionCloses.splice(0, 100);
                   console.log('🔔 [Auction] เพจส่งสัญญาณปิดประมูล');
@@ -7858,7 +7906,7 @@ app.post('/webhook', async (req, res) => {
                   if (prev.bids.length > 30) prev.bids.shift();
                   prev.lastBid = bidAmount;
                   if (!Array.isArray(liveSession.bidLog)) liveSession.bidLog = [];
-                  liveSession.bidLog.push({ uid: senderId, name: comment.from?.name || '', amount: bidAmount, time: commentAt });
+                  liveSession.bidLog.push({ uid: senderId, name: comment.from?.name || '', amount: bidAmount, time: commentAt, cid: comment.comment_id || '' });
                   if (liveSession.bidLog.length > 3000) liveSession.bidLog.splice(0, 500);
                 }
                 if (!prev.psid) prev.psid = getPsidMap(targetRecord.pageData).get(senderId) || '';
@@ -7896,6 +7944,9 @@ app.post('/webhook', async (req, res) => {
                 if (auctionOn && senderId) {
                   // 🔨 รอ 3 วิ เผื่อคอมเมนต์ราคาที่พิมพ์ก่อนกด 1 ยังมาไม่ถึง แล้วหายอดจบประมูล
                   await sleep(3000);
+                  // ดึงคอมเมนต์ล่าสุดจาก Facebook มาเติม ถ้า Webhook ตกหล่น (ไม่เกิน 8 วิ ถ้าดึงไม่ได้ใช้ข้อมูลเดิม)
+                  try { await syncAuctionFromGraph(pageDataRef, liveSession, comment.post_id || comment.video_id, [String(pageId), String(configStore.pageId || '')]); }
+                  catch (e) { console.error('⚠️ [Auction] ดึงคอมเมนต์จาก Facebook ไม่สำเร็จ', graphErrorMessage(e)); }
                   const c = liveSession.commenters.get(senderId);
                   let win = auctionAmountFor(liveSession, senderId, commentAt);
                   // ลูกค้ากด 1 ซ้ำภายใน 1 นาที หลังกด 1 ครั้งแรก -> ถือเป็นคอมเมนต์ซ้ำ ไม่ส่งข้อความ/ไม่บวกยอด
