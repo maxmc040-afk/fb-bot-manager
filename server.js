@@ -193,7 +193,16 @@ function auctionAmountFor(session, uid, at) {
 
 // 🔄 ดึงคอมเมนต์ล่าสุดของไลฟ์จาก Facebook โดยตรง แล้วเติมราคาบิด/สัญญาณปิดที่ Webhook ส่งมาไม่ครบ
 // (ระหว่างไลฟ์ Facebook อาจส่ง Webhook คอมเมนต์ช้า หรือตกหล่นบางคอมเมนต์)
-async function syncAuctionFromGraph(pageData, ls, objectId, pageIds) {
+// ⚡ หลายคนกด 1 พร้อมกัน: ใช้ผลดึงคอมเมนต์ครั้งเดียวกัน (ภายใน 2.5 วิ) ไม่ยิง Facebook ซ้ำทุกคน
+const auctionSyncInflight = new WeakMap();
+function syncAuctionFromGraph(pageData, ls, objectId, pageIds) {
+  const cur = auctionSyncInflight.get(ls);
+  if (cur && cur.obj === objectId && Date.now() - cur.at < 2500) return cur.p;
+  const p = syncAuctionFromGraphNow(pageData, ls, objectId, pageIds);
+  auctionSyncInflight.set(ls, { obj: objectId, at: Date.now(), p });
+  return p;
+}
+async function syncAuctionFromGraphNow(pageData, ls, objectId, pageIds) {
   const token = pageData.config.pageAccessToken;
   if (!token || !objectId) return 0;
   const r = await axios.get('https://graph.facebook.com/v19.0/' + encodeURIComponent(objectId) + '/comments', {
@@ -242,17 +251,23 @@ function auctionLotsSummary(session) {
   const closes = session.auctionCloses || [];
   const log = session.bidLog || [];
   const out = [];
-  closes.forEach((close, i) => {
-    const prev = i ? closes[i - 1] : 0;
+  // ⚡ รวมผู้กด 1 ของแต่ละรอบครั้งเดียว (เดิมวนทุกคนทุกรอบ)
+  const winnersByLot = new Map();
+  for (const [uid, c] of session.commenters) for (const w of (c.wins || [])) {
+    if (!w.lot || w.dup) continue;
+    if (!winnersByLot.has(w.lot)) winnersByLot.set(w.lot, []);
+    winnersByLot.get(w.lot).push({ name: c.name || uid, amount: w.amount });
+  }
+  const startIdx = Math.max(0, closes.length - 30); // แสดง 30 รอบล่าสุด
+  for (let i = startIdx; i < closes.length; i++) {
+    const close = closes[i], prev = i ? closes[i - 1] : 0;
     const bids = log.filter(b => b.time > prev && b.time <= close);
-    if (!bids.length) return;
-    const topAmt = Math.max(...bids.map(b => b.amount));
+    if (!bids.length) continue;
+    let topAmt = 0; for (const b of bids) if (b.amount > topAmt) topAmt = b.amount;
     const tops = bids.filter(b => b.amount === topAmt);
-    const winners = [];
-    for (const [uid, c] of session.commenters) for (const w of (c.wins || [])) if (w.lot === close && !w.dup) winners.push({ name: c.name || uid, amount: w.amount });
-    out.push({ closeAt: close, topAmount: topAmt, topNames: Array.from(new Set(tops.map(b => b.name || b.uid))), bids: bids.length, winners });
-  });
-  return out.slice(-30).reverse();
+    out.push({ closeAt: close, topAmount: topAmt, topNames: Array.from(new Set(tops.map(b => b.name || b.uid))), bids: bids.length, winners: winnersByLot.get(close) || [] });
+  }
+  return out.reverse();
 }
 
 function runTask(fn, label) {
@@ -3756,7 +3771,9 @@ app.get('/', (req, res) => {
             loadLiveList();
         }
 
+        let liveCmKey = '', liveSlipKey = '';
         async function loadLiveDetail(withConfig) {
+            if(withConfig) { liveCmKey = ''; liveSlipKey = ''; }
             if(!currentLiveId) return;
             const qEl = document.getElementById('lv-cm-search');
             const q = qEl ? qEl.value.trim() : '';
@@ -3845,11 +3862,11 @@ app.get('/', (req, res) => {
                 ? ('ขาด ' + (ds.shortPeople || 0) + ' คน · ยังไม่โอนเลย ' + (ds.unpaidPeople || 0) + ' คน (จาก ' + ds.people + ' คนที่ใส่ยอด)')
                 : 'ใส่ "ยอดที่ต้องจ่าย" ในตารางรายชื่อก่อน';
 
-            commenterList = d.commenters || [];
-            renderCommenters();
-
-            slipsList = d.slips || [];
-            renderSlips();
+            // ⚡ วาดตารางใหม่เฉพาะเมื่อข้อมูลเปลี่ยน (ไม่กระตุก/ไม่เสียตำแหน่งเลื่อนทุก 5 วิ)
+            const cmKey = JSON.stringify(d.commenters || []);
+            if (cmKey !== liveCmKey) { liveCmKey = cmKey; commenterList = d.commenters || []; renderCommenters(); }
+            const slKey = JSON.stringify(d.slips || []);
+            if (slKey !== liveSlipKey) { liveSlipKey = slKey; slipsList = d.slips || []; renderSlips(); }
 
             const bc = d.broadcastStatus;
             const area = document.getElementById('lv-bc-progress');
@@ -6608,7 +6625,12 @@ app.get('/api/live/detail', checkAuth, (req, res) => {
 
   const slipIdx = buildSlipIndex(ctx.pageData, s);
   const psidMap = getPsidMap(ctx.pageData);
+  // ⚡ ค้นหา + เรียง + ตัด 300 คนก่อน แล้วค่อยคำนวณรายละเอียด (ไม่คำนวณทุกคนใน session ทุก 5 วิ)
+  const qn = compactTh(req.query.q || '');
   const commenters = Array.from(s.commenters.entries())
+    .filter(([, c]) => !qn || compactTh(c.name || '').includes(qn))
+    .sort((a, b) => (b[1].lastTime || 0) - (a[1].lastTime || 0))
+    .slice(0, 300)
     .map(([userId, c]) => {
       const { pendingComments, kwLabeled, kwLabelBusy, bids, wonLots, ...pub } = c; // ข้อมูลภายใน ไม่ต้องส่งไปหน้าเว็บ
       const wins = Array.isArray(c.wins) ? c.wins : [];
@@ -6624,14 +6646,7 @@ app.get('/api/live/detail', checkAuth, (req, res) => {
         chatId: c.psid || psidMap.get(userId) || '',
         inBuyers: !!(s.buyers && s.buyers.has(userId))
       };
-    })
-    .filter(c => {
-      // 🔍 ค้นหาชื่อเฟส (ค้นจากทุกคนใน session ไม่จำกัดแค่ 300 คนล่าสุด)
-      const q = compactTh(req.query.q || '');
-      return !q || compactTh(c.name || '').includes(q);
-    })
-    .sort((a, b) => b.lastTime - a.lastTime)
-    .slice(0, 300);
+    });
 
   // 💰 สรุปยอดที่ยังขาด (เฉพาะคนที่แอดมินใส่ยอดที่ต้องจ่ายไว้) คิดจากทุกคนใน session
   const dueSummary = { people: 0, due: 0, paid: 0, short: 0, shortPeople: 0, unpaidPeople: 0 };
