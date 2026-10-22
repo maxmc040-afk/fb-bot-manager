@@ -4291,7 +4291,10 @@ app.get('/', (req, res) => {
                             + '<div class="text-[10px] text-slate-400 mt-0.5">' + chatTime(pc.time) + (last ? ' · ← จะทักจากคอมเมนต์นี้' : '') + '</div></div></div>';
                     });
                 }
-                list.innerHTML = html || '<div class="text-center text-xs text-slate-400 py-8">' + (r.psid ? 'ยังไม่มีข้อความ' : 'ลูกค้ายังไม่เคยแชทกับเพจ') + '</div>';
+                list.innerHTML = html || (r.psid ? '<div class="text-center text-xs text-slate-400 py-8">ยังไม่มีข้อความ</div>'
+                    : '<div class="text-center text-xs text-slate-500 py-6 px-4 space-y-1"><div class="font-semibold text-slate-600">ลูกค้ายังไม่เคยแชทกับเพจ และไม่พบคอมเมนต์ที่ใช้ทักได้</div>'
+                      + '<div>สาเหตุ: คอมเมนต์เกิน 7 วัน · คอมเมนต์นั้นถูกใช้ทักไปแล้ว · หรือ session ไม่ได้ผูกลิงก์ไลฟ์ (Video ID) ระบบเลยหาคอมเมนต์เก่าไม่เจอ</div>'
+                      + '<div>วิธีทัก: เปิดไลฟ์ใน Facebook แล้วกด <b>"ส่งข้อความ"</b> ใต้คอมเมนต์ของลูกค้า</div></div>');
                 list.scrollTop = list.scrollHeight;
             } catch(e) { document.getElementById('chat-box-sub').innerText = '❌ ' + e.message; }
         }
@@ -6312,6 +6315,34 @@ function chatTarget(req) {
   const psid = String(req.query.psid || (c && c.psid) || (uid && getPsidMap(pageData).get(uid)) || '');
   return { pageData, pid: pageData.config.pageId || req.query.pageId, uid, live, c, psid };
 }
+// ลูกค้ายังไม่มีแชท และระบบไม่มีคอมเมนต์ของเขาเก็บไว้ (เช่น คอมเมนต์ก่อนอัปเดตระบบ / หลังรีสตาร์ท)
+// -> ดึงคอมเมนต์ของลูกค้าคนนี้จากไลฟ์ (Facebook) มาใช้ทักจากคอมเมนต์
+async function pendingCommentsFor(t) {
+  const fresh = (list) => (list || []).filter(x => Date.now() - x.time < 7 * 86400000);
+  let pending = t.c && Array.isArray(t.c.pendingComments) ? fresh(t.c.pendingComments) : [];
+  if (pending.length || !t.c || !t.uid) return pending;
+  const objects = Array.from(new Set([t.c.lastPostId, t.live && t.live.videoId].filter(Boolean).map(String)));
+  const found = [];
+  for (const obj of objects) {
+    let url = 'https://graph.facebook.com/v19.0/' + encodeURIComponent(obj) + '/comments';
+    let params = { order: 'reverse_chronological', filter: 'stream', limit: 100, fields: 'id,message,created_time,from{id}', access_token: t.pageData.config.pageAccessToken };
+    for (let i = 0; i < 5 && url && found.length < 5; i++) {
+      try {
+        const r = await axios.get(url, { params, timeout: 10000 });
+        for (const cm of (r.data && r.data.data) || []) {
+          if (String(cm.from && cm.from.id) === t.uid) found.push({ id: cm.id, time: Date.parse(cm.created_time) || Date.now(), text: String(cm.message || '').slice(0, 200) });
+        }
+        url = r.data && r.data.paging && r.data.paging.next || null; params = undefined;
+      } catch (e) { console.error('⚠️ [Chat] ดึงคอมเมนต์ของลูกค้าไม่สำเร็จ', graphErrorMessage(e)); break; }
+    }
+    if (found.length) break;
+  }
+  found.sort((a, b) => a.time - b.time);
+  pending = fresh(found).slice(-5);
+  if (pending.length) t.c.pendingComments = pending;
+  return pending;
+}
+
 const convIdCache = new Map();
 async function findChatConversationId(pageData, pid, psid) {
   const key = pid + ':' + psid;
@@ -6329,7 +6360,7 @@ app.get('/api/chat/messages', checkAuth, async (req, res) => {
   const t = chatTarget(req);
   if (!t) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
   if (!t.pageData.config.pageAccessToken) return res.json({ success: false, error: 'เพจไม่มี Token' });
-  const pending = t.c && Array.isArray(t.c.pendingComments) ? t.c.pendingComments.filter(x => Date.now() - x.time < 7 * 86400000) : [];
+  const pending = t.psid ? [] : await pendingCommentsFor(t);
   if (!t.psid) return res.json({ success: true, psid: '', messages: [], canReply: false, canPrivateReply: pending.length > 0,
     pendingComments: pending.slice(-5).map(x => ({ id: x.id, text: x.text || '', time: x.time })) });
   try {
@@ -6371,7 +6402,7 @@ app.post('/api/chat/send', checkAuth, async (req, res) => {
       return res.json({ success: true, psid: t.psid });
     }
     // ยังไม่มีแชท: ส่งข้อความแรกแบบตอบกลับคอมเมนต์ (Private Reply · 1 ครั้งต่อคอมเมนต์ ภายใน 7 วัน)
-    const pending = t.c && Array.isArray(t.c.pendingComments) ? t.c.pendingComments.filter(x => Date.now() - x.time < 7 * 86400000) : [];
+    const pending = await pendingCommentsFor(t);
     const pc = pending[pending.length - 1];
     if (!pc) return res.json({ success: false, error: 'ลูกค้ายังไม่มีแชทกับเพจ และไม่มีคอมเมนต์ที่ส่งข้อความส่วนตัวได้' });
     const r = await fbPost('https://graph.facebook.com/v19.0/me/messages', { recipient: { comment_id: pc.id }, message: { text } }, { access_token: token });
@@ -7945,6 +7976,7 @@ app.post('/webhook', async (req, res) => {
                 if (isMatched) { prev.matchedCount++; prev.lastKeyword = matchedKw; }
                 prev.lastMessage = commentText.slice(0, 200);
                 prev.lastTime = Date.now();
+                if (comment.post_id) prev.lastPostId = comment.post_id;
                 if (bidAmount !== null) {
                   if (!Array.isArray(prev.bids)) prev.bids = [];
                   prev.bids.push({ amount: bidAmount, time: commentAt });
