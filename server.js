@@ -2644,6 +2644,7 @@ app.get('/', (req, res) => {
                                 </div>
                                 <div class="flex flex-wrap items-center gap-3 mb-2 text-xs text-slate-600">
                                     <label class="flex items-center gap-1.5 cursor-pointer"><input type="checkbox" id="lv-cm-all" onchange="toggleAllCommenters(this.checked)" class="w-4 h-4 rounded"> เลือกทั้งหมด</label>
+                                    <input type="search" id="lv-cm-search" oninput="onCommenterSearch()" placeholder="🔍 ค้นหาชื่อเฟส..." class="p-1 px-2 w-44 border border-slate-200 rounded-md bg-white focus:outline-none focus:border-indigo-400">
                                     <select id="lv-cm-filter" onchange="renderCommenters()" class="p-1 border border-slate-200 rounded-md bg-white">
                                         <option value="matched">เฉพาะคนที่ตรงคำดัก</option>
                                         <option value="unpaid">ตรงคำดัก · ยังไม่โอน</option>
@@ -3757,7 +3758,9 @@ app.get('/', (req, res) => {
 
         async function loadLiveDetail(withConfig) {
             if(!currentLiveId) return;
-            const res = await fetch(liveUrl('/api/live/detail', '&sid=' + currentLiveId));
+            const qEl = document.getElementById('lv-cm-search');
+            const q = qEl ? qEl.value.trim() : '';
+            const res = await fetch(liveUrl('/api/live/detail', '&sid=' + currentLiveId + (q ? '&q=' + encodeURIComponent(q) : '')));
             const d = await res.json();
             if(!d.success) {
                 currentLiveId = '';
@@ -4008,6 +4011,9 @@ app.get('/', (req, res) => {
             const fEl = document.getElementById('lv-cm-filter');
             if (fEl && fEl.getAttribute('data-last') !== fEl.value) { fEl.setAttribute('data-last', fEl.value); pagerState('cm').page = 1; }
             const f = document.getElementById('lv-cm-filter').value;
+            const qEl = document.getElementById('lv-cm-search');
+            const q = qEl ? qEl.value.trim().toLowerCase() : '';
+            if(q) return commenterList.filter(function(c) { return String(c.name || '').toLowerCase().indexOf(q) >= 0; }); // ค้นหาชื่อ: แสดงทุกคนที่ชื่อตรง
             return commenterList.filter(function(c) {
                 if(f === 'all') return true;
                 if(!(c.matchedCount > 0)) return false;
@@ -4208,6 +4214,15 @@ app.get('/', (req, res) => {
             if(e.key === 'Enter' && e.target && e.target.id === 'due-editor-amount') saveDueEditor(false);
         });
 
+        // 🔍 ค้นหาชื่อเฟสในรายชื่อคนคอมเมนต์ (หน่วง 0.4 วิ แล้วค้นจากเซิร์ฟเวอร์ ครอบคลุมทุกคนใน session)
+        let cmSearchTimer = null;
+        function onCommenterSearch() {
+            pagerState('cm').page = 1;
+            renderCommenters();
+            clearTimeout(cmSearchTimer);
+            cmSearchTimer = setTimeout(function() { loadLiveDetail(false); }, 400);
+        }
+
         // 💬 หน้าต่างแชทในแดชบอร์ด (อ่าน + ตอบลูกค้าผ่าน Facebook API)
         let chatBoxUid = '', chatBoxPsid = '', chatBoxName = '', chatBoxPoll = null, chatBoxLastKey = '';
         function openChatBox(btn) {
@@ -4267,6 +4282,15 @@ app.get('/', (req, res) => {
                         + '<div class="px-3 py-2 rounded-2xl text-sm whitespace-normal break-words ' + (mine ? 'bg-[#0866FF] text-white rounded-br-md' : 'bg-white border border-slate-200 text-slate-800 rounded-bl-md') + '">' + body + '</div>'
                         + '<div class="text-[10px] text-slate-400 mt-0.5 ' + (mine ? 'text-right' : '') + '">' + chatTime(m.time) + '</div></div></div>';
                 });
+                if(!r.psid && (r.pendingComments || []).length) {
+                    // ยังไม่มีแชท: แสดงคอมเมนต์ในไลฟ์ของลูกค้า ข้อความที่พิมพ์จะส่งเป็น "ตอบกลับคอมเมนต์ล่าสุด" เข้าแชท
+                    html = '<div class="text-center text-[11px] text-slate-500 pb-1">💬 คอมเมนต์ของลูกค้าในไลฟ์ · ข้อความที่ส่งจะทักเข้าแชทจากคอมเมนต์ล่าสุด (ส่งได้ 1 ครั้ง/คอมเมนต์ ภายใน 7 วัน)</div>';
+                    r.pendingComments.forEach(function(pc, i) {
+                        const last = i === r.pendingComments.length - 1;
+                        html += '<div class="flex justify-start"><div class="max-w-[80%]"><div class="px-3 py-2 rounded-2xl rounded-bl-md text-sm border ' + (last ? 'bg-amber-50 border-amber-300' : 'bg-white border-slate-200') + '">🗨️ ' + escapeHtml(pc.text || '(คอมเมนต์)') + '</div>'
+                            + '<div class="text-[10px] text-slate-400 mt-0.5">' + chatTime(pc.time) + (last ? ' · ← จะทักจากคอมเมนต์นี้' : '') + '</div></div></div>';
+                    });
+                }
                 list.innerHTML = html || '<div class="text-center text-xs text-slate-400 py-8">' + (r.psid ? 'ยังไม่มีข้อความ' : 'ลูกค้ายังไม่เคยแชทกับเพจ') + '</div>';
                 list.scrollTop = list.scrollHeight;
             } catch(e) { document.getElementById('chat-box-sub').innerText = '❌ ' + e.message; }
@@ -6306,7 +6330,8 @@ app.get('/api/chat/messages', checkAuth, async (req, res) => {
   if (!t) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
   if (!t.pageData.config.pageAccessToken) return res.json({ success: false, error: 'เพจไม่มี Token' });
   const pending = t.c && Array.isArray(t.c.pendingComments) ? t.c.pendingComments.filter(x => Date.now() - x.time < 7 * 86400000) : [];
-  if (!t.psid) return res.json({ success: true, psid: '', messages: [], canReply: false, canPrivateReply: pending.length > 0 });
+  if (!t.psid) return res.json({ success: true, psid: '', messages: [], canReply: false, canPrivateReply: pending.length > 0,
+    pendingComments: pending.slice(-5).map(x => ({ id: x.id, text: x.text || '', time: x.time })) });
   try {
     const convId = await findChatConversationId(t.pageData, t.pid, t.psid);
     let messages = [];
@@ -6565,6 +6590,11 @@ app.get('/api/live/detail', checkAuth, (req, res) => {
         chatId: c.psid || psidMap.get(userId) || '',
         inBuyers: !!(s.buyers && s.buyers.has(userId))
       };
+    })
+    .filter(c => {
+      // 🔍 ค้นหาชื่อเฟส (ค้นจากทุกคนใน session ไม่จำกัดแค่ 300 คนล่าสุด)
+      const q = compactTh(req.query.q || '');
+      return !q || compactTh(c.name || '').includes(q);
     })
     .sort((a, b) => b.lastTime - a.lastTime)
     .slice(0, 300);
@@ -7928,7 +7958,7 @@ app.post('/webhook', async (req, res) => {
                 // เก็บคอมเมนต์ที่ยังไม่เคยส่งข้อความส่วนตัว (Private Reply) ไว้ใช้บรอดแคสต์ภายหลัง (Facebook ให้ส่งได้ 1 ครั้ง/คอมเมนต์ ภายใน 7 วัน)
                 if (!prev.pendingComments) prev.pendingComments = [];
                 if (comment.comment_id) {
-                  prev.pendingComments.push({ id: comment.comment_id, time: Date.now() });
+                  prev.pendingComments.push({ id: comment.comment_id, time: Date.now(), text: commentText.slice(0, 200) });
                   if (prev.pendingComments.length > 5) prev.pendingComments.shift();
                 }
                 liveSession.commenters.set(senderId, prev);
