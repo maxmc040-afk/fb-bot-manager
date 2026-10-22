@@ -2571,9 +2571,9 @@ app.get('/', (req, res) => {
                                 <table class="w-full text-xs">
                                     <thead class="text-left text-slate-500 border-b border-slate-200"><tr>
                                         <th class="py-2 pr-2">✓</th><th class="py-2 pr-2">ลูกค้า (เฟส)</th><th class="py-2 pr-2">คำดัก</th><th class="py-2 pr-2 text-right">ยอดโอน</th>
-                                        <th class="py-2 pr-2">ชื่อผู้รับ</th><th class="py-2 pr-2">ที่อยู่</th><th class="py-2 pr-2">รหัส ปณ.</th><th class="py-2 pr-2">เบอร์โทร</th><th class="py-2 pr-2">เลขพัสดุ</th><th class="py-2">สถานะ</th>
+                                        <th class="py-2 pr-2">ชื่อผู้รับ</th><th class="py-2 pr-2">ที่อยู่</th><th class="py-2 pr-2">รหัส ปณ.</th><th class="py-2 pr-2">เบอร์โทร</th><th class="py-2 pr-2">เลขพัสดุ</th><th class="py-2 pr-2 whitespace-nowrap">แยกที่อยู่</th><th class="py-2">สถานะ</th>
                                     </tr></thead>
-                                    <tbody id="lv-buyers"><tr><td colspan="10" class="py-3 text-slate-400">กด "ดึงรายชื่อ + ค้นหาที่อยู่" เพื่อเริ่ม</td></tr></tbody>
+                                    <tbody id="lv-buyers"><tr><td colspan="11" class="py-3 text-slate-400">กด "ดึงรายชื่อ + ค้นหาที่อยู่" เพื่อเริ่ม</td></tr></tbody>
                                 </table>
                             </div>
                         </div>
@@ -4455,7 +4455,7 @@ app.get('/', (req, res) => {
         function renderBuyers() {
             const tbody = document.getElementById('lv-buyers');
             if(!buyersList.length) {
-                tbody.innerHTML = '<tr><td colspan="10" class="py-3 text-slate-400">ยังไม่มีข้อมูล กด "ดึงรายชื่อ + ค้นหาที่อยู่"</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="11" class="py-3 text-slate-400">ยังไม่มีข้อมูล กด "ดึงรายชื่อ + ค้นหาที่อยู่"</td></tr>';
                 renderPagerBar('buyers', 0, 1);
                 updateBuyersSummary();
                 return;
@@ -4483,6 +4483,7 @@ app.get('/', (req, res) => {
                         : (b.shipStatus === 'error' ? '<div class="text-[10px] text-rose-600">❌ ' + escapeHtml(b.shipNote || '') + '</div>' : (b.beemoveOrderId ? '<span class="text-[10px] text-amber-600">รอเลขพัสดุ</span>' : '<span class="text-slate-300">-</span>')))
                         + (b.trackingNo && b.shipNote && !b.notified ? '<div class="text-[10px] text-amber-600">' + escapeHtml(/เกิน 24 ชม/.test(b.shipNote) ? 'ลูกค้าทักเกิน 24 ชม. กดปุ่มด้านบนเพื่อส่ง (ได้ภายใน 7 วันหลังลูกค้าทักล่าสุด)' : b.shipNote) + '</div>' : '')
                         + '</td>'
+                    + '<td class="py-2 pr-2"><button type="button" class="bf-split px-2.5 py-1 text-[11px] font-semibold rounded-lg border border-indigo-300 text-indigo-700 bg-indigo-50 hover:bg-indigo-100 whitespace-nowrap" title="แยกชื่อ / ที่อยู่ / รหัสไปรษณีย์ / เบอร์โทร จากข้อความในช่องที่อยู่ (วางข้อความที่ลูกค้าส่งมาทั้งก้อนได้เลย)">✂️ แยกที่อยู่</button></td>'
                     + '<td class="py-2"><span class="text-[10px] px-2 py-0.5 rounded-full font-semibold whitespace-nowrap ' + st[1] + '">' + st[0] + '</span>'
                     + (b.note ? '<div class="text-[10px] text-slate-400 mt-1">' + escapeHtml(b.note) + '</div>' : '')
                     + '<button type="button" class="bf-del mt-2 block text-[11px] text-rose-500 hover:text-rose-700 hover:underline" title="ลบออกจากรายชื่อ">🗑️ ลบ</button></td>'
@@ -4867,6 +4868,39 @@ app.get('/', (req, res) => {
         function deleteSelectedBuyers() {
             if(!currentLiveId) return;
             deleteBuyers(Array.from(buyersSelected));
+        }
+
+        // ✂️ แยกที่อยู่: อ่านข้อความในแถว (วางทั้งก้อนในช่องที่อยู่ได้) แล้วแยกเป็น ชื่อ / ที่อยู่ / รหัส ปณ. / เบอร์โทร
+        document.addEventListener('click', async function(e) {
+            const btn = e.target.closest('.bf-split');
+            if(!btn || !currentLiveId) return;
+            const tr = btn.closest('tr[data-uid]');
+            if(!tr) return;
+            const row = readBuyerRow(tr);
+            if(!row.address && !row.recipientName) return alert('ช่องที่อยู่ว่าง: วางข้อความที่อยู่ที่ลูกค้าส่งมาในช่องที่อยู่ก่อน');
+            btn.disabled = true; const old = btn.innerText; btn.innerText = '⏳ กำลังแยก...';
+            try {
+                const r = await (await fetch(liveUrl('/api/live/buyers/split-address', '&sid=' + currentLiveId), {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(row)
+                })).json();
+                if(!r.success) { alert('❌ ' + r.error); return; }
+                await loadBuyers();
+                const nt = document.querySelector('#lv-buyers tr[data-uid="' + row.userId + '"]');
+                if(nt) { nt.classList.add('bg-indigo-50'); setTimeout(function() { nt.classList.remove('bg-indigo-50'); }, 1500); }
+                if(r.message) showSplitNote(r.message);
+            } catch(err) { alert('❌ ' + err.message); }
+            finally { btn.disabled = false; btn.innerText = old; }
+        });
+        function showSplitNote(t) {
+            let el = document.getElementById('split-toast');
+            if(!el) {
+                el = document.createElement('div'); el.id = 'split-toast';
+                el.className = 'fixed bottom-6 z-[60] px-4 py-2 rounded-xl bg-slate-800 text-white text-sm shadow-lg';
+                el.style.left = '50%'; el.style.transform = 'translateX(-50%)';
+                document.body.appendChild(el);
+            }
+            el.innerText = t; el.style.display = 'block';
+            clearTimeout(el._t); el._t = setTimeout(function() { el.style.display = 'none'; }, 4000);
         }
 
         document.addEventListener('click', function(e) {
@@ -6816,6 +6850,42 @@ app.get('/api/thai-address/zip', checkAuth, async (req, res) => {
 });
 
 // 🗺️ จัดรูปแบบที่อยู่ลูกค้าให้ถูกต้อง (เติม ต./อ./จ./รหัสไปรษณีย์)
+// ✂️ แยกที่อยู่ 1 แถว: รวมข้อความในแถว -> แยกชื่อ/ที่อยู่/รหัสไปรษณีย์/เบอร์ -> จัดรูปแบบตามฐานข้อมูล
+app.post('/api/live/buyers/split-address', checkAuth, async (req, res) => {
+  const ctx = getLiveContext(req, res);
+  if (!ctx) return;
+  const s = ctx.live;
+  if (!s || !s.buyers) return res.json({ success: false, error: 'ไม่พบ session นี้' });
+  if (!thaiAddrDb) await loadThaiAddressDb();
+  const b = req.body || {};
+  const item = s.buyers.get(String(b.userId));
+  if (!item) return res.json({ success: false, error: 'ไม่พบลูกค้าคนนี้' });
+  const str = (k) => String(b[k] ?? item[k] ?? '').slice(0, 1500).trim();
+  const name0 = str('recipientName'), addr0 = str('address'), zip0 = str('postcode'), phone0 = str('phone');
+  const text = [name0, addr0, zip0 && !addr0.includes(zip0) ? zip0 : '', phone0 && !addr0.replace(/\D/g, '').includes(phone0.replace(/\D/g, '')) ? phone0 : ''].filter(Boolean).join('\n');
+  if (!text) return res.json({ success: false, error: 'ไม่มีข้อความให้แยก' });
+  const p = parseAddressBlock([text], name0 || item.fbName || '');
+  const recipientName = p.recipientName || name0;
+  const phone = p.phone || phone0;
+  let address = p.address || addr0, postcode = p.postcode || zip0;
+  // ตัดชื่อผู้รับที่ติดมาในช่องที่อยู่ออก
+  if (recipientName && address.startsWith(recipientName)) address = address.slice(recipientName.length).trim();
+  const sm = thaiAddrDb ? smartThaiAddress(address, postcode) : null;
+  let guess = !!item.addrGuess;
+  if (sm && sm.ok && sm.formatted) { address = sm.formatted; postcode = sm.postal_code || postcode; guess = !!sm.guess; }
+  Object.assign(item, { recipientName: recipientName.slice(0, 200), address: address.slice(0, 1000), postcode: String(postcode || '').slice(0, 10), phone: String(phone || '').slice(0, 30) });
+  item.addrGuess = guess;
+  item.status = 'manual';
+  if (item.shipStatus === 'error') item.shipNote = '';
+  const chk = thaiAddrDb ? checkAddressAgainstZip(item.address, item.postcode) : { status: 'nodb' };
+  const missing = [];
+  if (!item.recipientName) missing.push('ชื่อผู้รับ');
+  if (!item.postcode) missing.push('รหัสไปรษณีย์');
+  if (!item.phone) missing.push('เบอร์โทร');
+  const message = '✂️ แยกที่อยู่แล้ว' + (chk.status === 'ok' && !guess ? ' · ตำบล/อำเภอถูกต้อง ✓' : ' · กรุณาเลือกตำบล/อำเภอให้ถูกต้อง') + (missing.length ? ' · ยังไม่มี' + missing.join('/') : '');
+  res.json({ success: true, message, buyer: { recipientName: item.recipientName, address: item.address, postcode: item.postcode, phone: item.phone } });
+});
+
 app.post('/api/live/buyers/fix-address', checkAuth, async (req, res) => {
   const ctx = getLiveContext(req, res);
   if (!ctx) return;
