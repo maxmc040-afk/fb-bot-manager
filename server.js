@@ -119,6 +119,84 @@ async function fetchSlipFromCard(targetRecord, pageId, senderId, mid) {
   for (const u of urls) await processSlipImage(targetRecord, pageId, senderId, u, 0);
 }
 
+// ===================== 🔨 โหมดประมูล =====================
+// ราคาบิด = คอมเมนต์ที่เป็น "ตัวเลขล้วน" และลงท้ายด้วย 0 (กติกาประมูลของร้าน) เช่น 380, 1,500, บิด 2500, 3000 บาท, ๓๘๐
+// "1" / "11" / "111" ไม่ลงท้ายด้วย 0 จึงไม่ถูกนับเป็นราคา (ใช้เป็นคำดักรับของได้ตามปกติ)
+function parseBid(text) {
+  let t = String(text || '').trim();
+  if (!t || t.length > 30) return null;
+  t = t.replace(/[๐-๙]/g, d => String('๐๑๒๓๔๕๖๗๘๙'.indexOf(d)));
+  const m = t.match(/^(?:บิด|สู้|ประมูล|bid)?\s*([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)\s*(?:บาท|บ\.?|฿|\.-|-)?\s*$/i);
+  if (!m) return null;
+  const n = parseInt(m[1].replace(/,/g, ''), 10);
+  if (!(n > 0) || n > 10000000 || n % 10 !== 0) return null;
+  return n;
+}
+// 🔔 สัญญาณปิดการประมูล = เพจคอมเมนต์อีโมจิหัวใจ (เช่น ❤️❤️❤️❤️🙏)
+function isAuctionCloseSignal(text) {
+  const t = String(text || '').replace(/[\uFE0F\u200D\s]/g, '');
+  if (!t || t.length > 60) return false;
+  if (!/[❤♥💖💗💓💕💞💘💝🧡💛💚💙💜🤍🖤🤎❣]/u.test(t)) return false;
+  return /^[❤♥💖💗💓💕💞💘💝🧡💛💚💙💜🤍🖤🤎❣🙏🎉✨👏]+$/u.test(t);
+}
+
+// ยอดของคนที่กด 1
+// มีสัญญาณปิด (หัวใจของเพจ): รอบประมูล = ราคาที่บิดระหว่างสัญญาณปิดครั้งก่อน ถึงสัญญาณปิดล่าสุดก่อนกด 1
+//   -> ยอด = ราคาสูงสุดที่คนกด 1 บิดในรอบนั้น (ราคาเท่ากัน ให้คนกด 1 เป็นผู้ชนะ ตามที่แอดมินประกาศหน้าไลฟ์)
+// ไม่มีสัญญาณปิด: ยอด = ราคาล่าสุดที่คนนั้นบิด หลังการกด 1 ครั้งก่อนของเขา
+function auctionAmountFor(session, uid, at) {
+  const c = session.commenters.get(uid);
+  if (!c) return null;
+  const log = session.bidLog || [];
+  const closes = (session.auctionCloses || []).filter(t => t <= at);
+  const lotClose = closes.length ? closes[closes.length - 1] : 0;
+  // มีราคาใหม่ที่บิดหลังสัญญาณปิดล่าสุด (รอบใหม่ที่ยังไม่ปิด) -> ใช้ราคาล่าสุดแทน
+  const openBids = (c.bids || []).filter(b => b.time > Math.max(lotClose, c.lastWinAt || 0) && b.time <= at);
+  if (lotClose && !openBids.length) {
+    const prevClose = closes.length > 1 ? closes[closes.length - 2] : 0;
+    const lotBids = log.filter(b => b.time > prevClose && b.time <= lotClose);
+    const mine = lotBids.filter(b => b.uid === uid);
+    if (mine.length) {
+      const myTop = mine.reduce((m, b) => b.amount > m.amount ? b : m, mine[0]);
+      const top = lotBids.reduce((m, b) => b.amount > m.amount ? b : m, lotBids[0]);
+      const dupLot = Array.isArray(c.wonLots) && c.wonLots.includes(lotClose);
+      return {
+        amount: myTop.amount, bidTime: myTop.time, lot: lotClose, dupLot,
+        warning: dupLot ? 'กด 1 ซ้ำในรอบเดิม (ไม่บวกยอดซ้ำ)'
+          : top.amount > myTop.amount ? ('ราคาสูงสุดก่อนปิดคือ ' + (top.name || top.uid) + ' ' + top.amount.toLocaleString('en-US')) : ''
+      };
+    }
+  }
+  // สำรอง: ไม่มีสัญญาณปิด / คนกด 1 ไม่ได้บิดในรอบที่ปิด
+  if (!Array.isArray(c.bids)) return null;
+  const from = Math.max(c.lastWinAt || 0, 0);
+  const own = c.bids.filter(b => b.time > from && b.time <= at);
+  if (!own.length) return null;
+  const bid = own[own.length - 1];
+  const higher = log.filter(b => b.uid !== uid && b.time >= bid.time && b.time <= at && b.amount > bid.amount)
+    .sort((x, y) => y.amount - x.amount)[0];
+  return { amount: bid.amount, bidTime: bid.time, lot: 0,
+    warning: (lotClose ? 'ไม่ได้บิดในรอบที่เพิ่งปิด · ' : '') + (higher ? ('มีคนบิดสูงกว่า: ' + (higher.name || higher.uid) + ' ' + higher.amount.toLocaleString('en-US')) : '') };
+}
+
+// สรุปแต่ละรอบประมูล (ใช้แสดงในหน้า session)
+function auctionLotsSummary(session) {
+  const closes = session.auctionCloses || [];
+  const log = session.bidLog || [];
+  const out = [];
+  closes.forEach((close, i) => {
+    const prev = i ? closes[i - 1] : 0;
+    const bids = log.filter(b => b.time > prev && b.time <= close);
+    if (!bids.length) return;
+    const topAmt = Math.max(...bids.map(b => b.amount));
+    const tops = bids.filter(b => b.amount === topAmt);
+    const winners = [];
+    for (const [uid, c] of session.commenters) for (const w of (c.wins || [])) if (w.lot === close && !w.dup) winners.push({ name: c.name || uid, amount: w.amount });
+    out.push({ closeAt: close, topAmount: topAmt, topNames: Array.from(new Set(tops.map(b => b.name || b.uid))), bids: bids.length, winners });
+  });
+  return out.slice(-30).reverse();
+}
+
 function runTask(fn, label) {
   return Promise.resolve().then(fn).catch(e => console.error('❌ [Task Error]', label || '', e?.response?.data || e?.message || e));
 }
@@ -2410,6 +2488,15 @@ app.get('/', (req, res) => {
                                 <div class="bg-slate-50 border border-slate-200 rounded-xl p-3"><div class="text-xs text-slate-500">ยอดโอนรวม (บาท)</div><div id="lv-stat-total" class="text-xl font-bold text-emerald-600">0</div></div>
                                 <div class="bg-rose-50 border border-rose-200 rounded-xl p-3" title="รวมเฉพาะลูกค้าที่ใส่ 'ยอดที่ต้องจ่าย' ไว้ในตารางรายชื่อคนคอมเมนต์"><div class="text-xs text-rose-600">ยอดที่ยังขาด (บาท)</div><div id="lv-stat-short" class="text-xl font-bold text-rose-600">0</div><div id="lv-stat-short-sub" class="text-[10px] text-rose-500 mt-0.5"></div></div>
                             </div>
+                            <details id="lv-auction-box" class="hidden mt-3 bg-amber-50/60 border border-amber-200 rounded-xl p-3" open>
+                                <summary class="cursor-pointer select-none text-sm font-bold text-amber-800">🔨 ผลประมูลแต่ละรอบ <span class="font-normal text-xs text-slate-500">(ปิดรอบเมื่อเพจคอมเมนต์ ❤️)</span></summary>
+                                <div class="overflow-auto max-h-64 mt-2">
+                                    <table class="w-full text-xs">
+                                        <thead class="text-left text-slate-500 border-b border-amber-200"><tr><th class="py-1.5 pr-2">ปิดรอบ</th><th class="py-1.5 pr-2 text-right">ราคาสูงสุด</th><th class="py-1.5 pr-2">คนบิดสูงสุด</th><th class="py-1.5 pr-2">คนกด 1 (ยอด)</th><th class="py-1.5">บิด</th></tr></thead>
+                                        <tbody id="lv-auction-lots"></tbody>
+                                    </table>
+                                </div>
+                            </details>
                         </div>
 
                         <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
@@ -2446,6 +2533,14 @@ app.get('/', (req, res) => {
                                 <label class="flex items-center gap-2 text-sm text-slate-700">⏱️ ไม่ตอบซ้ำคนเดิมภายใน
                                     <input type="number" id="lv-reply-cooldown" min="0" max="1440" value="0" class="w-20 p-1.5 text-sm border border-slate-200 rounded-lg bg-white"> นาที
                                     <span class="text-xs text-slate-400">(0 = ตอบทุกครั้ง)</span></label>
+                            </div>
+                            <div class="bg-amber-50/60 border border-amber-200 rounded-xl p-4 space-y-1">
+                                <label class="flex items-center gap-2 cursor-pointer">
+                                    <input type="checkbox" id="lv-auction-mode" class="w-4 h-4 rounded">
+                                    <span class="text-sm font-bold text-amber-800">🔨 โหมดประมูล: แจ้งยอดจบประมูลในแชทอัตโนมัติ</span>
+                                </label>
+                                <p class="text-xs text-slate-600 pl-6">ลูกค้าบิดราคาที่ <b>ลงท้ายด้วย 0</b> (เช่น 380, 1,500) → ผู้ชนะกด <b>1</b> → ระบบหาราคาล่าสุดที่คนนั้นบิด ใส่แทน <b>{amount}</b> ในข้อความ และบวกเข้า <b>"ยอดที่ต้องจ่าย"</b> ให้อัตโนมัติ (รอ 3 วินาทีก่อนส่ง เผื่อคอมเมนต์ราคามาช้า)</p>
+                                <p class="text-xs text-slate-500 pl-6">ตัวอย่างข้อความส่งเข้าแชท: <span class="font-mono bg-white px-1 rounded border">ยินดีด้วยค่ะคุณ {name} 🎉 ยอดประมูล {amount} บาท โอนที่ ...</span></p>
                             </div>
                             <div class="bg-pink-50/50 border border-pink-200 rounded-xl p-4 space-y-2">
                                 <div class="flex flex-wrap items-center justify-between gap-2">
@@ -3608,6 +3703,7 @@ app.get('/', (req, res) => {
             document.getElementById('lv-enable-reply').checked = !!liveCfg.enableCommentReply;
             document.getElementById('lv-enable-inbox').checked = !!liveCfg.enableInbox;
             document.getElementById('lv-reply-cooldown').value = liveCfg.replyCooldownMin || 0;
+            document.getElementById('lv-auction-mode').checked = !!liveCfg.auctionMode;
             if (!Array.isArray(liveCfg.keywordLabels)) liveCfg.keywordLabels = [];
             if (!Array.isArray(liveCfg.keywordRemoveLabels)) liveCfg.keywordRemoveLabels = [];
             renderLiveKeywords();
@@ -3659,6 +3755,7 @@ app.get('/', (req, res) => {
             document.getElementById('lv-stat-slips').innerText = s.stats.slips;
             document.getElementById('lv-stat-total').innerText = fmtMoney(s.stats.slipTotal);
             renderLiveFinance(s);
+            renderAuctionLots(d);
             const ds = d.dueSummary || {};
             document.getElementById('lv-stat-short').innerText = fmtMoney(ds.short || 0);
             document.getElementById('lv-stat-short-sub').innerText = ds.people
@@ -3858,20 +3955,21 @@ app.get('/', (req, res) => {
                     : '<span class="text-slate-300">-</span>';
                 const due = Number(c.dueAmount) || 0, got = Math.round((Number(c.paidTotal) || 0) * 100) / 100;
                 const dueCell = '<button type="button" data-uid="' + escapeHtml(c.userId) + '" data-name="' + escapeHtml(c.name || c.userId) + '" onclick="editDueAmount(this)" title="คลิกเพื่อใส่/แก้ยอดที่ลูกค้าต้องจ่าย" class="px-2 py-0.5 rounded-md border whitespace-nowrap '
-                    + (due > 0 ? 'border-slate-300 bg-white text-slate-800 font-semibold hover:bg-slate-50">' + fmtMoney(due) + ' ฿ ✎' + (c.dueExpr ? '<div class="text-[10px] font-normal text-slate-400">' + escapeHtml(c.dueExpr) + '</div>' : '') : 'border-dashed border-slate-300 text-slate-400 hover:bg-slate-50">+ ใส่ยอด') + '</button>';
+                    + (due > 0 ? 'border-slate-300 bg-white text-slate-800 font-semibold hover:bg-slate-50">' + fmtMoney(due) + ' ฿ ✎' + (c.dueExpr ? '<div class="text-[10px] font-normal text-slate-400">' + escapeHtml(c.dueExpr) + '</div>' : '') + (c.auctionWins ? '<div class="text-[10px] font-normal text-amber-700">🔨 ชนะประมูล ' + c.auctionWins + ' รายการ</div>' : '') : 'border-dashed border-slate-300 text-slate-400 hover:bg-slate-50">+ ใส่ยอด') + '</button>';
                 let cmp = '';
                 if(due > 0) {
                     if(got === due) cmp = '<div class="mt-0.5 text-[11px] font-semibold text-emerald-700">✔ โอนครบ</div>';
                     else if(got < due) cmp = '<div class="mt-0.5 text-[11px] font-semibold text-rose-600">✖ ขาด ' + fmtMoney(due - got) + ' ฿</div>';
                     else cmp = '<div class="mt-0.5 text-[11px] font-semibold text-blue-600">▲ เกิน ' + fmtMoney(got - due) + ' ฿</div>';
                 }
+                const dueWarn = c.auctionWarn ? '<div class="mt-0.5 text-[10px] text-rose-600 whitespace-normal max-w-[11rem]">⚠️ ' + escapeHtml(c.auctionWarn) + '</div>' : '';
                 ch += '<tr data-cid="' + escapeHtml(c.userId) + '" class="border-b border-slate-100">'
                     + '<td class="py-1.5 pr-2"><input type="checkbox" class="cm-sel w-4 h-4 rounded"' + (commenterSel.has(c.userId) ? ' checked' : '') + '></td>'
                     + '<td class="py-1.5 pr-2 font-medium text-slate-700">' + escapeHtml(c.name || c.userId) + (c.inBuyers ? '<div class="text-[10px] text-indigo-500 font-normal">อยู่ในรายชื่อลูกค้าแล้ว</div>' : '')
                         + (c.kwLabelStatus ? '<div class="text-[10px] font-normal ' + (c.kwLabelStatus.charAt(0) === '❌' ? 'text-rose-600' : (c.kwLabelStatus.charAt(0) === '⏳' ? 'text-amber-600' : 'text-pink-600')) + '">🏷️ ' + escapeHtml(c.kwLabelStatus) + '</div>' : '') + '</td>'
                     + '<td class="py-1.5 pr-2">' + c.count + '</td>'
                     + '<td class="py-1.5 pr-2">' + (c.matchedCount > 0 ? '<span class="text-blue-600 font-semibold">' + c.matchedCount + ' (' + escapeHtml(c.lastKeyword) + ')</span>' : '-') + '</td>'
-                    + '<td class="py-1.5 pr-2">' + dueCell + '</td>'
+                    + '<td class="py-1.5 pr-2">' + dueCell + dueWarn + '</td>'
                     + '<td class="py-1.5 pr-2">' + pay + cmp + '</td>'
                     + '<td class="py-1.5 pr-2 text-slate-600">' + escapeHtml(c.lastMessage) + '</td>'
                     + '<td class="py-1.5 pr-2 text-center">' + messengerLinkHtml(c) + '</td>'
@@ -3889,6 +3987,26 @@ app.get('/', (req, res) => {
         }
 
         // 💰 ยอดที่ลูกค้าต้องจ่าย (แอดมินใส่เอง) เทียบกับยอดสลิปรวมทุกใบ
+        // 🔨 ตารางผลประมูลแต่ละรอบ (รอบปิดเมื่อเพจคอมเมนต์หัวใจ)
+        function renderAuctionLots(d) {
+            const box = document.getElementById('lv-auction-box');
+            const on = !!(d.config && d.config.auctionMode);
+            box.classList.toggle('hidden', !on);
+            if(!on) return;
+            let html = '';
+            (d.auctionLots || []).forEach(function(l) {
+                const w = l.winners || [];
+                const ok = w.length === 1 && w[0].amount === l.topAmount;
+                html += '<tr class="border-b border-amber-100 align-top"><td class="py-1.5 pr-2 text-slate-500 whitespace-nowrap">' + fmtTime(l.closeAt) + '</td>'
+                    + '<td class="py-1.5 pr-2 text-right font-bold text-slate-800">' + fmtMoney(l.topAmount) + '</td>'
+                    + '<td class="py-1.5 pr-2">' + escapeHtml(l.topNames.join(', ')) + (l.topNames.length > 1 ? ' <span class="text-[10px] text-amber-700">(ราคาเท่ากัน)</span>' : '') + '</td>'
+                    + '<td class="py-1.5 pr-2 ' + (w.length ? (ok ? 'text-emerald-700 font-semibold' : 'text-rose-600 font-semibold') : 'text-slate-400') + '">'
+                        + (w.length ? w.map(function(x) { return escapeHtml(x.name) + ' (' + fmtMoney(x.amount) + ')'; }).join(', ') + (ok ? ' ✓' : ' ⚠️') : 'ยังไม่มีคนกด 1') + '</td>'
+                    + '<td class="py-1.5 text-slate-400">' + l.bids + '</td></tr>';
+            });
+            document.getElementById('lv-auction-lots').innerHTML = html || '<tr><td colspan="5" class="py-2 text-slate-400">ยังไม่มีรอบที่ปิด · เพจคอมเมนต์ ❤️ ในไลฟ์เพื่อปิดรอบประมูล</td></tr>';
+        }
+
         // 📊 กำไร/ขาดทุน ของ session = ยอดโอนรวม - ต้นทุน - ค่าแอด - ค่าส่ง
         let lastLiveSummary = null;
         function renderLiveFinance(s) {
@@ -4151,7 +4269,8 @@ app.get('/', (req, res) => {
                 enableInbox: document.getElementById('lv-enable-inbox').checked,
                 keywordLabels: liveCfg.keywordLabels || [],
                 keywordRemoveLabels: liveCfg.keywordRemoveLabels || [],
-                replyCooldownMin: parseInt(document.getElementById('lv-reply-cooldown').value, 10) || 0
+                replyCooldownMin: parseInt(document.getElementById('lv-reply-cooldown').value, 10) || 0,
+                auctionMode: document.getElementById('lv-auction-mode').checked
             };
             const res = await fetch(liveUrl('/api/live/config', '&sid=' + currentLiveId), {
                 method: 'POST',
@@ -6221,7 +6340,9 @@ app.post('/api/live/create', checkAuth, (req, res) => {
       keywordLabels: Array.isArray(c.keywordLabels) ? c.keywordLabels.slice() : [],
       // 🏷️ ป้ายที่ถอดออกอัตโนมัติเมื่อคอมเมนต์ตรงคำดัก (เช่น "โอนแล้ว" ของไลฟ์ก่อน)
       keywordRemoveLabels: Array.isArray(c.keywordRemoveLabels) ? c.keywordRemoveLabels.slice() : [],
-      replyCooldownMin: Number(c.replyCooldownMin) || 0
+      replyCooldownMin: Number(c.replyCooldownMin) || 0,
+      auctionMode: !!c.auctionMode,
+      auctionNoBidText: c.auctionNoBidText || 'รอแอดมินแจ้งยอด'
     },
     stats: { comments: 0, matched: 0 },
     commenters: new Map(),
@@ -6326,7 +6447,11 @@ app.get('/api/live/detail', checkAuth, (req, res) => {
   const psidMap = getPsidMap(ctx.pageData);
   const commenters = Array.from(s.commenters.entries())
     .map(([userId, c]) => {
-      const { pendingComments, kwLabeled, kwLabelBusy, ...pub } = c; // ข้อมูลภายใน ไม่ต้องส่งไปหน้าเว็บ
+      const { pendingComments, kwLabeled, kwLabelBusy, bids, wonLots, ...pub } = c; // ข้อมูลภายใน ไม่ต้องส่งไปหน้าเว็บ
+      const wins = Array.isArray(c.wins) ? c.wins : [];
+      pub.auctionWins = wins.length;
+      pub.auctionWarn = wins.map(w => w.warning).filter(Boolean).slice(-2).join(' · ');
+      delete pub.wins;
       return {
         userId, ...pub,
         ...paymentStatusFromIndex(slipIdx, userId, c.psid || psidMap.get(userId)),
@@ -6353,6 +6478,7 @@ app.get('/api/live/detail', checkAuth, (req, res) => {
     session: liveSummary(s),
     config: s.config,
     dueSummary,
+    auctionLots: s.config.auctionMode ? auctionLotsSummary(s) : [],
     commenters,
     slips: s.slips.slice(-200).reverse(),
     broadcastStatus: s.broadcastStatus,
@@ -6376,6 +6502,7 @@ app.post('/api/live/config', checkAuth, (req, res) => {
   if (typeof b.enableCommentReply === 'boolean') s.config.enableCommentReply = b.enableCommentReply;
   if (typeof b.enableInbox === 'boolean') s.config.enableInbox = b.enableInbox;
   if (typeof b.enableAutoLike === 'boolean') s.config.enableAutoLike = b.enableAutoLike;
+  if (typeof b.auctionMode === 'boolean') { s.config.auctionMode = b.auctionMode; ctx.pageData.config.auctionMode = b.auctionMode; }
   if (b.replyCooldownMin !== undefined) {
     s.config.replyCooldownMin = Math.min(1440, Math.max(0, parseInt(b.replyCooldownMin, 10) || 0));
     ctx.pageData.config.replyCooldownMin = s.config.replyCooldownMin;
@@ -7631,7 +7758,21 @@ app.post('/webhook', async (req, res) => {
             const comment = change.value;
             const senderId = comment.from?.id;
             // ข้ามคอมเมนต์ที่เพจตอบเอง (ไม่นับเป็นลูกค้า และกันบอตตอบวนซ้ำ)
-            if (senderId && (senderId === pageId || senderId === configStore.pageId)) continue;
+            if (senderId && (senderId === pageId || senderId === configStore.pageId)) {
+              // 🔔 เพจคอมเมนต์หัวใจในไลฟ์ที่เปิดโหมดประมูล = ปิดการประมูลรอบนี้
+              if (isAuctionCloseSignal(comment.message) && !seenComment(targetRecord.pageData, comment.comment_id)) {
+                const ls = findLiveSessionForComment(targetRecord.pageData, comment.post_id, comment.video_id);
+                if (ls && ls.config.auctionMode) {
+                  const at = comment.created_time ? Number(comment.created_time) * 1000 || Date.now() : Date.now();
+                  if (!Array.isArray(ls.auctionCloses)) ls.auctionCloses = [];
+                  ls.auctionCloses.push(at);
+                  ls.auctionCloses.sort((x, y) => x - y);
+                  if (ls.auctionCloses.length > 500) ls.auctionCloses.splice(0, 100);
+                  console.log('🔔 [Auction] เพจส่งสัญญาณปิดประมูล');
+                }
+              }
+              continue;
+            }
             if (seenComment(targetRecord.pageData, comment.comment_id)) continue;
             // หมายเหตุ: ID คนคอมเมนต์ ไม่ใช่ ID แชท (PSID) จึงไม่เพิ่มเข้ารายชื่อบรอดแคส (ส่งไปก็ล้มเหลว)
 
@@ -7640,7 +7781,11 @@ app.post('/webhook', async (req, res) => {
             const cfg = liveSession ? { ...configStore, ...liveSession.config } : configStore;
 
             const commentText = comment.message || '';
-            const matchedKw = findMatchedKeyword(cfg, commentText);
+            const auctionOn = !!(liveSession && liveSession.config.auctionMode);
+            const bidAmount = auctionOn ? parseBid(commentText) : null;
+            const commentAt = comment.created_time ? Number(comment.created_time) * 1000 || Date.now() : Date.now();
+            // โหมดประมูล: คอมเมนต์ราคา (เช่น 100) ไม่ถือเป็นคำดัก แม้ตั้งแบบ "มีคำว่า 1"
+            const matchedKw = bidAmount !== null ? '' : findMatchedKeyword(cfg, commentText);
             const isMatched = !!matchedKw;
 
             if (liveSession) {
@@ -7654,6 +7799,15 @@ app.post('/webhook', async (req, res) => {
                 if (isMatched) { prev.matchedCount++; prev.lastKeyword = matchedKw; }
                 prev.lastMessage = commentText.slice(0, 200);
                 prev.lastTime = Date.now();
+                if (bidAmount !== null) {
+                  if (!Array.isArray(prev.bids)) prev.bids = [];
+                  prev.bids.push({ amount: bidAmount, time: commentAt });
+                  if (prev.bids.length > 30) prev.bids.shift();
+                  prev.lastBid = bidAmount;
+                  if (!Array.isArray(liveSession.bidLog)) liveSession.bidLog = [];
+                  liveSession.bidLog.push({ uid: senderId, name: comment.from?.name || '', amount: bidAmount, time: commentAt });
+                  if (liveSession.bidLog.length > 3000) liveSession.bidLog.splice(0, 500);
+                }
                 if (!prev.psid) prev.psid = getPsidMap(targetRecord.pageData).get(senderId) || '';
                 // เก็บคอมเมนต์ที่ยังไม่เคยส่งข้อความส่วนตัว (Private Reply) ไว้ใช้บรอดแคสต์ภายหลัง (Facebook ให้ส่งได้ 1 ครั้ง/คอมเมนต์ ภายใน 7 วัน)
                 if (!prev.pendingComments) prev.pendingComments = [];
@@ -7668,7 +7822,9 @@ app.post('/webhook', async (req, res) => {
             // ⏱️ ไม่ตอบซ้ำคนเดิมถี่ ๆ (ตั้งได้ในหน้า session: 0 = ตอบทุกครั้ง)
             const cooldownMs = Math.max(0, Number(cfg.replyCooldownMin) || 0) * 60000;
             const cRec = !senderId ? null : (liveSession ? liveSession.commenters.get(senderId) : (isMatched ? pageCommenterRec(targetRecord.pageData, senderId) : null));
-            const inCooldown = !!(isMatched && cooldownMs && cRec && cRec.lastRepliedAt && Date.now() - cRec.lastRepliedAt < cooldownMs);
+            // โหมดประมูล: บิดราคาใหม่แล้วกด 1 = ชนะองค์ใหม่ ไม่ติดคูลดาวน์
+            const hasNewBid = !!(auctionOn && cRec && Array.isArray(cRec.bids) && cRec.bids.some(b => b.time > (cRec.lastWinAt || 0)));
+            const inCooldown = !!(isMatched && !hasNewBid && cooldownMs && cRec && cRec.lastRepliedAt && Date.now() - cRec.lastRepliedAt < cooldownMs);
             if (inCooldown) console.log('⏱️ [Comment] ข้าม ' + (comment.from?.name || senderId) + ' (เพิ่งตอบไปไม่ถึง ' + cfg.replyCooldownMin + ' นาที)');
             if (isMatched && cRec && !inCooldown) cRec.lastRepliedAt = Date.now();
 
@@ -7680,10 +7836,47 @@ app.post('/webhook', async (req, res) => {
               const pageDataRef = targetRecord.pageData;
               const t0 = Date.now();
               const customerName = comment.from?.name || '';
-              const inboxMsg = renderReplyText(cfg.inboxText, customerName);
-              const replyMsg = renderReplyText(cfg.replyCommentText, customerName);
+              let inboxMsg = renderReplyText(cfg.inboxText, customerName);
+              let replyMsg = renderReplyText(cfg.replyCommentText, customerName);
               // ⚡ ส่งเข้าแชท + ตอบคอมเมนต์ ใช้คิวหลัก (สำคัญ) · กดไลก์แยกคิวรอง ไม่แย่งช่องของงานสำคัญ
-              runTask(() => fbLimit(pageId, async () => {
+              runTask(async () => {
+                if (auctionOn && senderId) {
+                  // 🔨 รอ 3 วิ เผื่อคอมเมนต์ราคาที่พิมพ์ก่อนกด 1 ยังมาไม่ถึง แล้วหายอดจบประมูล
+                  await sleep(3000);
+                  const c = liveSession.commenters.get(senderId);
+                  const win = auctionAmountFor(liveSession, senderId, commentAt);
+                  if (win) {
+                    const amountText = Number(win.amount).toLocaleString('en-US');
+                    inboxMsg = inboxMsg.replace(/\{amount\}/gi, amountText);
+                    replyMsg = replyMsg.replace(/\{amount\}/gi, amountText);
+                  } else {
+                    // ไม่พบราคาที่บิด: แทน "{amount} บาท" ทั้งก้อนด้วยข้อความรอแอดมิน
+                    const noBid = liveSession.config.auctionNoBidText || 'รอแอดมินแจ้งยอด';
+                    inboxMsg = inboxMsg.replace(/\{amount\}\s*(?:บาท|฿)?/gi, noBid);
+                    replyMsg = replyMsg.replace(/\{amount\}\s*(?:บาท|฿)?/gi, noBid);
+                  }
+                  if (c) {
+                    if (!Array.isArray(c.wins)) c.wins = [];
+                    c.wins.push({ amount: win ? win.amount : 0, time: commentAt, lot: win ? win.lot : 0, dup: !!(win && win.dupLot), warning: win ? win.warning : 'กด 1 แต่ไม่พบราคาที่บิด (ลงท้ายด้วย 0)', commentId });
+                    if (c.wins.length > 30) c.wins.shift();
+                    c.lastWinAt = commentAt;
+                    if (win && win.lot) { if (!Array.isArray(c.wonLots)) c.wonLots = []; if (!c.wonLots.includes(win.lot)) c.wonLots.push(win.lot); if (c.wonLots.length > 100) c.wonLots.shift(); }
+                    // 💰 บวกยอดประมูลเข้า "ยอดที่ต้องจ่าย" อัตโนมัติ (เช่น 380+1500)
+                    if (win && win.amount > 0 && !win.dupLot) {
+                      const prevDue = Number(c.dueAmount) || 0;
+                      c.dueExpr = prevDue > 0 ? (c.dueExpr || String(prevDue)) + '+' + win.amount : '';
+                      c.dueAmount = Math.round((prevDue + win.amount) * 100) / 100;
+                      if (!c.dueExpr) delete c.dueExpr;
+                    }
+                  }
+                  // กด 1 ซ้ำในรอบเดิม: ไม่ส่งข้อความซ้ำ
+                  if (win && win.dupLot) { inboxMsg = ''; replyMsg = ''; }
+                  console.log('🔨 [Auction] ' + customerName + ' กด 1 → ยอด ' + (win ? win.amount : '-') + (win && win.warning ? ' ⚠️ ' + win.warning : ''));
+                } else {
+                  inboxMsg = inboxMsg.replace(/\{amount\}/gi, '');
+                  replyMsg = replyMsg.replace(/\{amount\}/gi, '');
+                }
+                return fbLimit(pageId, async () => {
                 const jobs = [];
                 if (cfg.enableInbox && inboxMsg && !fbPaused(pageDataRef, 'inbox')) {
                   jobs.push(fbPost('https://graph.facebook.com/v19.0/me/messages', {
@@ -7725,7 +7918,8 @@ app.post('/webhook', async (req, res) => {
                   const known = getPsidMap(pageDataRef).get(senderId);
                   if (known) labelKeywordCommenter(pageDataRef, pageCommenterRec(pageDataRef, senderId), String(known), cfg);
                 }
-              }), 'comment');
+              });
+              }, 'comment');
               if (cfg.enableAutoLike && !botOff) {
                 runTask(() => fbLimit(pageId + ':like', () => axios.post('https://graph.facebook.com/v19.0/' + commentId + '/likes', {}, {
                   params: { access_token: token }, timeout: 15000
