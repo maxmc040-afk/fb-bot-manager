@@ -2540,7 +2540,16 @@ app.get('/', (req, res) => {
                                     <span class="text-sm font-bold text-amber-800">🔨 โหมดประมูล: แจ้งยอดจบประมูลในแชทอัตโนมัติ</span>
                                 </label>
                                 <p class="text-xs text-slate-600 pl-6">ลูกค้าบิดราคาที่ <b>ลงท้ายด้วย 0</b> (เช่น 380, 1,500) → ผู้ชนะกด <b>1</b> → ระบบหาราคาล่าสุดที่คนนั้นบิด ใส่แทน <b>{amount}</b> ในข้อความ และบวกเข้า <b>"ยอดที่ต้องจ่าย"</b> ให้อัตโนมัติ (รอ 3 วินาทีก่อนส่ง เผื่อคอมเมนต์ราคามาช้า)</p>
-                                <p class="text-xs text-slate-500 pl-6">ตัวอย่างข้อความส่งเข้าแชท: <span class="font-mono bg-white px-1 rounded border">ยินดีด้วยค่ะคุณ {name} 🎉 ยอดประมูล {amount} บาท โอนที่ ...</span></p>
+                                <div class="pl-6 pt-2 grid grid-cols-1 md:grid-cols-2 gap-3">
+                                    <label class="block text-xs font-semibold text-amber-800">✏️ ข้อความแจ้งยอดประมูล (ส่งให้ผู้ชนะ)
+                                        <textarea id="lv-auction-text" rows="3" class="mt-1 w-full p-2 text-sm font-normal border border-amber-300 rounded-lg bg-white focus:outline-none focus:border-amber-500" placeholder="🔨 ยอดประมูล {amount} บาท"></textarea>
+                                        <span class="block text-[11px] font-normal text-slate-500 mt-0.5">ใส่ <b>{amount}</b> = ยอดที่ชนะ · <b>{name}</b> = ชื่อลูกค้า · ระบบวางข้อความนี้ไว้บนสุด ตามด้วย "ข้อความส่งเข้าแชทส่วนตัว" (ถ้าในข้อความส่งเข้าแชทมี {amount} อยู่แล้ว จะไม่ใส่ข้อความนี้ซ้ำ)</span>
+                                    </label>
+                                    <label class="block text-xs font-semibold text-amber-800">❔ ข้อความเมื่อหายอดไม่เจอ (กด 1 แต่ไม่ได้บิด)
+                                        <input type="text" id="lv-auction-nobid" class="mt-1 w-full p-2 text-sm font-normal border border-amber-300 rounded-lg bg-white focus:outline-none focus:border-amber-500" placeholder="รอแอดมินแจ้งยอด">
+                                        <span class="block text-[11px] font-normal text-slate-500 mt-0.5">ใช้แทนตำแหน่ง "{amount} บาท" เช่น "🔨 ยอดประมูล รอแอดมินแจ้งยอด"</span>
+                                    </label>
+                                </div>
                             </div>
                             <div class="bg-pink-50/50 border border-pink-200 rounded-xl p-4 space-y-2">
                                 <div class="flex flex-wrap items-center justify-between gap-2">
@@ -3704,6 +3713,8 @@ app.get('/', (req, res) => {
             document.getElementById('lv-enable-inbox').checked = !!liveCfg.enableInbox;
             document.getElementById('lv-reply-cooldown').value = liveCfg.replyCooldownMin || 0;
             document.getElementById('lv-auction-mode').checked = !!liveCfg.auctionMode;
+            document.getElementById('lv-auction-text').value = typeof liveCfg.auctionText === 'string' ? liveCfg.auctionText : '🔨 ยอดประมูล {amount} บาท';
+            document.getElementById('lv-auction-nobid').value = liveCfg.auctionNoBidText || 'รอแอดมินแจ้งยอด';
             if (!Array.isArray(liveCfg.keywordLabels)) liveCfg.keywordLabels = [];
             if (!Array.isArray(liveCfg.keywordRemoveLabels)) liveCfg.keywordRemoveLabels = [];
             renderLiveKeywords();
@@ -4270,7 +4281,9 @@ app.get('/', (req, res) => {
                 keywordLabels: liveCfg.keywordLabels || [],
                 keywordRemoveLabels: liveCfg.keywordRemoveLabels || [],
                 replyCooldownMin: parseInt(document.getElementById('lv-reply-cooldown').value, 10) || 0,
-                auctionMode: document.getElementById('lv-auction-mode').checked
+                auctionMode: document.getElementById('lv-auction-mode').checked,
+                auctionText: document.getElementById('lv-auction-text').value,
+                auctionNoBidText: document.getElementById('lv-auction-nobid').value
             };
             const res = await fetch(liveUrl('/api/live/config', '&sid=' + currentLiveId), {
                 method: 'POST',
@@ -6342,7 +6355,8 @@ app.post('/api/live/create', checkAuth, (req, res) => {
       keywordRemoveLabels: Array.isArray(c.keywordRemoveLabels) ? c.keywordRemoveLabels.slice() : [],
       replyCooldownMin: Number(c.replyCooldownMin) || 0,
       auctionMode: !!c.auctionMode,
-      auctionNoBidText: c.auctionNoBidText || 'รอแอดมินแจ้งยอด'
+      auctionNoBidText: c.auctionNoBidText || 'รอแอดมินแจ้งยอด',
+      auctionText: typeof c.auctionText === 'string' ? c.auctionText : '🔨 ยอดประมูล {amount} บาท'
     },
     stats: { comments: 0, matched: 0 },
     commenters: new Map(),
@@ -6503,6 +6517,8 @@ app.post('/api/live/config', checkAuth, (req, res) => {
   if (typeof b.enableInbox === 'boolean') s.config.enableInbox = b.enableInbox;
   if (typeof b.enableAutoLike === 'boolean') s.config.enableAutoLike = b.enableAutoLike;
   if (typeof b.auctionMode === 'boolean') { s.config.auctionMode = b.auctionMode; ctx.pageData.config.auctionMode = b.auctionMode; }
+  if (typeof b.auctionText === 'string') { s.config.auctionText = b.auctionText.slice(0, 1000); ctx.pageData.config.auctionText = s.config.auctionText; }
+  if (typeof b.auctionNoBidText === 'string') { s.config.auctionNoBidText = b.auctionNoBidText.trim().slice(0, 200) || 'รอแอดมินแจ้งยอด'; ctx.pageData.config.auctionNoBidText = s.config.auctionNoBidText; }
   if (b.replyCooldownMin !== undefined) {
     s.config.replyCooldownMin = Math.min(1440, Math.max(0, parseInt(b.replyCooldownMin, 10) || 0));
     ctx.pageData.config.replyCooldownMin = s.config.replyCooldownMin;
@@ -7846,7 +7862,8 @@ app.post('/webhook', async (req, res) => {
                   const c = liveSession.commenters.get(senderId);
                   const win = auctionAmountFor(liveSession, senderId, commentAt);
                   // ข้อความส่งเข้าแชทไม่มี {amount} -> เติมบรรทัดยอดประมูลไว้บนสุดให้อัตโนมัติ
-                  if (inboxMsg && !/\{amount\}/i.test(inboxMsg)) inboxMsg = '🔨 ยอดประมูล {amount} บาท\n\n' + inboxMsg;
+                  const aText = renderReplyText(typeof liveSession.config.auctionText === 'string' ? liveSession.config.auctionText : '🔨 ยอดประมูล {amount} บาท', customerName);
+                  if (inboxMsg && aText.trim() && !/\{amount\}/i.test(inboxMsg)) inboxMsg = aText.trim() + '\n\n' + inboxMsg;
                   if (win) {
                     const amountText = Number(win.amount).toLocaleString('en-US');
                     inboxMsg = inboxMsg.replace(/\{amount\}/gi, amountText);
