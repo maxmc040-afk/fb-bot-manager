@@ -2082,7 +2082,52 @@ async function beemoveResolveSenderCached(bm) {
 }
 
 // สร้างพัสดุ 1 รายการ คืนค่า { id, trackingNo, partnerName }
-async function beemoveCreateShipment(bm, buyer, remark) {
+// ⚡ ราคาขนส่งขึ้นกับปลายทาง/ขนาดพัสดุ -> จำผลไว้ 30 นาที (ที่อยู่ปลายทางเดียวกันไม่ต้องถาม Bee Move ซ้ำ)
+const beemoveEstimateCache = new Map(); // key -> { at, p }
+function beemoveEstimateKey(bm, base) {
+  const t = base.to || {};
+  return beemoveCacheKey(bm) + '|' + JSON.stringify([base.from && base.from.postal_code, base.pickup_point_id, t.district, t.city, t.province, t.postal_code, base.parcel]);
+}
+function beemoveEstimateCached(bm, base) {
+  const key = beemoveEstimateKey(bm, base);
+  const hit = beemoveEstimateCache.get(key);
+  if (hit && Date.now() - hit.at < 30 * 60000) return hit.p;
+  const p = beemoveEstimateRaw(bm, base);
+  beemoveEstimateCache.set(key, { at: Date.now(), p });
+  p.then(r => { if (!r.prices.length) beemoveEstimateCache.delete(key); }, () => beemoveEstimateCache.delete(key));
+  if (beemoveEstimateCache.size > 2000) beemoveEstimateCache.delete(beemoveEstimateCache.keys().next().value);
+  return p;
+}
+// ⚡ ขอราคาหลายพัสดุใน 1 ครั้ง (แทนทีละรายการ) แล้วเก็บเข้าแคช
+async function beemoveEstimateBatch(bm, bases) {
+  const todo = [];
+  const seen = new Set();
+  for (const b of bases) {
+    const key = beemoveEstimateKey(bm, b);
+    const hit = beemoveEstimateCache.get(key);
+    if (seen.has(key) || (hit && Date.now() - hit.at < 30 * 60000)) continue;
+    seen.add(key); todo.push({ key, b });
+  }
+  for (let i = 0; i < todo.length; i += 20) {
+    const chunk = todo.slice(i, i + 20);
+    try {
+      const res = await beemoveRequest(bm, 'POST', '/client/v2/shipment-orders/partner-shipping-prices', { data: { orders: chunk.map(x => x.b) } });
+      const orders = (unwrapData(res.data) || {}).orders || [];
+      if (orders.length !== chunk.length) continue; // ตอบไม่ครบ -> ให้ขอทีละรายการตามปกติ
+      chunk.forEach((x, k) => {
+        const o = orders[k] || {};
+        // ถ้า Bee Move ส่งที่อยู่ปลายทางกลับมา ต้องตรงกับที่ส่งไป (กันราคาสลับรายการ)
+        const echoZip = o.to && o.to.postal_code;
+        if (echoZip && String(echoZip) !== String(x.b.to.postal_code)) return;
+        const prices = o.estimate_prices || [];
+        if (prices.length) beemoveEstimateCache.set(x.key, { at: Date.now(), p: Promise.resolve({ prices, raw: res.data }) });
+      });
+    } catch (e) { console.error('⚠️ [Bee Move] ขอราคาแบบรวมไม่สำเร็จ ใช้ทีละรายการแทน', e.message); }
+  }
+}
+
+// ตรวจข้อมูลผู้รับ + สร้างข้อมูลพัสดุ (ยังไม่ส่งไป Bee Move)
+async function beemoveBuildOrder(bm, buyer) {
   if (!thaiAddrDb) await loadThaiAddressDb();
   if (thaiAddrDb) {
     const chk = checkAddressAgainstZip(buyer.address, buyer.postcode);
@@ -2117,7 +2162,12 @@ async function beemoveCreateShipment(bm, buyer, remark) {
   if (sender.pickupPointId !== null && sender.pickupPointId !== undefined && sender.pickupPointId !== '') {
     base.pickup_point_id = isNaN(Number(sender.pickupPointId)) ? sender.pickupPointId : Number(sender.pickupPointId);
   }
-  const est = await beemoveEstimateRaw(bm, base);
+  return base;
+}
+
+async function beemoveCreateShipment(bm, buyer, remark, prebuilt) {
+  const base = prebuilt || await beemoveBuildOrder(bm, buyer);
+  const est = await beemoveEstimateCached(bm, base);
   const prices = est.prices;
   const chosen = pickPartner(bm, prices);
   if (!chosen) {
@@ -5525,7 +5575,10 @@ app.get('/', (req, res) => {
                 for(let i = 0; i < 1800; i++) {
                     await new Promise(function(r) { setTimeout(r, 1000); });
                     if(sid !== currentLiveId) return;
-                    await loadBuyers();
+                    try {
+                        const st = await (await fetch(liveUrl('/api/live/beemove/ship-status', '&sid=' + currentLiveId))).json();
+                        if(st.success && st.shipJob) lastShipJob = st.shipJob;
+                    } catch(e) {}
                     if(lastShipJob) writeWaitPage(w, '⏳ ' + lastShipJob.message + ' (' + lastShipJob.done + '/' + lastShipJob.total + ')');
                     if(lastShipJob && !lastShipJob.running) break;
                 }
@@ -7402,7 +7455,7 @@ async function runShipJob(pageData, s, userIds, labelUserIds) {
     job.message = 'กำลังสร้างพัสดุ: ' + (item.recipientName || item.fbName || uid);
     try {
       const remark = (item.fbName || '') + ' ' + (item.keyword || '') + 'x' + (item.matchedCount || 0);
-      const r = await beemoveCreateShipment(bm, item, remark);
+      const r = await beemoveCreateShipment(bm, item, remark, prebuilt.get(uid));
       item.beemoveOrderId = r.id;
       item.trackingNo = r.trackingNo;
       item.partnerName = r.partnerName;
@@ -7421,12 +7474,22 @@ async function runShipJob(pageData, s, userIds, labelUserIds) {
     job.done++;
   };
 
-  // ⚡ สร้างพร้อมกันครั้งละ 3 รายการ (เดิมทีละรายการ + หน่วง 0.4 วิ)
+  // ⚡ เตรียมข้อมูลพัสดุทุกรายการ แล้วขอราคาขนส่งจาก Bee Move รวดเดียว (แทนทีละรายการ)
+  const prebuilt = new Map();
+  job.message = 'กำลังตรวจข้อมูลและขอราคาขนส่ง...';
+  for (const uid of userIds) {
+    const item = s.buyers.get(uid);
+    if (!item || item.trackingNo || item.beemoveOrderId) continue;
+    try { prebuilt.set(uid, await beemoveBuildOrder(bm, item)); } catch (e) { /* ข้อมูลไม่ครบ: แจ้ง error ตอนสร้างตามปกติ */ }
+  }
+  if (prebuilt.size > 1) await beemoveEstimateBatch(bm, Array.from(prebuilt.values()));
+
+  // ⚡ สร้างพร้อมกันครั้งละ 5 รายการ
   let next = 0;
   const worker = async () => {
     while (!job.shouldStop && next < userIds.length) await one(userIds[next++]);
   };
-  await Promise.all(Array.from({ length: Math.min(3, userIds.length) }, worker));
+  await Promise.all(Array.from({ length: Math.min(5, userIds.length) }, worker));
 
   // ⚡ เริ่มดึงใบแปะหน้าล่วงหน้าทันที (หน้าเว็บขอเมื่อไหร่ได้ไฟล์เร็ว)
   const ids = (labelUserIds && labelUserIds.length ? labelUserIds : userIds)
@@ -7436,6 +7499,15 @@ async function runShipJob(pageData, s, userIds, labelUserIds) {
   job.running = false;
   job.message = 'สร้างพัสดุเสร็จ: สำเร็จ ' + job.created + ' · ล้มเหลว ' + job.failed + (job.skipped ? ' · มีเลขอยู่แล้ว ' + job.skipped : '') + ' (' + ((Date.now() - t0) / 1000).toFixed(1) + ' วิ)';
 }
+
+// ⚡ สถานะงานสร้างพัสดุแบบเบา (หน้าเว็บถามทุก 1 วิ ระหว่างรอ แทนการโหลดตารางลูกค้าทั้งหมด)
+app.get('/api/live/beemove/ship-status', checkAuth, (req, res) => {
+  const ctx = getLiveContext(req, res);
+  if (!ctx) return;
+  const s = ctx.live;
+  if (!s) return res.json({ success: false, error: 'ไม่พบ session นี้' });
+  res.json({ success: true, shipJob: s.shipJob || null });
+});
 
 app.post('/api/live/beemove/create', checkAuth, (req, res) => {
   const ctx = getLiveContext(req, res);
