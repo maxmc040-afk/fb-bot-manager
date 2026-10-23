@@ -5577,6 +5577,7 @@ app.get('/', (req, res) => {
             const w = window.open('', '_blank');
             if(!w) return alert('เบราว์เซอร์บล็อกหน้าต่างใหม่ กรุณาอนุญาต pop-up แล้วลองอีกครั้ง');
             const uids = list.map(function(b) { return b.userId; });
+            let skippedOrderIds = [];
 
             if(todo.length) {
                 writeWaitPage(w, 'กำลังสร้างเลขพัสดุใน Bee Move...');
@@ -5586,14 +5587,20 @@ app.get('/', (req, res) => {
                 });
                 let d = await res.json();
                 if(!d.success && d.duplicates && d.duplicates.length) {
-                    // 🛡️ กันสร้างใบแปะหน้าซ้ำ: เคยสร้างพัสดุให้คนนี้แล้วภายใน 1 วัน
-                    let dm = '⚠️ พบ ' + d.duplicates.length + ' คนที่เคยสร้างพัสดุไปแล้วภายใน 1 วัน (24 ชม.):' + NL;
+                    // 🛡️ กันสร้างใบแปะหน้าซ้ำ: เคยสร้างพัสดุให้คนนี้แล้วภายใน 10 ชม.
+                    let dm = '⚠️ พบ ' + d.duplicates.length + ' คนที่เคยสร้างพัสดุไปแล้วภายใน 10 ชม.:' + NL;
                     d.duplicates.slice(0, 15).forEach(function(x) { dm += '• ' + x.name + ' · ' + (x.trackingNo || 'รอเลขพัสดุ') + ' (' + x.session + ' ' + new Date(x.at).toLocaleString('th-TH', { dateStyle: 'short', timeStyle: 'short' }) + ')' + NL; });
                     dm += NL + 'กด "ตกลง" = สร้างใหม่ทั้งหมด (ซ้ำ)' + NL + 'กด "ยกเลิก" = ข้ามคนที่ซ้ำ สร้างเฉพาะคนที่เหลือ';
                     const dupIds = d.duplicates.map(function(x) { return x.userId; });
                     const again = confirm(dm);
                     const sendIds = todo.map(function(b) { return b.userId; }).filter(function(id) { return again || dupIds.indexOf(id) < 0; });
-                    if(!sendIds.length) { w.close(); return alert('ไม่มีรายการที่ต้องสร้างใหม่'); }
+                    // ข้ามคนที่ซ้ำ -> ใช้ใบแปะหน้าเดิมของพัสดุที่สร้างไว้แล้ว (ไม่ตัดเงินซ้ำ)
+                    if(!again) skippedOrderIds = d.duplicates.map(function(x) { return x.orderId; }).filter(Boolean);
+                    if(!sendIds.length) {
+                        if(skippedOrderIds.length) { openBeemoveLabel(w, skippedOrderIds); return; }
+                        w.close();
+                        return alert('ไม่ได้สร้างพัสดุใหม่ เพราะกด "ยกเลิก" (ข้ามคนที่เคยสร้างแล้ว)' + NL + 'และไม่พบใบแปะหน้าเดิมของพัสดุนั้น' + NL + NL + 'ถ้าต้องการสร้างใหม่ ให้กดอีกครั้งแล้วเลือก "ตกลง"');
+                    }
                     d = await (await fetch(liveUrl('/api/live/beemove/create', '&sid=' + currentLiveId), {
                         method: 'POST', headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ userIds: sendIds, labelUserIds: uids, force: true })
@@ -5618,6 +5625,7 @@ app.get('/', (req, res) => {
             await loadBuyers();
             const ids = buyersList.filter(function(b) { return uids.indexOf(b.userId) >= 0 && b.beemoveOrderId; })
                 .map(function(b) { return b.beemoveOrderId; });
+            skippedOrderIds.forEach(function(id) { if(ids.indexOf(id) < 0) ids.push(id); });
             if(!ids.length) {
                 writeWaitPage(w, '❌ ไม่มีพัสดุที่สร้างสำเร็จ ดูสาเหตุในช่องเลขพัสดุของตาราง');
                 return;
@@ -7457,7 +7465,7 @@ app.post('/api/beemove/test', checkAuth, async (req, res) => {
 });
 
 // 🛡️ ประวัติการสร้างพัสดุของเพจ (ทุก session) ใช้กันสร้างใบแปะหน้าซ้ำ แม้ลบแถวลูกค้าหรือดึงเข้า session ใหม่
-const SHIP_DUP_DAYS = 1;
+const SHIP_DUP_HOURS = 10; // กันสร้างพัสดุซ้ำภายใน 10 ชม.
 function shipPhoneKey(p) { const d = String(p || '').replace(/\D/g, ''); return d.length >= 9 ? d.slice(-9) : ''; }
 function recordShipLog(pageData, s, item) {
   if (!pageData.shipLog) pageData.shipLog = [];
@@ -7466,7 +7474,7 @@ function recordShipLog(pageData, s, item) {
   if (pageData.shipLog.length > 3000) pageData.shipLog.length = 3000;
 }
 function findShipDuplicate(pageData, s, uid, item) {
-  const since = Date.now() - SHIP_DUP_DAYS * 86400000;
+  const since = Date.now() - SHIP_DUP_HOURS * 3600000;
   const phone = shipPhoneKey(item.phone);
   return (pageData.shipLog || []).find(l => l.at >= since && !(l.sid === s.id && l.orderId && l.orderId === item.beemoveOrderId) &&
     (l.uid === uid || (item.psid && l.psid === item.psid) || (phone && l.phone === phone))) || null;
@@ -7553,14 +7561,14 @@ app.post('/api/live/beemove/create', checkAuth, (req, res) => {
   if (!loginMode && !bm.apiKey) return res.json({ success: false, error: 'ยังไม่ได้ใส่ API Key ของ Bee Move (เมนู 🚚 ขนส่ง Bee Move)' });
   const userIds = Array.from(new Set((Array.isArray(req.body.userIds) ? req.body.userIds : []).map(String))).filter(id => s.buyers.has(id));
   if (!userIds.length) return res.json({ success: false, error: 'กรุณาเลือกลูกค้าอย่างน้อย 1 คน' });
-  // 🛡️ เคยสร้างพัสดุให้ลูกค้าคนนี้ (ชื่อเฟส / แชท / เบอร์โทรเดียวกัน) ภายใน 1 วัน -> ถามยืนยันก่อน
+  // 🛡️ เคยสร้างพัสดุให้ลูกค้าคนนี้ (ชื่อเฟส / แชท / เบอร์โทรเดียวกัน) ภายใน 10 ชม. -> ถามยืนยันก่อน
   if (!req.body.force) {
     const dups = [];
     for (const id of userIds) {
       const it = s.buyers.get(id);
       if (!it || it.trackingNo || it.beemoveOrderId) continue;
       const d = findShipDuplicate(ctx.pageData, s, id, it);
-      if (d) dups.push({ userId: id, name: it.recipientName || it.fbName || id, trackingNo: d.trackingNo, session: d.sid === s.id ? 'session นี้' : (d.sname || 'session อื่น'), at: d.at });
+      if (d) dups.push({ userId: id, name: it.recipientName || it.fbName || id, trackingNo: d.trackingNo, orderId: d.orderId || '', session: d.sid === s.id ? 'session นี้' : (d.sname || 'session อื่น'), at: d.at });
     }
     if (dups.length) return res.json({ success: false, duplicates: dups, error: 'พบลูกค้าที่เคยสร้างพัสดุแล้ว' });
   }
