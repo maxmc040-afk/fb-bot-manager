@@ -97,26 +97,56 @@ function slipImageUrlsFromMessage(message) {
   return out;
 }
 // 🧾 การ์ด "ตรวจสอบยืนยันสลิป" ของ Messenger ที่มาเปล่า ๆ: ขอรูปจากข้อความนั้นผ่าน Graph API
+// หา URL รูปจากข้อมูลทุกชั้น (การ์ดของ Messenger เก็บรูปไว้คนละที่กับไฟล์แนบปกติ)
+function collectImageUrls(obj, out, depth) {
+  out = out || []; depth = depth || 0;
+  if (!obj || depth > 8) return out;
+  if (typeof obj === 'string') {
+    if (/^https?:\/\//i.test(obj) && /(fbcdn\.net|fbsbx\.com|scontent|\.(jpe?g|png|webp)(\?|$))/i.test(obj) && !/\.gif(\?|$)/i.test(obj) && !out.includes(obj)) out.push(obj);
+    return out;
+  }
+  if (Array.isArray(obj)) { for (const x of obj) collectImageUrls(x, out, depth + 1); return out; }
+  if (typeof obj === 'object') for (const k of Object.keys(obj)) {
+    if (/^(id|link|permalink|profile_pic|from|to)$/.test(k)) continue;
+    collectImageUrls(obj[k], out, depth + 1);
+  }
+  return out;
+}
+
 async function fetchSlipFromCard(targetRecord, pageId, senderId, mid) {
   const pd = targetRecord.pageData;
   // มีรูปสลิปของลูกค้าคนนี้เข้ามาตรวจแล้วในช่วงนี้ -> ไม่ต้องทำซ้ำ
   if ((pd.slipAttempts || []).some(a => a.senderId === senderId && a.result !== 'noimage' && Date.now() - a.time < 90000)) return;
-  let urls = [], err = '';
+  const token = pd.config.pageAccessToken;
+  let urls = [], err = '', raw = '';
+  const FIELDS = 'message,attachments{mime_type,name,file_url,image_data{url,preview_url},generic_template,video_data},shares{link,name,description,template},sticker';
+  // 1) ขอข้อมูลข้อความนั้นโดยตรง
   try {
-    const r = await axios.get('https://graph.facebook.com/v19.0/' + encodeURIComponent(mid), {
-      params: { fields: 'message,attachments{mime_type,name,file_url,image_data{url,preview_url}}', access_token: pd.config.pageAccessToken }, timeout: 15000
-    });
-    for (const a of (r.data && r.data.attachments && r.data.attachments.data) || []) {
-      const u = (a.image_data && (a.image_data.url || a.image_data.preview_url)) || (/^image\//.test(a.mime_type || '') ? a.file_url : '');
-      if (u && !urls.includes(u)) urls.push(u);
-    }
+    const r = await axios.get('https://graph.facebook.com/v19.0/' + encodeURIComponent(mid), { params: { fields: FIELDS, access_token: token }, timeout: 15000 });
+    raw = JSON.stringify(r.data || {}).slice(0, 400);
+    urls = collectImageUrls(r.data);
   } catch (e) { err = graphErrorMessage(e); }
+  // 2) ไม่ได้รูป: ไล่หาจากข้อความล่าสุดในห้องแชทของลูกค้า (บางครั้งข้อมูลการ์ดอยู่ที่นี่)
+  if (!urls.length) {
+    try {
+      const convId = await findConversationId(pd.config.pageId || pageId, token, senderId);
+      if (convId) {
+        const r2 = await axios.get('https://graph.facebook.com/v19.0/' + encodeURIComponent(convId) + '/messages', { params: { fields: 'id,created_time,from,' + FIELDS, limit: 10, access_token: token }, timeout: 15000 });
+        for (const m of (r2.data && r2.data.data) || []) {
+          if (String(m.from && m.from.id) !== String(senderId)) continue;
+          if (m.id !== mid && Date.now() - (Date.parse(m.created_time) || 0) > 10 * 60000) continue;
+          urls = urls.concat(collectImageUrls(m).filter(u => !urls.includes(u)));
+          if (!raw) raw = JSON.stringify(m).slice(0, 400);
+        }
+      }
+    } catch (e) { if (!err) err = graphErrorMessage(e); }
+  }
   if (!urls.length) {
     logSlipAttempt(pd, { senderId, provider: '-', result: 'noimage', code: 'card',
-      note: 'ลูกค้าส่งสลิปแต่ Messenger แปลงเป็นการ์ด "ตรวจสอบยืนยันสลิป" และ Facebook ไม่ส่งรูปมาให้' + (err ? ' (' + err + ')' : '') + ' · ตรวจในแชทแล้วบันทึกแบบแมนนวล' });
+      note: 'ลูกค้าส่งสลิปแต่ Messenger แปลงเป็นการ์ด "ตรวจสอบยืนยันสลิป" และ Facebook ไม่ส่งรูปมาให้' + (err ? ' (' + err + ')' : '') + ' · ตรวจในแชทแล้วบันทึกแบบแมนนวล' + (raw ? ' · ข้อมูลจาก Facebook: ' + raw : '') });
     return;
   }
-  for (const u of urls) await processSlipImage(targetRecord, pageId, senderId, u, 0);
+  for (const u of urls.slice(0, 2)) await processSlipImage(targetRecord, pageId, senderId, u, 0);
 }
 
 // ===================== 🔨 โหมดประมูล =====================
