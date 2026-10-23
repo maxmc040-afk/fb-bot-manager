@@ -5148,6 +5148,15 @@ app.get('/', (req, res) => {
             document.getElementById('lv-buyers-all').checked = buyersList.length > 0 && buyersSelected.size === buyersList.length;
         }
 
+        // เอาติ๊กถูกออก (หลังสร้างพัสดุ/พิมพ์ใบแปะหน้าเสร็จ)
+        function unselectBuyers(ids) {
+            ids.forEach(function(id) { buyersSelected.delete(id); });
+            document.querySelectorAll('#lv-buyers tr[data-uid]').forEach(function(tr) {
+                if(ids.indexOf(tr.getAttribute('data-uid')) >= 0) { const cb = tr.querySelector('.bf-sel'); if(cb) cb.checked = false; }
+            });
+            updateBuyersSummary();
+        }
+
         function toggleAllBuyers(on) {
             buyersSelected = new Set(on ? buyersList.map(function(b) { return b.userId; }) : []);
             document.querySelectorAll('#lv-buyers .bf-sel').forEach(function(cb) { cb.checked = on; });
@@ -5578,6 +5587,7 @@ app.get('/', (req, res) => {
             if(!w) return alert('เบราว์เซอร์บล็อกหน้าต่างใหม่ กรุณาอนุญาต pop-up แล้วลองอีกครั้ง');
             const uids = list.map(function(b) { return b.userId; });
             let skippedOrderIds = [];
+            let skippedUids = [];
 
             if(todo.length) {
                 writeWaitPage(w, 'กำลังสร้างเลขพัสดุใน Bee Move...');
@@ -5595,9 +5605,17 @@ app.get('/', (req, res) => {
                     const again = confirm(dm);
                     const sendIds = todo.map(function(b) { return b.userId; }).filter(function(id) { return again || dupIds.indexOf(id) < 0; });
                     // ข้ามคนที่ซ้ำ -> ใช้ใบแปะหน้าเดิมของพัสดุที่สร้างไว้แล้ว (ไม่ตัดเงินซ้ำ)
-                    if(!again) skippedOrderIds = d.duplicates.map(function(x) { return x.orderId; }).filter(Boolean);
+                    if(!again) {
+                        skippedOrderIds = d.duplicates.map(function(x) { return x.orderId; }).filter(Boolean);
+                        skippedUids = d.duplicates.filter(function(x) { return x.orderId; }).map(function(x) { return x.userId; });
+                    }
                     if(!sendIds.length) {
-                        if(skippedOrderIds.length) { openBeemoveLabel(w, skippedOrderIds); return; }
+                        if(skippedOrderIds.length) {
+                            const have = list.filter(function(b) { return b.beemoveOrderId; });
+                            unselectBuyers(skippedUids.concat(have.map(function(b) { return b.userId; })));
+                            openBeemoveLabel(w, have.map(function(b) { return b.beemoveOrderId; }).concat(skippedOrderIds));
+                            return;
+                        }
                         w.close();
                         return alert('ไม่ได้สร้างพัสดุใหม่ เพราะกด "ยกเลิก" (ข้ามคนที่เคยสร้างแล้ว)' + NL + 'และไม่พบใบแปะหน้าเดิมของพัสดุนั้น' + NL + NL + 'ถ้าต้องการสร้างใหม่ ให้กดอีกครั้งแล้วเลือก "ตกลง"');
                     }
@@ -5630,6 +5648,9 @@ app.get('/', (req, res) => {
                 writeWaitPage(w, '❌ ไม่มีพัสดุที่สร้างสำเร็จ ดูสาเหตุในช่องเลขพัสดุของตาราง');
                 return;
             }
+            // ✅ สร้าง/พิมพ์เสร็จ -> เอาติ๊กถูกออกจากคนที่ได้ใบแปะหน้าแล้ว (คนที่สร้างไม่สำเร็จยังติ๊กไว้ให้ลองใหม่)
+            const doneUids = buyersList.filter(function(b) { return uids.indexOf(b.userId) >= 0 && b.beemoveOrderId; }).map(function(b) { return b.userId; });
+            unselectBuyers(doneUids.concat(skippedUids));
             openBeemoveLabel(w, ids);
         }
         // =========================================================
