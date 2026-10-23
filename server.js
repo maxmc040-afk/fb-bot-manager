@@ -172,8 +172,9 @@ function isAuctionCloseSignal(text, cfg) {
   if (cfg.auctionCloseHearts === false) return false;
   const t = String(text || '').replace(/[\uFE0F\u200D\s]/g, '');
   if (!t || t.length > 60) return false;
-  if (!/[❤♥💖💗💓💕💞💘💝🧡💛💚💙💜🤍🖤🤎❣]/u.test(t)) return false;
-  return /^[❤♥💖💗💓💕💞💘💝🧡💛💚💙💜🤍🖤🤎❣🙏🎉✨👏]+$/u.test(t);
+  // อีโมจิปิดประมูลมาตรฐาน: หัวใจ ❤️ หรือ กากบาท ❌ (เพจที่ใช้ ❌ ปิดรอบ)
+  if (!/[❤♥💖💗💓💕💞💘💝🧡💛💚💙💜🤍🖤🤎❣❌✖❎]/u.test(t)) return false;
+  return /^[❤♥💖💗💓💕💞💘💝🧡💛💚💙💜🤍🖤🤎❣❌✖❎🙏🎉✨👏]+$/u.test(t);
 }
 
 // ยอดของคนที่กด 1
@@ -209,15 +210,16 @@ function auctionAmountFor(session, uid, at) {
     }
   }
   // สำรอง: ไม่มีสัญญาณปิด / คนกด 1 ไม่ได้บิดในรอบที่ปิด
+  // ห้ามข้ามสัญญาณปิด: ใช้เฉพาะราคาหลังสัญญาณปิดล่าสุด (รอบใหม่ที่ยังไม่ปิด) และไม่เก่ากว่า 15 นาทีก่อนกด 1
   if (!Array.isArray(c.bids)) return null;
-  const from = Math.max(c.lastWinAt || 0, 0);
+  const from = Math.max(c.lastWinAt || 0, lotClose || 0, at - 15 * 60000);
   const own = c.bids.filter(b => b.time > from && b.time <= at);
   if (!own.length) return null;
   const bid = own.reduce((m, b) => b.amount > m.amount ? b : m, own[0]); // ราคาสูงสุดของคนนี้
   const higher = log.filter(b => b.uid !== uid && b.time >= bid.time && b.time <= at && b.amount > bid.amount)
     .sort((x, y) => y.amount - x.amount)[0];
   return { amount: bid.amount, bidTime: bid.time, lot: 0, lotStart: from, source: 'latest',
-    warning: [lotClose ? (wonThisLot ? 'ยังไม่มีสัญญาณปิด (หัวใจ) ของรอบนี้ ใช้ราคาล่าสุด' : 'ไม่พบราคาที่บิดก่อนสัญญาณปิดล่าสุด ใช้ราคาล่าสุดแทน') : '',
+    warning: [lotClose ? 'ยังไม่มีสัญญาณปิดของรอบนี้ ใช้ราคาที่บิดหลังสัญญาณปิดล่าสุด' : '',
       higher ? ('มีคนบิดสูงกว่า: ' + (higher.name || higher.uid) + ' ' + higher.amount.toLocaleString('en-US')) : ''].filter(Boolean).join(' · ') };
 }
 
@@ -2696,7 +2698,7 @@ app.get('/', (req, res) => {
                                 <div class="pl-6 pt-2 grid grid-cols-1 md:grid-cols-2 gap-3">
                                     <div class="md:col-span-2 bg-white/70 border border-amber-200 rounded-lg p-3 space-y-2">
                                         <div class="text-xs font-semibold text-amber-800">🔔 สัญญาณปิดการประมูล <span class="font-normal text-slate-500">(นับเฉพาะคอมเมนต์ของเพจ · ราคาที่บิดหลังสัญญาณนี้ไม่นับ)</span></div>
-                                        <label class="flex items-center gap-2 text-sm text-slate-700 cursor-pointer"><input type="checkbox" id="lv-auction-hearts" class="w-4 h-4 rounded"> ❤️ อีโมจิหัวใจ (เช่น ❤️❤️❤️🙏)</label>
+                                        <label class="flex items-center gap-2 text-sm text-slate-700 cursor-pointer"><input type="checkbox" id="lv-auction-hearts" class="w-4 h-4 rounded"> ❤️ อีโมจิหัวใจ หรือ ❌ กากบาท (เช่น ❤️❤️❤️🙏 , ❌❌)</label>
                                         <label class="block text-xs font-semibold text-slate-600">🔑 คีย์เวิร์ดปิดประมูล <span class="font-normal text-slate-400">· คั่นด้วยเครื่องหมายจุลภาค เช่น ปิด, จบ, sold · คอมเมนต์ของเพจที่มีคำนี้ = ปิดรอบ</span>
                                             <input type="text" id="lv-auction-words" class="mt-1 w-full p-2 text-sm font-normal border border-amber-300 rounded-lg bg-white focus:outline-none focus:border-amber-500" placeholder="เช่น ปิด, จบ, sold, 🔨">
                                         </label>
@@ -4239,7 +4241,7 @@ app.get('/', (req, res) => {
                 const tm = function(x) { return x ? new Date(x).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '-'; };
                 th += '<div>' + (w.dup ? '⏭️ ' : '🔨 ') + '<b>' + (w.amount ? fmtMoney(w.amount) + ' ฿' : 'ไม่พบราคา') + '</b>'
                     + (w.bidTime ? ' ← คอมเมนต์ราคาเวลา <b>' + tm(w.bidTime) + '</b>' : '')
-                    + (w.closeAt ? ' · ปิดรอบ ❤️ ' + tm(w.closeAt) : (w.source === 'latest' ? ' · (ไม่มีสัญญาณปิด ใช้ราคาล่าสุด)' : ''))
+                    + (w.closeAt ? ' · ปิดรอบ (❤️/❌) ' + tm(w.closeAt) : (w.source === 'latest' ? ' · (ไม่พบราคาในรอบที่ปิด ใช้ราคาหลังสัญญาณปิดล่าสุด)' : ''))
                     + ' · กด 1 เวลา ' + tm(w.pressAt) + (w.dup ? ' (ซ้ำ ไม่บวกยอด)' : '') + '</div>';
             });
             tEl.innerHTML = th ? '<div class="font-semibold text-amber-800">ที่มาของยอดประมูล (ตรวจกับเวลาในคอมเมนต์ไลฟ์ได้)</div>' + th : '';
