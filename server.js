@@ -2278,6 +2278,34 @@ app.get('/', (req, res) => {
         </div>
     </div>
 
+    <div id="chpass-modal" class="hidden fixed inset-0 bg-slate-900/60 flex items-center justify-center z-50 p-4">
+        <div class="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6 space-y-4">
+            <div class="flex items-center justify-between">
+                <h3 class="text-lg font-bold text-slate-800">🔑 เปลี่ยนรหัสผ่าน</h3>
+                <button type="button" onclick="closeChangePassword()" class="text-slate-400 hover:text-slate-600 text-xl leading-none">×</button>
+            </div>
+            <div>
+                <label class="text-xs font-semibold text-slate-600 block mb-1">รหัสผ่านเดิม</label>
+                <input type="password" id="chpass-old" autocomplete="current-password" class="w-full p-2.5 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-500">
+            </div>
+            <div>
+                <label class="text-xs font-semibold text-slate-600 block mb-1">รหัสผ่านใหม่ (อย่างน้อย 6 ตัวอักษร)</label>
+                <input type="password" id="chpass-new" autocomplete="new-password" class="w-full p-2.5 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-500">
+            </div>
+            <div>
+                <label class="text-xs font-semibold text-slate-600 block mb-1">ยืนยันรหัสผ่านใหม่</label>
+                <input type="password" id="chpass-new2" autocomplete="new-password" onkeydown="if(event.key==='Enter') submitChangePassword()" class="w-full p-2.5 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-500">
+            </div>
+            <label class="flex items-center gap-2 text-xs text-slate-500"><input type="checkbox" onchange="toggleChpassShow(this.checked)"> แสดงรหัสผ่าน</label>
+            <div id="chpass-msg" class="text-xs"></div>
+            <div class="flex gap-2">
+                <button type="button" onclick="closeChangePassword()" class="flex-1 py-2.5 text-sm font-semibold rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700">ยกเลิก</button>
+                <button type="button" id="chpass-btn" onclick="submitChangePassword()" class="flex-1 py-2.5 text-sm font-semibold rounded-xl bg-blue-600 hover:bg-blue-700 text-white">บันทึกรหัสใหม่</button>
+            </div>
+            <p class="text-[11px] text-slate-400">เปลี่ยนแล้ว อุปกรณ์อื่นที่ล็อกอินบัญชีนี้อยู่จะถูกออกจากระบบ ต้องล็อกอินด้วยรหัสใหม่</p>
+        </div>
+    </div>
+
     <div id="app-container" class="flex h-screen overflow-hidden hidden">
         <aside class="w-64 bg-white border-r border-slate-200 flex flex-col z-20">
             <div class="h-16 flex items-center justify-between px-6 border-b border-slate-100">
@@ -2307,7 +2335,10 @@ app.get('/', (req, res) => {
         <div class="flex-1 flex flex-col min-w-0 overflow-hidden">
             <header class="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-6 z-10">
                 <h1 id="page-title" class="text-lg font-bold text-slate-700">กำลังจัดการเพจ: <span id="header-page-name" class="text-blue-600">ยังไม่ได้เลือกเพจ</span> <span id="db-status" class="ml-2 text-xs font-medium text-slate-400"></span></h1>
-                <span class="text-xs bg-emerald-100 text-emerald-700 px-2.5 py-1 rounded-full font-semibold">● User: <span id="current-username"></span></span>
+                <div class="flex items-center gap-2">
+                    <span class="text-xs bg-emerald-100 text-emerald-700 px-2.5 py-1 rounded-full font-semibold">● User: <span id="current-username"></span></span>
+                    <button type="button" onclick="openChangePassword()" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-2.5 py-1 rounded-full font-semibold">🔑 เปลี่ยนรหัสผ่าน</button>
+                </div>
             </header>
 
             <main class="flex-1 overflow-y-auto p-6">
@@ -3194,6 +3225,43 @@ app.get('/', (req, res) => {
                 }
             } catch(e) {
                 alert('❌ เกิดข้อผิดพลาดในการเชื่อมต่อเซิร์ฟเวอร์');
+            }
+        }
+
+        function openChangePassword() {
+            ['chpass-old', 'chpass-new', 'chpass-new2'].forEach(function(id) { const el = document.getElementById(id); el.value = ''; el.type = 'password'; });
+            document.getElementById('chpass-msg').innerText = '';
+            document.getElementById('chpass-modal').classList.remove('hidden');
+            setTimeout(function() { document.getElementById('chpass-old').focus(); }, 50);
+        }
+        function closeChangePassword() { document.getElementById('chpass-modal').classList.add('hidden'); }
+        function toggleChpassShow(on) {
+            ['chpass-old', 'chpass-new', 'chpass-new2'].forEach(function(id) { document.getElementById(id).type = on ? 'text' : 'password'; });
+        }
+        async function submitChangePassword() {
+            const oldPw = document.getElementById('chpass-old').value;
+            const newPw = document.getElementById('chpass-new').value;
+            const newPw2 = document.getElementById('chpass-new2').value;
+            const msg = document.getElementById('chpass-msg');
+            const fail = function(t) { msg.className = 'text-xs text-rose-600'; msg.innerText = '❌ ' + t; };
+            if(!oldPw || !newPw) return fail('กรุณากรอกรหัสผ่านเดิมและรหัสผ่านใหม่');
+            if(newPw.length < 6) return fail('รหัสผ่านใหม่ต้องยาวอย่างน้อย 6 ตัวอักษร');
+            if(newPw !== newPw2) return fail('รหัสผ่านใหม่ทั้ง 2 ช่องไม่ตรงกัน');
+            const btn = document.getElementById('chpass-btn');
+            btn.disabled = true; btn.innerText = 'กำลังบันทึก...';
+            try {
+                const res = await fetch('/api/change-password?token=' + authToken, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ oldPassword: oldPw, newPassword: newPw })
+                });
+                const d = await res.json();
+                if(!d.success) return fail(d.error || 'เปลี่ยนรหัสผ่านไม่สำเร็จ');
+                closeChangePassword();
+                alert('✅ เปลี่ยนรหัสผ่านเรียบร้อยแล้ว' + (d.loggedOut ? NL + 'ออกจากระบบอุปกรณ์อื่น ' + d.loggedOut + ' เครื่อง' : ''));
+            } catch(e) {
+                fail('เชื่อมต่อเซิร์ฟเวอร์ไม่ได้');
+            } finally {
+                btn.disabled = false; btn.innerText = 'บันทึกรหัสใหม่';
             }
         }
 
@@ -5755,13 +5823,33 @@ app.get('/', (req, res) => {
 // -------------------------------------------------------------
 // 2. Endpoint ระบบ Authentication 
 // -------------------------------------------------------------
+// 🔑 รหัสผ่านเก็บแบบเข้ารหัส (scrypt + salt) ไม่เก็บเป็นตัวอักษรตรง ๆ
+// บัญชีเก่าที่ยังเป็นรหัสแบบเดิม จะถูกเปลี่ยนเป็นแบบเข้ารหัสอัตโนมัติเมื่อล็อกอินครั้งถัดไป
+function hashPassword(pw) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  return 'scrypt$' + salt + '$' + crypto.scryptSync(String(pw), salt, 64).toString('hex');
+}
+function checkPassword(user, pw) {
+  const stored = String((user && user.password) || '');
+  pw = String(pw || '');
+  if (!stored || !pw) return false;
+  if (stored.startsWith('scrypt$')) {
+    const [, salt, hex] = stored.split('$');
+    const a = Buffer.from(hex || '', 'hex');
+    const b = crypto.scryptSync(pw, salt || '', 64);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  }
+  const a = Buffer.from(stored), b = Buffer.from(pw);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
 app.post('/api/signup', (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.json({ success: false, error: 'กรุณากรอกข้อมูลให้ครบถ้วน' });
   if (usersDB[username]) return res.json({ success: false, error: 'ชื่อผู้ใช้นี้ถูกใช้งานแล้ว' });
 
   usersDB[username] = {
-    password: password,
+    password: hashPassword(password),
     pages: {} 
   };
 
@@ -5772,13 +5860,32 @@ app.post('/api/signup', (req, res) => {
 
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body;
-  if (!usersDB[username] || usersDB[username].password !== password) {
+  if (!usersDB[username] || !checkPassword(usersDB[username], password)) {
     return res.json({ success: false, error: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' });
   }
+  if (!String(usersDB[username].password).startsWith('scrypt$')) usersDB[username].password = hashPassword(password);
 
   const token = 'token_' + crypto.randomBytes(32).toString('hex');
   sessions[token] = username;
   res.json({ success: true, token });
+});
+
+// 🔑 เปลี่ยนรหัสผ่าน: ต้องใส่รหัสเดิมให้ถูก แล้วออกจากระบบอุปกรณ์อื่นทั้งหมด (เครื่องนี้ยังใช้งานต่อได้)
+app.post('/api/change-password', checkAuth, (req, res) => {
+  const u = usersDB[req.userId];
+  if (!u) return res.json({ success: false, error: 'ไม่พบบัญชีผู้ใช้' });
+  const oldPw = String((req.body && req.body.oldPassword) || '');
+  const newPw = String((req.body && req.body.newPassword) || '');
+  if (!checkPassword(u, oldPw)) return res.json({ success: false, error: 'รหัสผ่านเดิมไม่ถูกต้อง' });
+  if (newPw.length < 6) return res.json({ success: false, error: 'รหัสผ่านใหม่ต้องยาวอย่างน้อย 6 ตัวอักษร' });
+  if (newPw.length > 200) return res.json({ success: false, error: 'รหัสผ่านใหม่ยาวเกินไป' });
+  if (newPw === oldPw) return res.json({ success: false, error: 'รหัสผ่านใหม่ต้องไม่ซ้ำกับรหัสเดิม' });
+  u.password = hashPassword(newPw);
+  const cur = req.headers['authorization'] || req.query.token;
+  let loggedOut = 0;
+  for (const t of Object.keys(sessions)) if (sessions[t] === req.userId && t !== cur) { delete sessions[t]; loggedOut++; }
+  saveDb(true).catch(() => {});
+  res.json({ success: true, loggedOut });
 });
 
 app.get('/api/verify-session', (req, res) => {
