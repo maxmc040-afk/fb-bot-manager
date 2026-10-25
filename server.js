@@ -4535,6 +4535,22 @@ app.get('/', (req, res) => {
             if(chatBoxPoll) clearInterval(chatBoxPoll);
             chatBoxPoll = null; chatBoxUid = '';
         }
+        // 🧾 ตรวจสลิปจากรูปในหน้าต่างแชท (ใช้กับสลิปที่ระบบไม่ได้ตรวจอัตโนมัติ เช่น สลิปที่แนบในคำขอโอนเงินของ Messenger)
+        async function verifySlipFromChat(btn) {
+            if(!chatBoxUid) return;
+            const old = btn.innerText; btn.disabled = true; btn.innerText = '⏳ กำลังตรวจ...';
+            try {
+                const r = await (await fetch('/api/chat/verify-slip' + chatQuery(), {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: btn.getAttribute('data-url') })
+                })).json();
+                if(!r.success) { btn.innerText = '❌ ' + (r.error || 'ตรวจไม่สำเร็จ'); return; }
+                const RES = { valid: '✅ สลิปถูกต้อง', invalid: '❌ บัญชีไม่ตรง', duplicate: '🔄 สลิปซ้ำ (ใช้ไปแล้ว)', retry: '⏳ ธนาคารยังยืนยันไม่ได้ จะลองใหม่', unreadable: '⚠️ อ่านสลิปไม่ได้', system: '🛠️ ระบบตรวจสลิปมีปัญหา' };
+                btn.innerText = (RES[r.result] || r.result || 'ตรวจแล้ว') + (r.amount ? ' ' + fmtMoney(r.amount) + ' ฿' : '');
+                btn.className = 'mt-1 px-2 py-0.5 text-[11px] font-semibold rounded-md ' + (r.result === 'valid' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800');
+                if(r.result === 'valid' && currentLiveId) loadLiveDetail(false);
+            } catch(e) { btn.innerText = '❌ ' + e.message; }
+            finally { btn.disabled = false; if(btn.innerText === '⏳ กำลังตรวจ...') btn.innerText = old; }
+        }
         function chatQuery() {
             return '?token=' + encodeURIComponent(authToken) + '&pageId=' + encodeURIComponent(currentActivePageId) + '&sid=' + encodeURIComponent(currentLiveId || '')
                 + '&uid=' + encodeURIComponent(chatBoxUid) + '&psid=' + encodeURIComponent(chatBoxPsid);
@@ -4563,7 +4579,11 @@ app.get('/', (req, res) => {
                 (r.messages || []).forEach(function(m) {
                     const mine = m.fromPage;
                     let body = m.text ? escapeHtml(m.text).split(NL).join('<br>') : '';
-                    (m.images || []).forEach(function(u) { body += '<a href="' + escapeHtml(u) + '" target="_blank" rel="noopener"><img src="' + escapeHtml(u) + '" class="mt-1 max-w-[220px] max-h-[260px] rounded-lg border border-slate-200"></a>'; });
+                    (m.images || []).forEach(function(u) {
+                        body += '<a href="' + escapeHtml(u) + '" target="_blank" rel="noopener"><img src="' + escapeHtml(u) + '" class="mt-1 max-w-[220px] max-h-[260px] rounded-lg border border-slate-200"></a>';
+                        // สลิปในคำขอโอนเงินของ Messenger จะแสดงเป็นการ์ดฝั่งเพจ จึงให้ปุ่มตรวจกับรูปทุกฝั่ง
+                        body += '<div><button type="button" data-url="' + escapeHtml(u) + '" onclick="verifySlipFromChat(this)" class="mt-1 px-2 py-0.5 text-[11px] font-semibold rounded-md bg-emerald-600 text-white hover:bg-emerald-700">🧾 ตรวจสลิปนี้</button></div>';
+                    });
                     (m.files || []).forEach(function(f) { body += '<div class="mt-1"><a href="' + escapeHtml(f.url) + '" target="_blank" rel="noopener" class="underline">📎 ' + escapeHtml(f.name || 'ไฟล์แนบ') + '</a></div>'; });
                     if(!body) body = '<span class="italic opacity-60">(สติกเกอร์ / ไฟล์แนบ)</span>';
                     html += '<div class="flex ' + (mine ? 'justify-end' : 'justify-start') + '"><div class="max-w-[80%]">'
@@ -6730,7 +6750,7 @@ app.get('/api/chat/messages', checkAuth, async (req, res) => {
     let messages = [];
     if (convId) {
       const r = await axios.get('https://graph.facebook.com/v19.0/' + encodeURIComponent(convId) + '/messages', {
-        params: { fields: 'id,message,from,created_time,attachments{mime_type,name,file_url,image_data{url,preview_url}},sticker', limit: 50, access_token: t.pageData.config.pageAccessToken }, timeout: 15000
+        params: { fields: 'id,message,from,created_time,attachments{mime_type,name,file_url,image_data{url,preview_url},generic_template},shares{link,name,template},sticker', limit: 50, access_token: t.pageData.config.pageAccessToken }, timeout: 15000
       });
       messages = ((r.data && r.data.data) || []).map(m => {
         const images = [], files = [];
@@ -6738,6 +6758,8 @@ app.get('/api/chat/messages', checkAuth, async (req, res) => {
           if (a.image_data && (a.image_data.url || a.image_data.preview_url)) images.push(a.image_data.url || a.image_data.preview_url);
           else if (a.file_url) files.push({ url: a.file_url, name: a.name || '' });
         }
+        // รูปที่ซ่อนอยู่ในการ์ด / คำขอโอนเงิน / การแชร์ (เช่น สลิปที่ลูกค้าแนบในคำขอโอนของ Messenger)
+        for (const u of collectImageUrls({ a: (m.attachments && m.attachments.data || []).map(a => ({ g: a.generic_template })), s: m.shares })) if (!images.includes(u)) images.push(u);
         if (m.sticker) images.push(m.sticker);
         return { id: m.id, text: m.message || '', time: Date.parse(m.created_time) || 0, fromPage: String(m.from?.id || '') === String(t.pid), images, files };
       }).reverse();
@@ -6749,6 +6771,23 @@ app.get('/api/chat/messages', checkAuth, async (req, res) => {
   } catch (e) {
     res.json({ success: false, error: graphErrorMessage(e) });
   }
+});
+
+// 🧾 ตรวจสลิปจากรูปในหน้าต่างแชท (สลิปที่ Webhook ไม่ส่งมา เช่น แนบในคำขอโอนเงินของ Messenger)
+app.post('/api/chat/verify-slip', checkAuth, async (req, res) => {
+  const t = chatTarget(req);
+  if (!t) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
+  const url = String((req.body || {}).url || '');
+  if (!/^https:\/\//i.test(url)) return res.json({ success: false, error: 'ลิงก์รูปไม่ถูกต้อง' });
+  if (!t.psid) return res.json({ success: false, error: 'ลูกค้ายังไม่มีแชทกับเพจ' });
+  if (!t.pageData.config.enableSlipVerify) return res.json({ success: false, error: 'ยังไม่ได้เปิดระบบตรวจสลิป (หน้าตั้งค่าตรวจสลิป)' });
+  const before = Date.now();
+  try {
+    await processSlipImage({ pageData: t.pageData }, t.pid, t.psid, url, 0);
+  } catch (e) { return res.json({ success: false, error: e.message }); }
+  const at = (t.pageData.slipAttempts || []).find(a => a.senderId === t.psid && a.time >= before);
+  if (!at) return res.json({ success: true, result: 'duplicate', note: 'สลิปใบนี้ตรวจไปแล้ว' });
+  res.json({ success: true, result: at.result, amount: at.amount || 0, note: at.note || '' });
 });
 
 app.post('/api/chat/send', checkAuth, async (req, res) => {
