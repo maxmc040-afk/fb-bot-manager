@@ -2778,6 +2778,7 @@ app.get('/', (req, res) => {
                                         <option value="unpaid">ตรงคำดัก · ยังไม่โอน</option>
                                         <option value="paid">ตรงคำดัก · โอนแล้ว</option>
                                         <option value="paidNotBuyer">โอนแล้ว · ยังไม่อยู่ในรายชื่อลูกค้า</option>
+                                        <option value="paidAny">💰 โอนแล้ว</option>
                                         <option value="short">💰 ยอดยังไม่ครบ (โอนขาด)</option>
                                         <option value="over">💰 โอนเกิน</option>
                                         <option value="full">💰 โอนครบแล้ว</option>
@@ -4185,6 +4186,7 @@ app.get('/', (req, res) => {
                 if(f === 'all') return true;
                 // 💰 ตัวกรองยอดเงิน: ดูจาก "ยอดที่ต้องจ่าย" ที่ใส่ไว้ ไม่ต้องตรงคำดัก (เช่น ชนะประมูล / แอดมินใส่ยอดเอง)
                 const due = Number(c.dueAmount) || 0, got = Math.round((Number(c.paidTotal) || 0) * 100) / 100;
+                if(f === 'paidAny') return !!c.paid; // โอนแล้วทุกคน (ไม่ต้องตรงคำดัก)
                 if(f === 'short') return due > 0 && got < due;
                 if(f === 'over') return due > 0 && got > due;
                 if(f === 'full') return due > 0 && got === due;
