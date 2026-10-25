@@ -4340,6 +4340,7 @@ app.get('/', (req, res) => {
                 ch += '<tr data-cid="' + escapeHtml(c.userId) + '" class="border-b border-slate-100">'
                     + '<td class="py-1.5 pr-2"><input type="checkbox" class="cm-sel w-4 h-4 rounded"' + (commenterSel.has(c.userId) ? ' checked' : '') + '></td>'
                     + '<td class="py-1.5 pr-2 font-medium text-slate-700">' + escapeHtml(c.name || c.userId) + (c.inBuyers ? '<div class="text-[10px] text-indigo-500 font-normal">อยู่ในรายชื่อลูกค้าแล้ว</div>' : '')
+                        + (c.inboxErr && c.inboxErr.msg ? '<div class="text-[10px] font-semibold text-rose-600" title="' + escapeHtml(c.inboxErr.msg) + '">❌ ส่งเข้าแชทไม่สำเร็จ ' + fmtTime(c.inboxErr.at) + ': ' + escapeHtml(c.inboxErr.msg.slice(0, 60)) + '</div>' : '')
                         + (c.kwLabelStatus ? '<div class="text-[10px] font-normal ' + (c.kwLabelStatus.charAt(0) === '❌' ? 'text-rose-600' : (c.kwLabelStatus.charAt(0) === '⏳' ? 'text-amber-600' : 'text-pink-600')) + '">🏷️ ' + escapeHtml(c.kwLabelStatus) + '</div>' : '') + '</td>'
                     + '<td class="py-1.5 pr-2">' + c.count + '</td>'
                     + '<td class="py-1.5 pr-2">' + (c.matchedCount > 0 ? '<span class="text-blue-600 font-semibold">' + c.matchedCount + ' (' + escapeHtml(c.lastKeyword) + ')</span>' : '-') + '</td>'
@@ -8518,7 +8519,9 @@ app.post('/webhook', async (req, res) => {
             const cooldownMs = Math.max(0, Number(cfg.replyCooldownMin) || 0) * 60000;
             const cRec = !senderId ? null : (liveSession ? liveSession.commenters.get(senderId) : (isMatched ? pageCommenterRec(targetRecord.pageData, senderId) : null));
             // โหมดประมูล: บิดราคาใหม่แล้วกด 1 = ชนะองค์ใหม่ ไม่ติดคูลดาวน์
-            const hasNewBid = !!(auctionOn && cRec && Array.isArray(cRec.bids) && cRec.bids.some(b => b.time > (cRec.lastWinAt || 0)));
+            // 🔨 โหมดประมูล: ไม่ใช้คูลดาวน์เลย (กันกดซ้ำด้วยกติกา "กด 1 ซ้ำใน 1 นาที ในรอบเดิม" แทน)
+            // เดิมถ้า Webhook คอมเมนต์ราคาตกหล่น ผู้ชนะองค์ใหม่จะติดคูลดาวน์และไม่ได้ข้อความเข้าแชท
+            const hasNewBid = auctionOn;
             const inCooldown = !!(isMatched && !hasNewBid && cooldownMs && cRec && cRec.lastRepliedAt && Date.now() - cRec.lastRepliedAt < cooldownMs);
             if (inCooldown) console.log('⏱️ [Comment] ข้าม ' + (comment.from?.name || senderId) + ' (เพิ่งตอบไปไม่ถึง ' + cfg.replyCooldownMin + ' นาที)');
             if (isMatched && cRec && !inCooldown) cRec.lastRepliedAt = Date.now();
@@ -8536,6 +8539,7 @@ app.post('/webhook', async (req, res) => {
               // ⚡ ส่งเข้าแชท + ตอบคอมเมนต์ ใช้คิวหลัก (สำคัญ) · กดไลก์แยกคิวรอง ไม่แย่งช่องของงานสำคัญ
               runTask(async () => {
                 if (auctionOn && senderId) {
+                 try {
                   // 🔨 รอ 3 วิ เผื่อคอมเมนต์ราคาที่พิมพ์ก่อนกด 1 ยังมาไม่ถึง แล้วหายอดจบประมูล
                   await sleep(3000);
                   // ดึงคอมเมนต์ล่าสุดจาก Facebook มาเติม ถ้า Webhook ตกหล่น (ไม่เกิน 8 วิ ถ้าดึงไม่ได้ใช้ข้อมูลเดิม)
@@ -8544,7 +8548,9 @@ app.post('/webhook', async (req, res) => {
                   const c = liveSession.commenters.get(senderId);
                   let win = auctionAmountFor(liveSession, senderId, commentAt);
                   // ลูกค้ากด 1 ซ้ำภายใน 1 นาที หลังกด 1 ครั้งแรก -> ถือเป็นคอมเมนต์ซ้ำ ไม่ส่งข้อความ/ไม่บวกยอด
-                  if (c && c.lastWinAt && commentAt >= c.lastWinAt && commentAt - c.lastWinAt <= 60000) {
+                  // (มีสัญญาณปิดรอบใหม่คั่นระหว่าง 2 ครั้ง = ชนะคนละองค์ ไม่ถือว่าซ้ำ)
+                  const newLotBetween = c && c.lastWinAt && (liveSession.auctionCloses || []).some(t => t > c.lastWinAt && t <= commentAt);
+                  if (c && c.lastWinAt && commentAt >= c.lastWinAt && commentAt - c.lastWinAt <= 60000 && !newLotBetween) {
                     c.dupPresses = (c.dupPresses || 0) + 1;
                     console.log('🔁 [Auction] ' + customerName + ' กด 1 ซ้ำ (ข้าม)');
                     return;
@@ -8579,6 +8585,13 @@ app.post('/webhook', async (req, res) => {
                   // กด 1 ซ้ำในรอบเดิม: ไม่ส่งข้อความซ้ำ
                   if (win && win.dupLot) { inboxMsg = ''; replyMsg = ''; }
                   console.log('🔨 [Auction] ' + customerName + ' กด 1 → ยอด ' + (win ? win.amount : '-') + (win && win.warning ? ' ⚠️ ' + win.warning : ''));
+                 } catch (aucErr) {
+                  // คำนวณยอดพลาด -> ยังส่งข้อความเข้าแชทตามปกติ (ให้แอดมินแจ้งยอดเอง) ไม่ปล่อยให้ลูกค้าเงียบ
+                  console.error('❌ [Auction] คำนวณยอดไม่สำเร็จ ' + customerName, aucErr.message);
+                  const noBid = (liveSession.config && liveSession.config.auctionNoBidText) || 'รอแอดมินแจ้งยอด';
+                  inboxMsg = inboxMsg.replace(/\{amount\}\s*(?:บาท|฿)?/gi, noBid);
+                  replyMsg = replyMsg.replace(/\{amount\}\s*(?:บาท|฿)?/gi, noBid);
+                 }
                 } else {
                   inboxMsg = inboxMsg.replace(/\{amount\}/gi, '');
                   replyMsg = replyMsg.replace(/\{amount\}/gi, '');
@@ -8601,10 +8614,28 @@ app.post('/webhook', async (req, res) => {
                       else if (!liveSession) labelKeywordCommenter(pageDataRef, pageCommenterRec(pageDataRef, senderId), String(psid), cfg);
                     }
                     console.log('⚡ [Inbox] ' + commentId + ' ส่งเข้าแชทใน ' + (Date.now() - t0) + ' ms');
-                  }).catch(inbErr => {
+                    const c0 = senderId ? liveSession?.commenters.get(senderId) : null;
+                    if (c0) delete c0.inboxErr;
+                  }).catch(async inbErr => {
                     if (isFbSpamBlock(inbErr)) setFbPause(pageDataRef, 'inbox', inbErr);
                     console.error('❌ [Inbox Error]', inbErr.response?.data?.error?.message || inbErr.message);
+                    const c = senderId ? liveSession?.commenters.get(senderId) : null;
+                    // สำรอง: ส่งทางคอมเมนต์ไม่ได้ แต่ลูกค้าเคยทักแชท (มี ID แชท) -> ส่งเข้าแชทตรง ๆ (ภายใน 24 ชม. ตามกฎ Facebook)
+                    const psid = senderId && ((c && c.psid) || getPsidMap(pageDataRef).get(senderId));
+                    if (psid && !isFbSpamBlock(inbErr)) {
+                      try {
+                        await sendMessengerText(pageDataRef, String(psid), inboxMsg);
+                        console.log('⚡ [Inbox] ส่งสำรองเข้าแชทตรงสำเร็จ ' + customerName);
+                        if (c) delete c.inboxErr;
+                        return;
+                      } catch (e2) { console.error('❌ [Inbox Fallback]', e2.message === 'OUTSIDE_24H' ? 'เกิน 24 ชม.' : graphErrorMessage(e2)); }
+                    }
+                    if (c) c.inboxErr = { at: Date.now(), msg: graphErrorMessage(inbErr).slice(0, 160) };
                   }));
+                } else if (cfg.enableInbox && inboxMsg && senderId) {
+                  // Facebook บล็อกการส่งชั่วคราว -> บันทึกไว้ให้แอดมินเห็นในตาราง
+                  const c = liveSession?.commenters.get(senderId);
+                  if (c) c.inboxErr = { at: Date.now(), msg: 'Facebook บล็อกการส่งข้อความชั่วคราว (ระบบหยุดส่ง 15 นาที)' };
                 }
                 if (cfg.enableCommentReply && replyMsg && !fbPaused(pageDataRef, 'reply')) {
                   jobs.push(fbPost('https://graph.facebook.com/v19.0/' + commentId + '/comments', {
