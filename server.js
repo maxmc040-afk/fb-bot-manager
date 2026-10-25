@@ -4183,13 +4183,14 @@ app.get('/', (req, res) => {
             if(q) return commenterList.filter(function(c) { return String(c.name || '').toLowerCase().indexOf(q) >= 0; }); // ค้นหาชื่อ: แสดงทุกคนที่ชื่อตรง
             return commenterList.filter(function(c) {
                 if(f === 'all') return true;
-                if(!(c.matchedCount > 0)) return false;
-                if(f === 'paid') return c.paid;
-                if(f === 'paidNotBuyer') return c.paid && !c.inBuyers;
+                // 💰 ตัวกรองยอดเงิน: ดูจาก "ยอดที่ต้องจ่าย" ที่ใส่ไว้ ไม่ต้องตรงคำดัก (เช่น ชนะประมูล / แอดมินใส่ยอดเอง)
                 const due = Number(c.dueAmount) || 0, got = Math.round((Number(c.paidTotal) || 0) * 100) / 100;
                 if(f === 'short') return due > 0 && got < due;
                 if(f === 'over') return due > 0 && got > due;
                 if(f === 'full') return due > 0 && got === due;
+                if(!(c.matchedCount > 0)) return false;
+                if(f === 'paid') return c.paid;
+                if(f === 'paidNotBuyer') return c.paid && !c.inBuyers;
                 if(f === 'noDue') return !(due > 0);
                 if(f === 'unpaid') return !c.paid;
                 return true;
