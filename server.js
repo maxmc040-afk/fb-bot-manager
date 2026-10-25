@@ -4205,6 +4205,7 @@ app.get('/', (req, res) => {
         let commenterSel = new Set();
 
         // ===== 📣 ตามยอด =====
+        let remindRecent = 0;
         let remindTimer = null, remindPreviewTimer = null, remindTplLoaded = false, remindPoll = null;
         function remindScope() { const r = document.querySelector('input[name="remind-scope"]:checked'); return r ? r.value : 'all'; }
         async function openRemind() {
@@ -4241,6 +4242,7 @@ app.get('/', (req, res) => {
                 if(!d.success) { document.getElementById('remind-summary').innerText = '❌ ' + d.error; return; }
                 const chName = { chat: '💬 แชท', comment: '🗨️ คอมเมนต์', none: '⛔ ส่งไม่ได้' };
                 let h = '', sum = 0, noCh = 0;
+                remindRecent = d.list.filter(function(x) { return x.remindedAt && Date.now() - x.remindedAt < 6 * 3600000; }).length;
                 d.list.forEach(function(x) {
                     sum += x.short; if(x.channel === 'none') noCh++;
                     h += '<tr class="border-t border-slate-100"><td class="p-1.5">' + escapeHtml(x.name) + '</td>'
@@ -4258,7 +4260,9 @@ app.get('/', (req, res) => {
         }
         async function sendRemind() {
             if(remindScope() === 'sel' && !commenterSel.size) return alert('ยังไม่ได้ติ๊กเลือกลูกค้า');
-            if(!confirm('ส่งข้อความแจ้งยอดให้ลูกค้าตามรายการนี้?')) return;
+            let cmsg = 'ส่งข้อความแจ้งยอดให้ลูกค้าตามรายการนี้?' + NL + '(ระบบเว้นระยะ 4-8 วินาทีต่อคน)';
+            if(remindRecent) cmsg += NL + NL + '⚠️ มี ' + remindRecent + ' คนที่เพิ่งแจ้งยอดไปภายใน 6 ชม. การทวงถี่ ลูกค้าอาจกดรายงานสแปม แนะนำติ๊กเลือกเฉพาะคนที่ยังไม่ได้แจ้ง';
+            if(!confirm(cmsg)) return;
             const btn = document.getElementById('remind-btn');
             btn.disabled = true;
             try {
@@ -4281,7 +4285,7 @@ app.get('/', (req, res) => {
                     if(!j) return;
                     box.className = 'text-xs ' + (j.running ? 'text-amber-700' : (j.failed || j.noChannel ? 'text-rose-600' : 'text-emerald-700'));
                     box.innerText = (j.running ? '⏳ กำลังส่ง ' : '✅ ส่งเสร็จ ') + j.done + '/' + j.total + ' · สำเร็จ ' + j.sent + ' · ไม่สำเร็จ ' + j.failed
-                        + (j.noChannel ? ' · ส่งไม่ได้ ' + j.noChannel : '') + (j.errors && j.errors.length ? NL + j.errors.join(NL) : '');
+                        + (j.noChannel ? ' · ส่งไม่ได้ ' + j.noChannel : '') + (j.stopped ? NL + '🛑 ' + j.stopped : '') + (j.errors && j.errors.length ? NL + j.errors.join(NL) : '');
                     if(!j.running) { clearInterval(remindPoll); btn.disabled = false; loadRemindPreview(); loadLiveDetail(false); }
                 } catch(e) {}
             }, 1500);
@@ -8036,6 +8040,8 @@ app.post('/api/live/payment-reminder', checkAuth, (req, res) => {
     noChannel: due.length - targets.length, errors: due.filter(x => x.channel === 'none').map(x => x.name + ': ยังไม่มีแชท และไม่มีคอมเมนต์ที่ส่งได้ (ภายใน 7 วัน)').slice(0, 30) };
   (async () => {
     for (const t of targets) {
+      // 🛡️ Facebook บล็อกชั่วคราว (ส่งถี่/สแปม) -> หยุดส่งทันที กันโดนแบนหนักขึ้น
+      if (fbPaused(ctx.pageData, 'inbox')) { job.stopped = 'Facebook บล็อกการส่งข้อความชั่วคราว หยุดส่งแล้ว รอ 15 นาทีแล้วค่อยส่งคนที่เหลือ'; break; }
       const c = s.commenters.get(t.uid);
       const text = renderRemindText(tpl, t);
       try {
@@ -8054,9 +8060,11 @@ app.post('/api/live/payment-reminder', checkAuth, (req, res) => {
         job.failed++;
         if (c && t.channel === 'comment' && c.pendingComments) c.pendingComments = c.pendingComments.filter(x => x.id !== t.commentId);
         if (job.errors.length < 30) job.errors.push(t.name + ': ' + (e.message === 'OUTSIDE_24H' ? 'เกิน 24 ชม.' : graphErrorMessage(e)));
+        if (isFbSpamBlock(e)) setFbPause(ctx.pageData, 'inbox', e);
       }
       job.done++;
-      if (job.done < targets.length) await sleep(1500);
+      // เว้นระยะแบบสุ่ม 4-8 วินาที (ไม่ส่งรัวเป็นจังหวะเดียวกัน ลดโอกาสโดนมองเป็นสแปม)
+      if (job.done < targets.length) await sleep(4000 + Math.floor(Math.random() * 4000));
     }
     job.running = false; job.finishedAt = Date.now();
   })().catch(e => { job.running = false; job.errors.push(String(e.message || e)); });
