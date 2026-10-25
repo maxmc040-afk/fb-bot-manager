@@ -4589,6 +4589,7 @@ app.get('/', (req, res) => {
                     });
                     (m.files || []).forEach(function(f) { body += '<div class="mt-1"><a href="' + escapeHtml(f.url) + '" target="_blank" rel="noopener" class="underline">📎 ' + escapeHtml(f.name || 'ไฟล์แนบ') + '</a></div>'; });
                     if(!body) body = '<span class="italic opacity-60">(สติกเกอร์ / ไฟล์แนบ)</span>';
+                    if(m.raw) body += '<details class="mt-1 text-[10px]"><summary class="cursor-pointer opacity-80 underline">🔍 ดูข้อมูลการ์ด</summary><textarea readonly onclick="this.select()" class="mt-1 w-64 h-28 p-1 text-[10px] text-slate-700 bg-white rounded border border-slate-300 font-mono">' + escapeHtml(m.raw) + '</textarea><div class="opacity-80">คลิกในกล่อง กด Ctrl+C แล้วส่งให้ผู้พัฒนา</div></details>';
                     html += '<div class="flex ' + (mine ? 'justify-end' : 'justify-start') + '"><div class="max-w-[80%]">'
                         + '<div class="px-3 py-2 rounded-2xl text-sm whitespace-normal break-words ' + (mine ? 'bg-[#0866FF] text-white rounded-br-md' : 'bg-white border border-slate-200 text-slate-800 rounded-bl-md') + '">' + body + '</div>'
                         + '<div class="text-[10px] text-slate-400 mt-0.5 ' + (mine ? 'text-right' : '') + '">' + chatTime(m.time) + '</div></div></div>';
@@ -6753,7 +6754,7 @@ app.get('/api/chat/messages', checkAuth, async (req, res) => {
     let messages = [];
     if (convId) {
       const r = await axios.get('https://graph.facebook.com/v19.0/' + encodeURIComponent(convId) + '/messages', {
-        params: { fields: 'id,message,from,created_time,attachments{mime_type,name,file_url,image_data{url,preview_url},generic_template},shares{link,name,template},sticker', limit: 50, access_token: t.pageData.config.pageAccessToken }, timeout: 15000
+        params: { fields: 'id,message,from,created_time,attachments{id,mime_type,name,size,file_url,image_data,video_data,generic_template},shares{id,link,name,description,template},sticker', limit: 50, access_token: t.pageData.config.pageAccessToken }, timeout: 15000
       });
       messages = ((r.data && r.data.data) || []).map(m => {
         const images = [], files = [];
@@ -6764,7 +6765,10 @@ app.get('/api/chat/messages', checkAuth, async (req, res) => {
         // รูปที่ซ่อนอยู่ในการ์ด / คำขอโอนเงิน / การแชร์ (เช่น สลิปที่ลูกค้าแนบในคำขอโอนของ Messenger)
         for (const u of collectImageUrls({ a: (m.attachments && m.attachments.data || []).map(a => ({ g: a.generic_template })), s: m.shares })) if (!images.includes(u)) images.push(u);
         if (m.sticker) images.push(m.sticker);
-        return { id: m.id, text: m.message || '', time: Date.parse(m.created_time) || 0, fromPage: String(m.from?.id || '') === String(t.pid), images, files };
+        const out = { id: m.id, text: m.message || '', time: Date.parse(m.created_time) || 0, fromPage: String(m.from?.id || '') === String(t.pid), images, files };
+        // ไฟล์แนบ/การ์ดที่ระบบยังอ่านไม่ออก (เช่น การ์ดคำขอโอนเงินของ Messenger) -> ส่งข้อมูลดิบไปให้ดูได้
+        if (!out.text && !images.length && !files.length) out.raw = JSON.stringify({ id: m.id, attachments: m.attachments, shares: m.shares }).slice(0, 4000);
+        return out;
       }).reverse();
     }
     const li = t.pageData.lastInbound && t.pageData.lastInbound.get(t.psid);
