@@ -2434,7 +2434,6 @@ app.get('/', (req, res) => {
                                 <span class="ml-3 text-sm font-semibold text-slate-700">เปิดใช้งานตรวจสอบ</span>
                             </label>
                         </div>
-                        <label class="flex items-start gap-2 text-xs text-slate-600 mb-3 cursor-pointer"><input type="checkbox" id="auto-card-slip" class="mt-0.5 w-4 h-4 rounded"> <span><b>🧾 ตรวจสลิปในการ์ด "คำขอโอนเงิน" ของ Messenger อัตโนมัติ</b> · ทุก 3 นาที ระบบไล่ดูแชทของลูกค้าที่ยังโอนไม่ครบ (ไลฟ์ภายใน 3 วัน) ถ้าเจอสลิปที่แนบในการ์ดโอนเงิน จะตรวจให้เอง (ตอบลูกค้าเฉพาะสลิปที่ผ่าน)</span></label>
 
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                             <div>
@@ -3437,7 +3436,6 @@ app.get('/', (req, res) => {
             document.getElementById('webhook-url-display').value = window.location.origin + '/webhook';
             
             document.getElementById('enable-slip-verify').checked = !!currentConfig.enableSlipVerify;
-            document.getElementById('auto-card-slip').checked = currentConfig.autoCardSlip !== false;
             document.getElementById('easyslip-api-key').value = currentConfig.easySlipApiKey || '';
             document.getElementById('zwiz-api-key').value = currentConfig.zwizApiKey || '';
             document.getElementById('slip-provider').value = currentConfig.slipProvider || 'zwiz';
@@ -3627,7 +3625,6 @@ app.get('/', (req, res) => {
             currentConfig.pageId = document.getElementById('conf-page-id').value.trim();
 
             currentConfig.enableSlipVerify = document.getElementById('enable-slip-verify').checked;
-            currentConfig.autoCardSlip = document.getElementById('auto-card-slip').checked;
             currentConfig.easySlipApiKey = document.getElementById('easyslip-api-key').value.trim();
             currentConfig.zwizApiKey = document.getElementById('zwiz-api-key').value.trim();
             currentConfig.slipProvider = document.getElementById('slip-provider').value;
@@ -8361,83 +8358,6 @@ async function processSlipImage(targetRecord, pageId, senderId, imageUrl, attemp
   await sendSlipReply(replyText);
 }
 
-// =====================================================================
-// 🧾 สแกนสลิปในการ์ด "คำขอโอนเงิน" ของ Messenger อัตโนมัติ
-// Messenger สร้างการ์ดโอนเงินจากข้อความที่มีเลขบัญชี แล้วลูกค้าแนบสลิปในการ์ดนั้น -> Facebook ไม่ส่งรูปมาทาง Webhook
-// ระบบจึงไล่เปิดแชทของลูกค้าที่ยังโอนไม่ครบ (ไลฟ์ภายใน 3 วัน) ทุก 3 นาที หารูปสลิปในการ์ด แล้วตรวจให้เอง
-// =====================================================================
-const CARD_SCAN_EVERY = 3 * 60000;   // รอบสแกน
-const CARD_SCAN_PERSON = 5 * 60000;  // คนเดิมสแกนซ้ำได้ทุก 5 นาที
-const CARD_SCAN_MAX = 25;            // ต่อเพจต่อรอบ
-const cardScanAt = new Map();        // pid:psid -> เวลาสแกนล่าสุด
-let cardScanBusy = false;
-function cardSlipImages(m) {
-  // เฉพาะรูปที่อยู่ในการ์ด/การแชร์ (รูปแนบปกติของลูกค้า มาทาง Webhook และตรวจไปแล้ว)
-  return collectImageUrls({ a: (m.attachments && m.attachments.data || []).map(a => ({ g: a.generic_template })), s: m.shares });
-}
-async function scanCardSlipsForPage(pageData) {
-  const cfg = pageData.config || {};
-  if (!cfg.enableSlipVerify || cfg.autoCardSlip === false || !cfg.pageAccessToken) return;
-  const pid = cfg.pageId;
-  if (!pid || fbPaused(pageData, 'inbox')) return;
-  const now = Date.now();
-  if (!Array.isArray(pageData.cardSlipSeen)) pageData.cardSlipSeen = [];
-  const seen = new Set(pageData.cardSlipSeen);
-  const people = new Map(); // psid -> 1
-  for (const s of Object.values(getLiveSessions(pageData))) {
-    const last = Math.max(s.endedAt || 0, s.startedAt || 0, s.lastCommentAt || 0);
-    if (s.status !== 'active' && now - last > 3 * 86400000) continue;
-    const slipIdx = buildSlipIndex(pageData, s);
-    const psidMap = getPsidMap(pageData);
-    for (const [uid, c] of s.commenters) {
-      const due = Number(c.dueAmount) || 0;
-      if (!(due > 0)) continue;
-      const psid = String(c.psid || psidMap.get(uid) || '');
-      if (!psid) continue;
-      const paid = paymentStatusFromIndex(slipIdx, uid, psid).paidTotal || 0;
-      if (paid >= due) continue;
-      if (now - (cardScanAt.get(pid + ':' + psid) || 0) < CARD_SCAN_PERSON) continue;
-      people.set(psid, 1);
-    }
-  }
-  let n = 0;
-  for (const psid of people.keys()) {
-    if (n++ >= CARD_SCAN_MAX || fbPaused(pageData, 'inbox')) break;
-    cardScanAt.set(pid + ':' + psid, Date.now());
-    try {
-      const convId = await findChatConversationId(pageData, pid, psid);
-      if (!convId) continue;
-      const r = await axios.get('https://graph.facebook.com/v19.0/' + encodeURIComponent(convId) + '/messages', {
-        params: { fields: 'id,created_time,attachments{generic_template},shares{link,name,template}', limit: 15, access_token: cfg.pageAccessToken }, timeout: 15000
-      });
-      for (const m of (r.data && r.data.data) || []) {
-        if (now - (Date.parse(m.created_time) || 0) > 3 * 86400000) continue;
-        cardSlipImages(m).forEach((url, k) => {
-          const key = m.id + '#' + k;
-          if (seen.has(key)) return;
-          seen.add(key); pageData.cardSlipSeen.push(key);
-          console.log('🧾 [Card Scan] พบสลิปในการ์ดโอนเงินของ ' + psid + ' -> ตรวจอัตโนมัติ');
-          runTask(() => processSlipImage({ pageData }, pid, psid, url, 0, { auto: true }), 'card-slip');
-        });
-      }
-    } catch (e) {
-      if (isFbSpamBlock(e)) setFbPause(pageData, 'inbox', e);
-      console.error('❌ [Card Scan]', psid, graphErrorMessage(e));
-    }
-    await sleep(800);
-  }
-  if (pageData.cardSlipSeen.length > 3000) pageData.cardSlipSeen.splice(0, pageData.cardSlipSeen.length - 3000);
-}
-async function scanCardSlipsAll() {
-  if (cardScanBusy) return;
-  cardScanBusy = true;
-  try {
-    for (const u of Object.values(usersDB)) for (const pd of Object.values(u.pages || {})) {
-      try { await scanCardSlipsForPage(pd); } catch (e) { console.error('❌ [Card Scan]', e.message); }
-    }
-  } finally { cardScanBusy = false; }
-}
-setInterval(() => { scanCardSlipsAll(); }, CARD_SCAN_EVERY);
 
 // ประวัติการตรวจสลิปล่าสุด (แสดงในหน้าตั้งค่าสลิป ช่วยดูสาเหตุที่ไม่ผ่าน)
 function logSlipAttempt(pageData, rec) {
