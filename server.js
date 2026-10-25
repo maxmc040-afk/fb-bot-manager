@@ -2434,6 +2434,7 @@ app.get('/', (req, res) => {
                                 <span class="ml-3 text-sm font-semibold text-slate-700">เปิดใช้งานตรวจสอบ</span>
                             </label>
                         </div>
+                        <label class="flex items-start gap-2 text-xs text-slate-600 mb-3 cursor-pointer"><input type="checkbox" id="auto-card-slip" class="mt-0.5 w-4 h-4 rounded"> <span><b>🧾 ตรวจสลิปในการ์ด "คำขอโอนเงิน" ของ Messenger อัตโนมัติ</b> · ทุก 3 นาที ระบบไล่ดูแชทของลูกค้าที่ยังโอนไม่ครบ (ไลฟ์ภายใน 3 วัน) ถ้าเจอสลิปที่แนบในการ์ดโอนเงิน จะตรวจให้เอง (ตอบลูกค้าเฉพาะสลิปที่ผ่าน)</span></label>
 
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                             <div>
@@ -3436,6 +3437,7 @@ app.get('/', (req, res) => {
             document.getElementById('webhook-url-display').value = window.location.origin + '/webhook';
             
             document.getElementById('enable-slip-verify').checked = !!currentConfig.enableSlipVerify;
+            document.getElementById('auto-card-slip').checked = currentConfig.autoCardSlip !== false;
             document.getElementById('easyslip-api-key').value = currentConfig.easySlipApiKey || '';
             document.getElementById('zwiz-api-key').value = currentConfig.zwizApiKey || '';
             document.getElementById('slip-provider').value = currentConfig.slipProvider || 'zwiz';
@@ -3625,6 +3627,7 @@ app.get('/', (req, res) => {
             currentConfig.pageId = document.getElementById('conf-page-id').value.trim();
 
             currentConfig.enableSlipVerify = document.getElementById('enable-slip-verify').checked;
+            currentConfig.autoCardSlip = document.getElementById('auto-card-slip').checked;
             currentConfig.easySlipApiKey = document.getElementById('easyslip-api-key').value.trim();
             currentConfig.zwizApiKey = document.getElementById('zwiz-api-key').value.trim();
             currentConfig.slipProvider = document.getElementById('slip-provider').value;
@@ -8222,7 +8225,10 @@ app.get('/webhook', (req, res) => {
 });
 
 // 🧾 ตรวจสลิป 1 รูป (เรียกซ้ำได้ เมื่อธนาคารยังยืนยันไม่ได้)
-async function processSlipImage(targetRecord, pageId, senderId, imageUrl, attempt = 0) {
+async function processSlipImage(targetRecord, pageId, senderId, imageUrl, attempt = 0, opts = {}) {
+  // opts.auto = สแกนการ์ดคำขอโอนเงินอัตโนมัติ -> ตอบลูกค้าเฉพาะสลิปที่ผ่าน (ไม่ผ่าน/ซ้ำ/อ่านไม่ได้ บันทึกในประวัติอย่างเดียว ไม่รบกวนลูกค้า)
+  const quiet = !!(opts && opts.auto);
+  const autoNote = quiet ? '🤖 สแกนการ์ดโอนเงินอัตโนมัติ · ' : '';
   const pageData = targetRecord.pageData;
   const configStore = pageData.config;
   const usedSlips = pageData.usedSlips || (pageData.usedSlips = new Set());
@@ -8264,11 +8270,12 @@ async function processSlipImage(targetRecord, pageId, senderId, imageUrl, attemp
       const delays = [3, 8]; // นาที
       if (attempt < delays.length) {
         logSlipAttempt(pageData, { senderId, provider, result: 'retry', code: errCode, note: 'ธนาคารยังยืนยันไม่ได้ จะลองใหม่ใน ' + delays[attempt] + ' นาที' + (slipResult.detail ? ' · ' + slipResult.detail : '') });
-        if (attempt === 0) await sendSlipReply('⏳ ได้รับสลิปแล้วค่ะ ระบบกำลังตรวจสอบกับธนาคาร (บางธนาคารใช้เวลาไม่กี่นาที) จะแจ้งผลให้อีกครั้งนะคะ 🙏');
-        setTimeout(() => runTask(() => processSlipImage(targetRecord, pageId, senderId, imageUrl, attempt + 1), 'slip-retry'), delays[attempt] * 60 * 1000);
+        if (attempt === 0 && !quiet) await sendSlipReply('⏳ ได้รับสลิปแล้วค่ะ ระบบกำลังตรวจสอบกับธนาคาร (บางธนาคารใช้เวลาไม่กี่นาที) จะแจ้งผลให้อีกครั้งนะคะ 🙏');
+        setTimeout(() => runTask(() => processSlipImage(targetRecord, pageId, senderId, imageUrl, attempt + 1, opts), 'slip-retry'), delays[attempt] * 60 * 1000);
         return;
       }
-      logSlipAttempt(pageData, { senderId, provider, result: 'unreadable', code: errCode, note: 'ลองใหม่ครบแล้ว ธนาคารยังยืนยันไม่ได้' + (slipResult.detail ? ' · ' + slipResult.detail : '') });
+      logSlipAttempt(pageData, { senderId, provider, result: 'unreadable', code: errCode, note: autoNote + 'ลองใหม่ครบแล้ว ธนาคารยังยืนยันไม่ได้' + (slipResult.detail ? ' · ' + slipResult.detail : '') });
+      if (quiet) return;
       labelSlipResult(pageData, senderId, 'unreadable');
       await sendSlipReply(configStore.msgSlipUnreadable);
       return;
@@ -8278,8 +8285,8 @@ async function processSlipImage(targetRecord, pageId, senderId, imageUrl, attemp
     if (systemErr) targetRecord.pageData.lastSlipError = { code: errCode, at: Date.now() };
     const mode = configStore.slipUnreadableMode || 'smart';
     const payCtx = isPaymentContext(targetRecord.pageData, senderId);
-    const notify = !systemErr && (mode === 'always' || (mode === 'smart' && payCtx));
-    logSlipAttempt(pageData, { senderId, provider, result: systemErr ? 'system' : 'unreadable', code: errCode || 'ไม่ทราบสาเหตุ', note: systemErr ? 'ปัญหาฝั่งระบบตรวจสลิป (ไม่แจ้งลูกค้า)' : (notify ? 'แจ้งลูกค้าให้ส่งใหม่' : 'ไม่ใช่สลิป/ไม่พบ QR · ไม่ตอบ') });
+    const notify = !quiet && !systemErr && (mode === 'always' || (mode === 'smart' && payCtx));
+    logSlipAttempt(pageData, { senderId, provider, result: systemErr ? 'system' : 'unreadable', code: errCode || 'ไม่ทราบสาเหตุ', note: autoNote + (systemErr ? 'ปัญหาฝั่งระบบตรวจสลิป (ไม่แจ้งลูกค้า)' : (notify ? 'แจ้งลูกค้าให้ส่งใหม่' : 'ไม่ใช่สลิป/ไม่พบ QR · ไม่ตอบ')) });
     if (notify) {
       labelSlipResult(targetRecord.pageData, senderId, 'unreadable');
       await sendSlipReply(configStore.msgSlipUnreadable);
@@ -8296,7 +8303,8 @@ async function processSlipImage(targetRecord, pageId, senderId, imageUrl, attemp
   }
   if (usedSlips.has(slip.transRef) || slip.isDuplicate) {
     console.log(`🔄 [Page: ${pageId}] สลิปซ้ำ ถูกใช้งานไปแล้ว`);
-    logSlipAttempt(pageData, { senderId, provider, result: 'duplicate', code: slip.transRef, amount: slip.amount });
+    logSlipAttempt(pageData, { senderId, provider, result: 'duplicate', code: slip.transRef, amount: slip.amount, note: quiet ? autoNote + 'สลิปนี้ตรวจไปแล้ว (ไม่ตอบลูกค้า)' : undefined });
+    if (quiet) return;
     labelSlipResult(targetRecord.pageData, senderId, 'duplicate');
     await sendSlipReply(configStore.msgSlipDuplicate);
     return;
@@ -8312,15 +8320,16 @@ async function processSlipImage(targetRecord, pageId, senderId, imageUrl, attemp
   if (!receiverOk) {
     console.log(`❌ [Page: ${pageId}] เลขบัญชีผู้รับไม่ตรงกับร้านค้า`, slip.receiverAccounts, slip.receiverNameTh);
     logSlipAttempt(pageData, { senderId, provider, result: 'invalid', code: slip.matchResult || 'account', amount: slip.amount,
-      note: 'ปลายทางในสลิป: ' + (slip.receiverBank ? 'ธนาคาร ' + bankNameFromCode(slip.receiverBank) + ' ' : '') + (slip.receiverAccounts.join(', ') || '-') + (slip.receiverNameTh ? ' (' + slip.receiverNameTh + ')' : '')
+      note: autoNote + 'ปลายทางในสลิป: ' + (slip.receiverBank ? 'ธนาคาร ' + bankNameFromCode(slip.receiverBank) + ' ' : '') + (slip.receiverAccounts.join(', ') || '-') + (slip.receiverNameTh ? ' (' + slip.receiverNameTh + ')' : '')
         + ' · ที่ตั้งไว้: ' + (configStore.merchantBank || '-') + ' ' + (configStore.merchantAccount || '-') });
+    if (quiet) return;
     labelSlipResult(targetRecord.pageData, senderId, 'invalid');
     await sendSlipReply(configStore.msgSlipInvalid);
     return;
   }
 
   usedSlips.add(slip.transRef);
-  logSlipAttempt(pageData, { senderId, provider, result: 'valid', code: slip.transRef, amount: slip.amount, note: attempt ? 'ผ่านหลังลองใหม่ ' + attempt + ' ครั้ง' : '' });
+  logSlipAttempt(pageData, { senderId, provider, result: 'valid', code: slip.transRef, amount: slip.amount, note: autoNote + (attempt ? 'ผ่านหลังลองใหม่ ' + attempt + ' ครั้ง' : '') });
   labelSlipResult(targetRecord.pageData, senderId, 'valid');
   if (usedSlips.size > 50000) { let i = 0; for (const k of usedSlips) { usedSlips.delete(k); if (++i >= 5000) break; } }
 
@@ -8347,6 +8356,84 @@ async function processSlipImage(targetRecord, pageId, senderId, imageUrl, attemp
   console.log(`✅ [Page: ${pageId}] สลิปถูกต้อง ส่งข้อความตอบกลับ`);
   await sendSlipReply(replyText);
 }
+
+// =====================================================================
+// 🧾 สแกนสลิปในการ์ด "คำขอโอนเงิน" ของ Messenger อัตโนมัติ
+// Messenger สร้างการ์ดโอนเงินจากข้อความที่มีเลขบัญชี แล้วลูกค้าแนบสลิปในการ์ดนั้น -> Facebook ไม่ส่งรูปมาทาง Webhook
+// ระบบจึงไล่เปิดแชทของลูกค้าที่ยังโอนไม่ครบ (ไลฟ์ภายใน 3 วัน) ทุก 3 นาที หารูปสลิปในการ์ด แล้วตรวจให้เอง
+// =====================================================================
+const CARD_SCAN_EVERY = 3 * 60000;   // รอบสแกน
+const CARD_SCAN_PERSON = 5 * 60000;  // คนเดิมสแกนซ้ำได้ทุก 5 นาที
+const CARD_SCAN_MAX = 25;            // ต่อเพจต่อรอบ
+const cardScanAt = new Map();        // pid:psid -> เวลาสแกนล่าสุด
+let cardScanBusy = false;
+function cardSlipImages(m) {
+  // เฉพาะรูปที่อยู่ในการ์ด/การแชร์ (รูปแนบปกติของลูกค้า มาทาง Webhook และตรวจไปแล้ว)
+  return collectImageUrls({ a: (m.attachments && m.attachments.data || []).map(a => ({ g: a.generic_template })), s: m.shares });
+}
+async function scanCardSlipsForPage(pageData) {
+  const cfg = pageData.config || {};
+  if (!cfg.enableSlipVerify || cfg.autoCardSlip === false || !cfg.pageAccessToken) return;
+  const pid = cfg.pageId;
+  if (!pid || fbPaused(pageData, 'inbox')) return;
+  const now = Date.now();
+  if (!Array.isArray(pageData.cardSlipSeen)) pageData.cardSlipSeen = [];
+  const seen = new Set(pageData.cardSlipSeen);
+  const people = new Map(); // psid -> 1
+  for (const s of Object.values(getLiveSessions(pageData))) {
+    const last = Math.max(s.endedAt || 0, s.startedAt || 0, s.lastCommentAt || 0);
+    if (s.status !== 'active' && now - last > 3 * 86400000) continue;
+    const slipIdx = buildSlipIndex(pageData, s);
+    const psidMap = getPsidMap(pageData);
+    for (const [uid, c] of s.commenters) {
+      const due = Number(c.dueAmount) || 0;
+      if (!(due > 0)) continue;
+      const psid = String(c.psid || psidMap.get(uid) || '');
+      if (!psid) continue;
+      const paid = paymentStatusFromIndex(slipIdx, uid, psid).paidTotal || 0;
+      if (paid >= due) continue;
+      if (now - (cardScanAt.get(pid + ':' + psid) || 0) < CARD_SCAN_PERSON) continue;
+      people.set(psid, 1);
+    }
+  }
+  let n = 0;
+  for (const psid of people.keys()) {
+    if (n++ >= CARD_SCAN_MAX || fbPaused(pageData, 'inbox')) break;
+    cardScanAt.set(pid + ':' + psid, Date.now());
+    try {
+      const convId = await findChatConversationId(pageData, pid, psid);
+      if (!convId) continue;
+      const r = await axios.get('https://graph.facebook.com/v19.0/' + encodeURIComponent(convId) + '/messages', {
+        params: { fields: 'id,created_time,attachments{generic_template},shares{link,name,template}', limit: 15, access_token: cfg.pageAccessToken }, timeout: 15000
+      });
+      for (const m of (r.data && r.data.data) || []) {
+        if (now - (Date.parse(m.created_time) || 0) > 3 * 86400000) continue;
+        cardSlipImages(m).forEach((url, k) => {
+          const key = m.id + '#' + k;
+          if (seen.has(key)) return;
+          seen.add(key); pageData.cardSlipSeen.push(key);
+          console.log('🧾 [Card Scan] พบสลิปในการ์ดโอนเงินของ ' + psid + ' -> ตรวจอัตโนมัติ');
+          runTask(() => processSlipImage({ pageData }, pid, psid, url, 0, { auto: true }), 'card-slip');
+        });
+      }
+    } catch (e) {
+      if (isFbSpamBlock(e)) setFbPause(pageData, 'inbox', e);
+      console.error('❌ [Card Scan]', psid, graphErrorMessage(e));
+    }
+    await sleep(800);
+  }
+  if (pageData.cardSlipSeen.length > 3000) pageData.cardSlipSeen.splice(0, pageData.cardSlipSeen.length - 3000);
+}
+async function scanCardSlipsAll() {
+  if (cardScanBusy) return;
+  cardScanBusy = true;
+  try {
+    for (const u of Object.values(usersDB)) for (const pd of Object.values(u.pages || {})) {
+      try { await scanCardSlipsForPage(pd); } catch (e) { console.error('❌ [Card Scan]', e.message); }
+    }
+  } finally { cardScanBusy = false; }
+}
+setInterval(() => { scanCardSlipsAll(); }, CARD_SCAN_EVERY);
 
 // ประวัติการตรวจสลิปล่าสุด (แสดงในหน้าตั้งค่าสลิป ช่วยดูสาเหตุที่ไม่ผ่าน)
 function logSlipAttempt(pageData, rec) {
