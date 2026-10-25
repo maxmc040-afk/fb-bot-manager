@@ -4202,7 +4202,8 @@ app.get('/', (req, res) => {
             let ch = '';
             pageSlice('cm', list).forEach(function(c) {
                 const payBtn = ' data-uid="' + escapeHtml(c.userId) + '" data-name="' + escapeHtml(c.name || c.userId) + '" onclick="openPayEditor(this)" title="คลิกเพื่อบันทึกการโอนแบบแมนนวล"';
-                const pay = c.matchedCount > 0
+                // ปุ่มสถานะโอน: แสดงให้คนที่ตรงคำดัก หรือมียอดที่ต้องจ่าย (เช่น ชนะประมูล) หรือมีการโอนแล้ว -> กดบันทึก/แก้การโอนได้
+                const pay = (c.matchedCount > 0 || Number(c.dueAmount) > 0 || c.paid)
                     ? (c.paid
                         ? '<button type="button" class="inline-block px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-semibold whitespace-nowrap hover:ring-2 hover:ring-emerald-300"' + payBtn + '>✅ โอนแล้ว ' + fmtMoney(c.paidTotal) + ' ฿</button>' + (c.slipCount > 1 ? '<div class="text-[10px] text-slate-400">' + c.slipCount + ' รายการ</div>' : '')
                         : '<button type="button" class="inline-block px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-semibold whitespace-nowrap hover:ring-2 hover:ring-amber-300"' + payBtn + '>⏳ ยังไม่โอน ✎</button>')
