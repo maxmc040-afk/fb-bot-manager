@@ -2767,6 +2767,7 @@ app.get('/', (req, res) => {
                                     <h3 class="text-base font-bold text-slate-700">💬 รายชื่อคนคอมเมนต์ (ล่าสุด 300 คน)</h3>
                                     <div class="flex flex-wrap gap-2">
                                         <button type="button" onclick="deleteSelectedCommenters()" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-white text-rose-600 border border-rose-300 hover:bg-rose-50 shadow-sm">🗑️ ลบคนที่เลือก</button>
+                                        <button type="button" onclick="openRemind()" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-amber-500 text-white hover:bg-amber-600 shadow-sm" title="ส่งแชทแจ้งยอดลูกค้าที่ยังไม่โอน / โอนไม่ครบ">📣 ตามยอด</button>
                                         <button type="button" onclick="pullSelectedCommenters()" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm">📥 ดึงข้อมูลคนที่เลือก</button>
                                     </div>
                                 </div>
@@ -3125,6 +3126,34 @@ app.get('/', (req, res) => {
                     </details>
                 </div>
             </main>
+            <div id="remind-modal" class="hidden fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4" onclick="if(event.target===this) closeRemind()">
+                <div class="bg-white rounded-2xl shadow-xl border border-slate-200 p-5 w-full max-w-2xl max-h-[92vh] overflow-y-auto space-y-3">
+                    <div class="flex items-center justify-between">
+                        <h3 class="text-base font-bold text-slate-800">📣 ตามยอด · แจ้งยอดลูกค้าที่ยังไม่โอน / โอนไม่ครบ</h3>
+                        <button type="button" onclick="closeRemind()" class="text-slate-400 hover:text-slate-600 text-xl leading-none">×</button>
+                    </div>
+                    <div class="flex flex-wrap items-center gap-3 text-xs text-slate-600">
+                        <label class="flex items-center gap-1.5"><input type="radio" name="remind-scope" value="all" checked onchange="loadRemindPreview()"> ทุกคนที่ยังโอนไม่ครบใน session นี้</label>
+                        <label class="flex items-center gap-1.5"><input type="radio" name="remind-scope" value="sel" onchange="loadRemindPreview()"> เฉพาะคนที่ติ๊กเลือก (<span id="remind-sel-n">0</span>)</label>
+                    </div>
+                    <div>
+                        <label class="text-xs font-semibold text-slate-600 block mb-1">ข้อความที่จะส่ง</label>
+                        <textarea id="remind-text" rows="7" oninput="remindTextChanged()" class="w-full p-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-amber-500"></textarea>
+                        <p class="text-[11px] text-slate-500 mt-1"><b>{name}</b> ชื่อลูกค้า · <b>{due}</b> ยอดที่ต้องโอน · <b>{paid}</b> โอนแล้ว (คนที่ยังไม่โอนเลย ระบบตัดบรรทัดนี้ออกให้) · <b>{short}</b> คงเหลือ · <b>{items}</b> รายการยอด เช่น 330+200+300 · หลายแบบคั่นด้วยบรรทัด <b>---</b> ระบบสุ่มส่ง</p>
+                        <p class="text-[11px] text-amber-700 mt-0.5">💡 ใส่เลขบัญชีแบบมีขีด เช่น 199-2-94664-0 (กัน Messenger สร้าง "คำขอโอนเงิน" อัตโนมัติ)</p>
+                    </div>
+                    <div class="text-xs font-semibold text-slate-600" id="remind-summary"></div>
+                    <div class="border border-slate-200 rounded-lg max-h-64 overflow-y-auto">
+                        <table class="w-full text-xs"><thead class="bg-slate-50 text-slate-500 sticky top-0"><tr><th class="text-left p-1.5">ลูกค้า</th><th class="text-right p-1.5">ต้องโอน</th><th class="text-right p-1.5">โอนแล้ว</th><th class="text-right p-1.5">คงเหลือ</th><th class="text-left p-1.5">ส่งทาง</th><th class="text-left p-1.5">แจ้งล่าสุด</th></tr></thead><tbody id="remind-list"></tbody></table>
+                    </div>
+                    <details class="text-xs"><summary class="cursor-pointer text-slate-500">👁️ ตัวอย่างข้อความ (คนแรก)</summary><pre id="remind-sample" class="mt-1 p-2 bg-slate-50 rounded-lg whitespace-pre-wrap font-sans text-slate-700"></pre></details>
+                    <div id="remind-status" class="text-xs"></div>
+                    <div class="flex gap-2">
+                        <button type="button" onclick="closeRemind()" class="flex-1 py-2 text-sm font-semibold rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700">ปิด</button>
+                        <button type="button" id="remind-btn" onclick="sendRemind()" class="flex-1 py-2 text-sm font-semibold rounded-xl bg-amber-500 hover:bg-amber-600 text-white">📣 ส่งแจ้งยอด</button>
+                    </div>
+                </div>
+            </div>
             <div id="pay-editor" class="hidden fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4" onclick="if(event.target===this) closePayEditor()">
                 <div class="bg-white rounded-2xl shadow-xl border border-slate-200 p-5 w-full max-w-sm space-y-3">
                     <h3 class="text-base font-bold text-slate-800">✍️ บันทึกการโอนเงิน (แมนนวล)</h3>
@@ -4175,6 +4204,89 @@ app.get('/', (req, res) => {
         let commenterList = [];
         let commenterSel = new Set();
 
+        // ===== 📣 ตามยอด =====
+        let remindTimer = null, remindPreviewTimer = null, remindTplLoaded = false, remindPoll = null;
+        function remindScope() { const r = document.querySelector('input[name="remind-scope"]:checked'); return r ? r.value : 'all'; }
+        async function openRemind() {
+            if(!currentLiveId) return alert('กรุณาเลือก session ก่อน');
+            document.getElementById('remind-sel-n').innerText = commenterSel.size;
+            document.querySelectorAll('input[name="remind-scope"]').forEach(function(r) { r.checked = r.value === (commenterSel.size ? 'sel' : 'all'); });
+            document.getElementById('remind-status').innerText = '';
+            document.getElementById('remind-modal').classList.remove('hidden');
+            if(!remindTplLoaded) {
+                try {
+                    const st = await (await fetch(liveUrl('/api/live/payment-reminder/status', '&sid=' + currentLiveId))).json();
+                    if(st.success) { document.getElementById('remind-text').value = st.template || ''; remindTplLoaded = true; if(st.job && st.job.running) watchRemind(); }
+                } catch(e) {}
+            }
+            loadRemindPreview();
+        }
+        function closeRemind() { document.getElementById('remind-modal').classList.add('hidden'); }
+        function remindTextChanged() { clearTimeout(remindPreviewTimer); remindPreviewTimer = setTimeout(loadRemindPreview, 500); }
+        function remindBody(extra) {
+            const b = { template: document.getElementById('remind-text').value };
+            if(remindScope() === 'sel') b.userIds = Array.from(commenterSel);
+            return Object.assign(b, extra || {});
+        }
+        async function loadRemindPreview() {
+            if(remindScope() === 'sel' && !commenterSel.size) {
+                document.getElementById('remind-list').innerHTML = '<tr><td colspan="6" class="p-2 text-slate-400">ยังไม่ได้ติ๊กเลือกลูกค้าในตาราง</td></tr>';
+                document.getElementById('remind-summary').innerText = ''; document.getElementById('remind-sample').innerText = '';
+                return;
+            }
+            try {
+                const d = await (await fetch(liveUrl('/api/live/payment-reminder', '&sid=' + currentLiveId), {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(remindBody({ preview: true }))
+                })).json();
+                if(!d.success) { document.getElementById('remind-summary').innerText = '❌ ' + d.error; return; }
+                const chName = { chat: '💬 แชท', comment: '🗨️ คอมเมนต์', none: '⛔ ส่งไม่ได้' };
+                let h = '', sum = 0, noCh = 0;
+                d.list.forEach(function(x) {
+                    sum += x.short; if(x.channel === 'none') noCh++;
+                    h += '<tr class="border-t border-slate-100"><td class="p-1.5">' + escapeHtml(x.name) + '</td>'
+                        + '<td class="p-1.5 text-right">' + fmtMoney(x.due) + '</td>'
+                        + '<td class="p-1.5 text-right">' + (x.paid > 0 ? fmtMoney(x.paid) : '<span class="text-slate-400">ยังไม่โอน</span>') + '</td>'
+                        + '<td class="p-1.5 text-right font-semibold text-rose-600">' + fmtMoney(x.short) + '</td>'
+                        + '<td class="p-1.5 ' + (x.channel === 'none' ? 'text-rose-500' : 'text-slate-600') + '">' + chName[x.channel] + '</td>'
+                        + '<td class="p-1.5 text-slate-500">' + (x.remindedAt ? fmtTime(x.remindedAt) + ' (' + x.remindCount + ' ครั้ง)' : '-') + '</td></tr>';
+                });
+                document.getElementById('remind-list').innerHTML = h || '<tr><td colspan="6" class="p-2 text-slate-400">ไม่มีลูกค้าที่ยังโอนไม่ครบ (ต้องใส่ "ยอดที่ต้องจ่าย" ไว้ก่อน)</td></tr>';
+                document.getElementById('remind-summary').innerText = 'จะส่งแจ้งยอด ' + (d.list.length - noCh) + ' คน · ยอดค้างรวม ' + fmtMoney(sum) + ' ฿'
+                    + (noCh ? ' · ส่งไม่ได้ ' + noCh + ' คน (ยังไม่มีแชท/คอมเมนต์ที่ส่งได้)' : '') + (d.skipped ? ' · ข้าม ' + d.skipped + ' คนที่โอนครบหรือยังไม่ใส่ยอด' : '');
+                document.getElementById('remind-sample').innerText = d.list.length ? d.list[0].text : '';
+            } catch(e) { document.getElementById('remind-summary').innerText = '❌ ' + e.message; }
+        }
+        async function sendRemind() {
+            if(remindScope() === 'sel' && !commenterSel.size) return alert('ยังไม่ได้ติ๊กเลือกลูกค้า');
+            if(!confirm('ส่งข้อความแจ้งยอดให้ลูกค้าตามรายการนี้?')) return;
+            const btn = document.getElementById('remind-btn');
+            btn.disabled = true;
+            try {
+                const d = await (await fetch(liveUrl('/api/live/payment-reminder', '&sid=' + currentLiveId), {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(remindBody())
+                })).json();
+                if(!d.success) { btn.disabled = false; return alert('❌ ' + d.error); }
+                watchRemind();
+            } catch(e) { btn.disabled = false; alert('❌ ' + e.message); }
+        }
+        function watchRemind() {
+            const btn = document.getElementById('remind-btn');
+            const box = document.getElementById('remind-status');
+            btn.disabled = true;
+            clearInterval(remindPoll);
+            remindPoll = setInterval(async function() {
+                try {
+                    const st = await (await fetch(liveUrl('/api/live/payment-reminder/status', '&sid=' + currentLiveId))).json();
+                    const j = st.job;
+                    if(!j) return;
+                    box.className = 'text-xs ' + (j.running ? 'text-amber-700' : (j.failed || j.noChannel ? 'text-rose-600' : 'text-emerald-700'));
+                    box.innerText = (j.running ? '⏳ กำลังส่ง ' : '✅ ส่งเสร็จ ') + j.done + '/' + j.total + ' · สำเร็จ ' + j.sent + ' · ไม่สำเร็จ ' + j.failed
+                        + (j.noChannel ? ' · ส่งไม่ได้ ' + j.noChannel : '') + (j.errors && j.errors.length ? NL + j.errors.join(NL) : '');
+                    if(!j.running) { clearInterval(remindPoll); btn.disabled = false; loadRemindPreview(); loadLiveDetail(false); }
+                } catch(e) {}
+            }, 1500);
+        }
+
         function filteredCommenters() {
             const fEl = document.getElementById('lv-cm-filter');
             if (fEl && fEl.getAttribute('data-last') !== fEl.value) { fEl.setAttribute('data-last', fEl.value); pagerState('cm').page = 1; }
@@ -4219,6 +4331,7 @@ app.get('/', (req, res) => {
                     else if(got < due) cmp = '<div class="mt-0.5 text-[11px] font-semibold text-rose-600">✖ ขาด ' + fmtMoney(due - got) + ' ฿</div>';
                     else cmp = '<div class="mt-0.5 text-[11px] font-semibold text-blue-600">▲ เกิน ' + fmtMoney(got - due) + ' ฿</div>';
                 }
+                if(c.remindedAt && due > 0 && got < due) cmp += '<div class="text-[10px] text-amber-600">📣 แจ้งยอดแล้ว ' + fmtTime(c.remindedAt) + (c.remindCount > 1 ? ' (' + c.remindCount + ' ครั้ง)' : '') + '</div>';
                 const dueWarn = c.auctionWarn ? '<div class="mt-0.5 text-[10px] text-rose-600 whitespace-normal max-w-[11rem]">⚠️ ' + escapeHtml(c.auctionWarn) + '</div>' : '';
                 ch += '<tr data-cid="' + escapeHtml(c.userId) + '" class="border-b border-slate-100">'
                     + '<td class="py-1.5 pr-2"><input type="checkbox" class="cm-sel w-4 h-4 rounded"' + (commenterSel.has(c.userId) ? ' checked' : '') + '></td>'
@@ -7861,6 +7974,101 @@ async function runLiveBroadcast(live, pageData, targets, message, delaySec, batc
   const extra = st.skipped ? (' · ข้าม ' + st.skipped + ' คน (ยังไม่ทักแชท และไม่มีคอมเมนต์ที่ส่งส่วนตัวได้)') : '';
   st.statusMessage = (st.shouldStop ? '⏹️ หยุดบรอดแคสแล้ว' : '✅ บรอดแคสเสร็จสิ้น') + extra;
 }
+
+// =====================================================================
+// 📣 ตามยอด: แจ้งยอดลูกค้าที่ยังไม่โอน / โอนไม่ครบ ทางแชท (แอดมินกดส่งเอง)
+// ส่งทางแชท (ถ้าเกิน 24 ชม. ใช้แท็ก HUMAN_AGENT ได้ภายใน 7 วัน) / ยังไม่มีแชท -> ส่งผ่านคอมเมนต์ (Private Reply)
+// =====================================================================
+const DEFAULT_REMIND_TEXT = 'แจ้งยอดค่ะ คุณ{name} 🙏\nยอดที่ต้องโอน {due} บาท\nโอนแล้ว {paid} บาท\nคงเหลือที่ต้องโอน {short} บาท\n\nรบกวนโอนและส่งสลิปในแชทนี้ได้เลยค่ะ ขอบคุณค่ะ 💖';
+const fmtBaht = (n) => (Math.round((Number(n) || 0) * 100) / 100).toLocaleString('en-US', { maximumFractionDigits: 2 });
+function renderRemindText(tpl, info) {
+  // {name} ใส่ก่อนผ่าน renderReplyText ไม่ได้ เพราะต้องรู้ว่าบรรทัดไหนมีตัวแปรอื่นปนอยู่
+  const raw = String(tpl || DEFAULT_REMIND_TEXT);
+  const variants = raw.split(/\r?\n[ \t]*---[ \t]*(?=\r?\n|$)/).map(x => x.trim()).filter(Boolean);
+  let t = variants.length ? variants[Math.floor(Math.random() * variants.length)] : DEFAULT_REMIND_TEXT;
+  // ยังไม่โอนเลย -> ตัดบรรทัดที่มีแค่ {paid} / ไม่มีรายการยอด -> ตัดบรรทัดที่มีแค่ {items} (บรรทัดที่มีตัวแปรอื่นปนอยู่ จะเก็บไว้)
+  const only = (line, key) => new RegExp('\\{' + key + '\\}', 'i').test(line) && !/\{(name|fullname|due|short)\}/i.test(line) && !(key === 'paid' ? /\{items\}/i : /\{paid\}/i).test(line);
+  t = t.split(/\r?\n/).filter(line => !(only(line, 'paid') && !(info.paid > 0)) && !(only(line, 'items') && !info.items)).join('\n');
+  if (!info.items) t = t.replace(/[ \t]*[(\[]\s*\{items\}\s*[)\]]/gi, '');
+  t = renderReplyText(t, info.name);
+  return t.replace(/\{due\}/gi, fmtBaht(info.due)).replace(/\{paid\}/gi, fmtBaht(info.paid))
+    .replace(/\{short\}/gi, fmtBaht(info.short)).replace(/\{items\}/gi, info.items || '').trim();
+}
+function remindCandidates(pageData, s, userIds) {
+  const slipIdx = buildSlipIndex(pageData, s);
+  const psidMap = getPsidMap(pageData);
+  const now = Date.now();
+  const ids = Array.isArray(userIds) && userIds.length ? userIds.map(String) : Array.from(s.commenters.keys());
+  const out = [];
+  for (const uid of ids) {
+    const c = s.commenters.get(uid);
+    if (!c) continue;
+    const due = Number(c.dueAmount) || 0;
+    const paid = Math.round((paymentStatusFromIndex(slipIdx, uid, c.psid || psidMap.get(uid)).paidTotal || 0) * 100) / 100;
+    const short = Math.round((due - paid) * 100) / 100;
+    const psid = c.psid || psidMap.get(uid) || '';
+    const pc = (c.pendingComments || []).filter(x => now - x.time < PRIVATE_REPLY_MS);
+    const channel = psid ? 'chat' : (pc.length ? 'comment' : 'none');
+    out.push({ uid, name: c.name || uid, due, paid, short, items: c.dueExpr || '', psid, commentId: pc.length ? pc[pc.length - 1].id : '',
+      channel, ok: due > 0 && short > 0, remindedAt: c.remindedAt || 0, remindCount: c.remindCount || 0 });
+  }
+  return out;
+}
+
+app.post('/api/live/payment-reminder', checkAuth, (req, res) => {
+  const ctx = getLiveContext(req, res);
+  if (!ctx) return;
+  const s = ctx.live;
+  if (!s) return res.json({ success: false, error: 'ไม่พบ session นี้' });
+  const tpl = String((req.body && req.body.template) || '').trim() || ctx.pageData.config.remindText || DEFAULT_REMIND_TEXT;
+  const list = remindCandidates(ctx.pageData, s, req.body && req.body.userIds);
+  const due = list.filter(x => x.ok);
+  if (req.body && req.body.preview) {
+    return res.json({ success: true, template: tpl, list: due.map(x => ({ uid: x.uid, name: x.name, due: x.due, paid: x.paid, short: x.short, channel: x.channel,
+      remindedAt: x.remindedAt, remindCount: x.remindCount, text: renderRemindText(tpl, x) })), skipped: list.length - due.length });
+  }
+  if (!ctx.pageData.config.pageAccessToken) return res.json({ success: false, error: 'เพจนี้ยังไม่มี Page Access Token' });
+  if (s.remindJob && s.remindJob.running && Date.now() - (s.remindJob.startedAt || 0) < 15 * 60000) return res.json({ success: false, error: 'กำลังส่งแจ้งยอดอยู่ กรุณารอสักครู่' });
+  const targets = due.filter(x => x.channel !== 'none');
+  if (!due.length) return res.json({ success: false, error: 'ไม่มีลูกค้าที่ยังโอนไม่ครบ (ต้องใส่ "ยอดที่ต้องจ่าย" ก่อน)' });
+  ctx.pageData.config.remindText = tpl; // จำข้อความล่าสุดไว้ใช้ครั้งหน้า
+  const job = s.remindJob = { running: true, startedAt: Date.now(), total: targets.length, done: 0, sent: 0, failed: 0,
+    noChannel: due.length - targets.length, errors: due.filter(x => x.channel === 'none').map(x => x.name + ': ยังไม่มีแชท และไม่มีคอมเมนต์ที่ส่งได้ (ภายใน 7 วัน)').slice(0, 30) };
+  (async () => {
+    for (const t of targets) {
+      const c = s.commenters.get(t.uid);
+      const text = renderRemindText(tpl, t);
+      try {
+        if (t.channel === 'chat') {
+          await sendMessengerText(ctx.pageData, t.psid, text, { humanAgent: true });
+        } else {
+          const r = await axios.post('https://graph.facebook.com/v19.0/me/messages', { recipient: { comment_id: t.commentId }, message: { text } },
+            { params: { access_token: ctx.pageData.config.pageAccessToken }, timeout: 15000 });
+          const psid = r.data && r.data.recipient_id;
+          if (psid) { getPsidMap(ctx.pageData).set(t.uid, String(psid)); if (c) c.psid = String(psid); }
+          if (c && c.pendingComments) c.pendingComments = c.pendingComments.filter(x => x.id !== t.commentId);
+        }
+        if (c) { c.remindedAt = Date.now(); c.remindCount = (c.remindCount || 0) + 1; }
+        job.sent++;
+      } catch (e) {
+        job.failed++;
+        if (c && t.channel === 'comment' && c.pendingComments) c.pendingComments = c.pendingComments.filter(x => x.id !== t.commentId);
+        if (job.errors.length < 30) job.errors.push(t.name + ': ' + (e.message === 'OUTSIDE_24H' ? 'เกิน 24 ชม.' : graphErrorMessage(e)));
+      }
+      job.done++;
+      if (job.done < targets.length) await sleep(1500);
+    }
+    job.running = false; job.finishedAt = Date.now();
+  })().catch(e => { job.running = false; job.errors.push(String(e.message || e)); });
+  res.json({ success: true, total: targets.length, noChannel: job.noChannel });
+});
+
+app.get('/api/live/payment-reminder/status', checkAuth, (req, res) => {
+  const ctx = getLiveContext(req, res);
+  if (!ctx) return;
+  if (!ctx.live) return res.json({ success: false, error: 'ไม่พบ session นี้' });
+  res.json({ success: true, job: ctx.live.remindJob || null, template: ctx.pageData.config.remindText || DEFAULT_REMIND_TEXT });
+});
 
 app.post('/api/live/broadcast/start', checkAuth, async (req, res) => {
   const ctx = getLiveContext(req, res);
