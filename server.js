@@ -2767,6 +2767,7 @@ app.get('/', (req, res) => {
                                     <h3 class="text-base font-bold text-slate-700">💬 รายชื่อคนคอมเมนต์ (ล่าสุด 300 คน)</h3>
                                     <div class="flex flex-wrap gap-2">
                                         <button type="button" onclick="deleteSelectedCommenters()" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-white text-rose-600 border border-rose-300 hover:bg-rose-50 shadow-sm">🗑️ ลบคนที่เลือก</button>
+                                        <button type="button" onclick="openFbBankSlips()" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-white text-[#0866FF] border border-blue-300 hover:bg-blue-50 shadow-sm" title="สลิปที่ลูกค้าแนบผ่านการ์ดคำขอโอนเงินของ Messenger (ระบบดึงอัตโนมัติไม่ได้) ดูได้ที่หน้านี้ใน Business Suite">🧾 สลิปใน Business Suite</button>
                                         <button type="button" onclick="openRemind()" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-amber-500 text-white hover:bg-amber-600 shadow-sm" title="ส่งแชทแจ้งยอดลูกค้าที่ยังไม่โอน / โอนไม่ครบ">📣 ตามยอด</button>
                                         <button type="button" onclick="pullSelectedCommenters()" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm">📥 ดึงข้อมูลคนที่เลือก</button>
                                     </div>
@@ -4630,6 +4631,11 @@ app.get('/', (req, res) => {
             if(e.key === 'Escape') closeChatBox();
             if(e.key === 'Enter' && !e.shiftKey && e.target && e.target.id === 'chat-box-input') { e.preventDefault(); sendChatBox(); }
         });
+        // 🧾 สลิปที่ลูกค้าแนบผ่านการ์ด "คำขอโอนเงิน" ของ Messenger: Facebook เก็บไว้ที่หน้า bank_slips ของ Business Suite
+        function openFbBankSlips() {
+            const pid = (currentConfig && currentConfig.pageId) || currentActivePageId;
+            window.open('https://business.facebook.com/latest/orders/bank_slips?asset_id=' + encodeURIComponent(pid), '_blank');
+        }
         function copyNameOpenInbox() {
             const pid = (currentConfig && currentConfig.pageId) || currentActivePageId;
             try { navigator.clipboard.writeText(chatBoxName); } catch(e) {}
