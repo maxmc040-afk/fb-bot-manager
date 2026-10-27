@@ -8596,6 +8596,12 @@ app.post('/webhook', async (req, res) => {
             // 🔨 โหมดประมูล: ไม่ใช้คูลดาวน์เลย (กันกดซ้ำด้วยกติกา "กด 1 ซ้ำใน 1 นาที ในรอบเดิม" แทน)
             // เดิมถ้า Webhook คอมเมนต์ราคาตกหล่น ผู้ชนะองค์ใหม่จะติดคูลดาวน์และไม่ได้ข้อความเข้าแชท
             const hasNewBid = auctionOn;
+            // 🔨 จดเวลาที่แต่ละคนกด 1 ทันทีที่คอมเมนต์เข้ามา (ใช้ตัดสินว่าใครกดก่อน)
+            if (auctionOn && isMatched && senderId && liveSession) {
+              if (!Array.isArray(liveSession.auctionPresses)) liveSession.auctionPresses = [];
+              liveSession.auctionPresses.push({ uid: String(senderId), name: comment.from?.name || '', at: commentAt });
+              if (liveSession.auctionPresses.length > 500) liveSession.auctionPresses.splice(0, 100);
+            }
             const inCooldown = !!(isMatched && !hasNewBid && cooldownMs && cRec && cRec.lastRepliedAt && Date.now() - cRec.lastRepliedAt < cooldownMs);
             if (inCooldown) console.log('⏱️ [Comment] ข้าม ' + (comment.from?.name || senderId) + ' (เพิ่งตอบไปไม่ถึง ' + cfg.replyCooldownMin + ' นาที)');
             if (isMatched && cRec && !inCooldown) cRec.lastRepliedAt = Date.now();
@@ -8629,6 +8635,19 @@ app.post('/webhook', async (req, res) => {
                     console.log('🔁 [Auction] ' + customerName + ' กด 1 ซ้ำ (ข้าม)');
                     return;
                   }
+                  // ⏱️ มีลูกค้าคนอื่นกด 1 ก่อนหน้าไม่เกิน 40 วิ (ไม่มีสัญญาณปิดคั่น) -> คนที่กดตามหลัง ให้ "รอแอดมินแจ้งยอด" ไม่บวกยอด
+                  let nearWarn = '';
+                  {
+                    const closesAll = liveSession.auctionCloses || [];
+                    const before = (liveSession.auctionPresses || []).filter(p => p.uid !== String(senderId) && p.at <= commentAt && commentAt - p.at <= 40000
+                      && !(p.at === commentAt && String(p.uid) > String(senderId))
+                      && !closesAll.some(t => t > p.at && t <= commentAt));
+                    if (before.length) {
+                      const names = Array.from(new Set(before.map(p => p.name || p.uid))).slice(0, 3).join(', ');
+                      nearWarn = 'กด 1 ตามหลัง ' + names + ' ไม่เกิน 40 วิ · รอแอดมินแจ้งยอด';
+                      win = null;
+                    }
+                  }
                   // ข้อความส่งเข้าแชทไม่มี {amount} -> เติมบรรทัดยอดประมูลไว้บนสุดให้อัตโนมัติ
                   const aText = renderReplyText(typeof liveSession.config.auctionText === 'string' ? liveSession.config.auctionText : '🔨 ยอดประมูล {amount} บาท', customerName);
                   if (inboxMsg && aText.trim() && !/\{amount\}/i.test(inboxMsg)) inboxMsg = aText.trim() + '\n\n' + inboxMsg;
@@ -8644,7 +8663,7 @@ app.post('/webhook', async (req, res) => {
                   }
                   if (c) {
                     if (!Array.isArray(c.wins)) c.wins = [];
-                    c.wins.push({ amount: win ? win.amount : 0, time: commentAt, lot: win ? win.lot : 0, bidTime: win ? win.bidTime : 0, lotStart: win ? win.lotStart || 0 : 0, source: win ? win.source : '', dup: !!(win && win.dupLot), warning: win ? win.warning : 'กด 1 แต่ไม่พบราคาที่บิด (ลงท้ายด้วย 0)', commentId });
+                    c.wins.push({ amount: win ? win.amount : 0, time: commentAt, lot: win ? win.lot : 0, bidTime: win ? win.bidTime : 0, lotStart: win ? win.lotStart || 0 : 0, source: win ? win.source : '', dup: !!(win && win.dupLot), warning: win ? win.warning : (nearWarn || 'กด 1 แต่ไม่พบราคาที่บิด (ลงท้ายด้วย 0)'), commentId });
                     if (c.wins.length > 30) c.wins.shift();
                     c.lastWinAt = commentAt;
                     if (win && win.lot) { if (!Array.isArray(c.wonLots)) c.wonLots = []; if (!c.wonLots.includes(win.lot)) c.wonLots.push(win.lot); if (c.wonLots.length > 100) c.wonLots.shift(); }
