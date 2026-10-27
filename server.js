@@ -177,6 +177,20 @@ function isAuctionCloseSignal(text, cfg) {
   return /^[❤♥💖💗💓💕💞💘💝🧡💛💚💙💜🤍🖤🤎❣❌✖❎🙏🎉✨👏]+$/u.test(t);
 }
 
+// 🏁 ไม่มีใครบิดเลย -> ใช้ "ราคาเปิดประมูล" ที่ตั้งไว้ใน session เป็นยอดจบ
+function auctionStartPriceFor(session, at, lotClose, prevClose) {
+  const def = Number(session.config && session.config.auctionStartPrice) || 0;
+  if (!(def > 0)) return null;
+  const log = session.bidLog || [];
+  const noBids = (from, to) => !log.some(b => b.time > from && b.time <= to);
+  const warning = 'ไม่มีคนบิด ใช้ราคาเปิด ' + def.toLocaleString('en-US');
+  // รอบที่ปิดแล้ว (❤️/❌) ไม่มีใครบิดเลย
+  if (lotClose && noBids(prevClose || 0, lotClose)) return { amount: def, bidTime: 0, lot: lotClose, lotStart: prevClose || 0, source: 'start', warning };
+  // ยังไม่มีสัญญาณปิดเลย และไม่มีใครบิดใน 15 นาทีที่ผ่านมา
+  if (!lotClose && noBids(at - 15 * 60000, at)) return { amount: def, bidTime: 0, lot: 0, lotStart: at - 15 * 60000, source: 'start', warning };
+  return null;
+}
+
 // ยอดของคนที่กด 1
 // มีสัญญาณปิด (หัวใจของเพจ): รอบประมูล = ราคาที่บิดระหว่างสัญญาณปิดครั้งก่อน ถึงสัญญาณปิดล่าสุดก่อนกด 1
 //   -> ยอด = ราคาล่าสุดที่คนกด 1 บิดในรอบนั้น ก่อนสัญญาณปิด (ราคาเท่ากัน ให้คนกด 1 เป็นผู้ชนะ ตามที่แอดมินประกาศหน้าไลฟ์)
@@ -214,10 +228,14 @@ function auctionAmountFor(session, uid, at) {
   }
   // สำรอง: ไม่มีสัญญาณปิด / คนกด 1 ไม่ได้บิดในรอบที่ปิด
   // ห้ามข้ามสัญญาณปิด: ใช้เฉพาะราคาหลังสัญญาณปิดล่าสุด (รอบใหม่ที่ยังไม่ปิด) และไม่เก่ากว่า 15 นาทีก่อนกด 1
-  if (!Array.isArray(c.bids)) return null;
   const from = Math.max(c.lastWinAt || 0, lotClose || 0, at - 15 * 60000);
-  const own = c.bids.filter(b => b.time > from && b.time <= at);
-  if (!own.length) return null;
+  const own = (Array.isArray(c.bids) ? c.bids : []).filter(b => b.time > from && b.time <= at);
+  if (!own.length) {
+    // 🏁 ไม่มีใครบิดเลย -> ใช้ราคาเปิดประมูล
+    const sp = auctionStartPriceFor(session, at, lotClose, closes.length > 1 ? closes[closes.length - 2] : 0);
+    if (sp) sp.dupLot = !!(sp.lot && Array.isArray(c.wonLots) && c.wonLots.includes(sp.lot));
+    return sp;
+  }
   const bid = own.reduce((m, b) => b.time >= m.time ? b : m, own[0]); // ราคาล่าสุดของคนนี้
   const higher = log.filter(b => b.uid !== uid && b.time >= bid.time && b.time <= at && b.amount > bid.amount)
     .sort((x, y) => y.amount - x.amount)[0];
@@ -2741,6 +2759,10 @@ app.get('/', (req, res) => {
                                         <textarea id="lv-auction-text" rows="3" class="mt-1 w-full p-2 text-sm font-normal border border-amber-300 rounded-lg bg-white focus:outline-none focus:border-amber-500" placeholder="🔨 ยอดประมูล {amount} บาท"></textarea>
                                         <span class="block text-[11px] font-normal text-slate-500 mt-0.5">ใส่ <b>{amount}</b> = ยอดที่ชนะ · <b>{name}</b> = ชื่อลูกค้า · ระบบวางข้อความนี้ไว้บนสุด ตามด้วย "ข้อความส่งเข้าแชทส่วนตัว" (ถ้าในข้อความส่งเข้าแชทมี {amount} อยู่แล้ว จะไม่ใส่ข้อความนี้ซ้ำ)</span>
                                     </label>
+                                    <label class="block text-xs font-semibold text-amber-800">🏁 ราคาเปิดประมูล (ใช้เมื่อไม่มีใครบิดเลย)
+                                        <input type="number" id="lv-auction-start" min="0" step="10" class="mt-1 w-full p-2 text-sm font-normal border border-amber-300 rounded-lg bg-white focus:outline-none focus:border-amber-500" placeholder="เช่น 180 (เว้นว่าง = ส่งข้อความรอแอดมินแจ้งยอด)">
+                                        <span class="block text-[11px] font-normal text-slate-500 mt-0.5">ไม่มีใครบิดในรอบนั้น (ระหว่างสัญญาณปิดครั้งก่อน ถึงครั้งนี้) แล้วมีคนกด 1 → ใช้ราคานี้เป็นยอดจบ · เปลี่ยนราคาได้ทุกองค์ก่อนเปิดประมูล</span>
+                                    </label>
                                     <label class="block text-xs font-semibold text-amber-800">❔ ข้อความเมื่อหายอดไม่เจอ (กด 1 แต่ไม่ได้บิด)
                                         <input type="text" id="lv-auction-nobid" class="mt-1 w-full p-2 text-sm font-normal border border-amber-300 rounded-lg bg-white focus:outline-none focus:border-amber-500" placeholder="รอแอดมินแจ้งยอด">
                                         <span class="block text-[11px] font-normal text-slate-500 mt-0.5">ใช้แทนตำแหน่ง "{amount} บาท" เช่น "🔨 ยอดประมูล รอแอดมินแจ้งยอด"</span>
@@ -3985,6 +4007,7 @@ app.get('/', (req, res) => {
             document.getElementById('lv-auction-mode').checked = !!liveCfg.auctionMode;
             document.getElementById('lv-auction-text').value = typeof liveCfg.auctionText === 'string' ? liveCfg.auctionText : '🔨 ยอดประมูล {amount} บาท';
             document.getElementById('lv-auction-nobid').value = liveCfg.auctionNoBidText || 'รอแอดมินแจ้งยอด';
+            document.getElementById('lv-auction-start').value = Number(liveCfg.auctionStartPrice) > 0 ? liveCfg.auctionStartPrice : '';
             document.getElementById('lv-auction-hearts').checked = liveCfg.auctionCloseHearts !== false;
             document.getElementById('lv-auction-words').value = (liveCfg.auctionCloseWords || []).join(', ');
             if (!Array.isArray(liveCfg.keywordLabels)) liveCfg.keywordLabels = [];
@@ -4708,7 +4731,8 @@ app.get('/', (req, res) => {
                 auctionText: document.getElementById('lv-auction-text').value,
                 auctionCloseHearts: document.getElementById('lv-auction-hearts').checked,
                 auctionCloseWords: document.getElementById('lv-auction-words').value.split(',').map(function(w) { return w.trim(); }).filter(Boolean),
-                auctionNoBidText: document.getElementById('lv-auction-nobid').value
+                auctionNoBidText: document.getElementById('lv-auction-nobid').value,
+                auctionStartPrice: document.getElementById('lv-auction-start').value
             };
             const res = await fetch(liveUrl('/api/live/config', '&sid=' + currentLiveId), {
                 method: 'POST',
@@ -6903,6 +6927,7 @@ app.post('/api/live/create', checkAuth, (req, res) => {
       replyCooldownMin: Number(c.replyCooldownMin) || 0,
       auctionMode: !!c.auctionMode,
       auctionNoBidText: c.auctionNoBidText || 'รอแอดมินแจ้งยอด',
+      auctionStartPrice: Number(c.auctionStartPrice) || 0,
       auctionText: typeof c.auctionText === 'string' ? c.auctionText : '🔨 ยอดประมูล {amount} บาท',
       auctionCloseHearts: c.auctionCloseHearts !== false,
       auctionCloseWords: Array.isArray(c.auctionCloseWords) ? c.auctionCloseWords.slice() : []
@@ -7080,6 +7105,11 @@ app.post('/api/live/config', checkAuth, (req, res) => {
     ctx.pageData.config.auctionCloseWords = s.config.auctionCloseWords;
   }
   if (typeof b.auctionText === 'string') { s.config.auctionText = b.auctionText.slice(0, 1000); ctx.pageData.config.auctionText = s.config.auctionText; }
+  if (b.auctionStartPrice !== undefined) {
+    const sp = parseInt(String(b.auctionStartPrice).replace(/[^0-9]/g, ''), 10) || 0;
+    s.config.auctionStartPrice = sp > 0 && sp <= 10000000 ? sp : 0;
+    ctx.pageData.config.auctionStartPrice = s.config.auctionStartPrice;
+  }
   if (typeof b.auctionNoBidText === 'string') { s.config.auctionNoBidText = b.auctionNoBidText.trim().slice(0, 200) || 'รอแอดมินแจ้งยอด'; ctx.pageData.config.auctionNoBidText = s.config.auctionNoBidText; }
   if (b.replyCooldownMin !== undefined) {
     s.config.replyCooldownMin = Math.min(1440, Math.max(0, parseInt(b.replyCooldownMin, 10) || 0));
