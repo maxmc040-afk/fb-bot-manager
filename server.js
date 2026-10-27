@@ -238,6 +238,32 @@ function auctionAmountFor(session, uid, at) {
   const from = Math.max(c.lastWinAt || 0, lotClose || 0, at - 15 * 60000);
   const own = (Array.isArray(c.bids) ? c.bids : []).filter(b => b.time > from && b.time <= at);
   if (!own.length) {
+    // 🙋 คนกด 1 ไม่ได้บิดเอง -> แอดมินประกาศให้ "ผู้ชนะกด 1" จึงนับคนกด 1 เป็นผู้ชนะ
+    //    มีคนบิดในรอบ -> ใช้ราคาสูงสุดของรอบ (ราคาที่พิมพ์หลังสัญญาณปิดไม่นับ) · ไม่มีใครบิด -> ใช้ราคาเปิดประมูล
+    const prevClose0 = closes.length > 1 ? closes[closes.length - 2] : 0;
+    const lotTop = (from, to) => {
+      const bs = log.filter(b => b.time > from && b.time <= to);
+      return bs.length ? bs.reduce((m, b) => b.amount > m.amount ? b : m, bs[0]) : null;
+    };
+    const othersWon = (lot) => {
+      if (!lot) return [];
+      const out = [];
+      for (const [id, x] of session.commenters) if (id !== uid && Array.isArray(x.wonLots) && x.wonLots.includes(lot)) out.push(x.name || id);
+      return out;
+    };
+    const topWin = (tp, lot, lotStart) => ({ amount: tp.amount, bidTime: tp.time, bidText: String(tp.amount), lot, lotStart, source: 'lotTop',
+      dupLot: !!(lot && Array.isArray(c.wonLots) && c.wonLots.includes(lot)),
+      warning: 'ไม่ได้บิดเอง ใช้ราคาสูงสุดของรอบ ' + tp.amount.toLocaleString('en-US') + ' (' + (tp.name || tp.uid) + ' บิด)' });
+    // รอบที่ปิดล่าสุด ยังไม่มีคนอื่นกด 1 -> คนนี้คือผู้ชนะรอบนั้น
+    if (lotClose && !othersWon(lotClose).length) {
+      const tp = lotTop(prevClose0, lotClose);
+      if (tp) return topWin(tp, lotClose, prevClose0);
+    } else {
+      // รอบที่ปิดล่าสุดมีผู้ชนะแล้ว (หรือยังไม่มีสัญญาณปิด) -> องค์ปัจจุบันที่ยังไม่ปิด
+      const from = Math.max(lotClose || 0, at - 15 * 60000);
+      const tp = lotTop(from, at);
+      if (tp) return topWin(tp, 0, from);
+    }
     // 🏁 ไม่มีใครบิดเลย -> ใช้ราคาเปิดประมูล
     const sp = auctionStartPriceFor(session, at, lotClose, closes.length > 1 ? closes[closes.length - 2] : 0);
     if (sp) sp.dupLot = !!(sp.lot && Array.isArray(c.wonLots) && c.wonLots.includes(sp.lot));
