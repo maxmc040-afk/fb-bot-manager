@@ -179,7 +179,7 @@ function isAuctionCloseSignal(text, cfg) {
 
 // ยอดของคนที่กด 1
 // มีสัญญาณปิด (หัวใจของเพจ): รอบประมูล = ราคาที่บิดระหว่างสัญญาณปิดครั้งก่อน ถึงสัญญาณปิดล่าสุดก่อนกด 1
-//   -> ยอด = ราคาสูงสุดที่คนกด 1 บิดในรอบนั้น (ราคาเท่ากัน ให้คนกด 1 เป็นผู้ชนะ ตามที่แอดมินประกาศหน้าไลฟ์)
+//   -> ยอด = ราคาล่าสุดที่คนกด 1 บิดในรอบนั้น ก่อนสัญญาณปิด (ราคาเท่ากัน ให้คนกด 1 เป็นผู้ชนะ ตามที่แอดมินประกาศหน้าไลฟ์)
 // ไม่มีสัญญาณปิด: ยอด = ราคาล่าสุดที่คนนั้นบิด หลังการกด 1 ครั้งก่อนของเขา
 function auctionAmountFor(session, uid, at) {
   const c = session.commenters.get(uid);
@@ -197,15 +197,18 @@ function auctionAmountFor(session, uid, at) {
     const lotBids = log.filter(b => b.time > lotStart && b.time <= lotClose).sort((x, y) => x.time - y.time);
     const mine = lotBids.filter(b => b.uid === uid);
     if (mine.length) {
-      // 1 รายการประมูล = ช่วงระหว่าง ❤️ ครั้งก่อน ถึง ❤️ ครั้งนี้ -> ใช้ "ราคาสูงสุด" ที่ผู้ชนะ (คนกด 1) บิดในช่วงนี้
+      // 1 รายการประมูล = ช่วงระหว่าง ❤️ ครั้งก่อน ถึง ❤️ ครั้งนี้ -> ใช้ "ราคาล่าสุด" ที่ผู้ชนะ (คนกด 1) บิดก่อนสัญญาณปิด
+      // (ราคาที่ลูกค้าพิมพ์ช้าหลังปิดรอบก่อน เช่น 410 ของรอบเก่า จะไม่ถูกใช้ ถ้าเขาบิดรอบใหม่ต่อจากนั้น)
+      const myLast = mine[mine.length - 1];
       const myTop = mine.reduce((m, b) => b.amount > m.amount ? b : m, mine[0]);
-      const later = lotBids.filter(b => b.time >= myTop.time);
+      const later = lotBids.filter(b => b.time >= myLast.time);
       const top = later.reduce((m, b) => b.amount > m.amount ? b : m, later[0]);
       const dupLot = Array.isArray(c.wonLots) && c.wonLots.includes(lotClose);
       return {
-        amount: myTop.amount, bidTime: myTop.time, bidText: String(myTop.amount), lot: lotClose, lotStart, dupLot, source: 'lot',
+        amount: myLast.amount, bidTime: myLast.time, bidText: String(myLast.amount), lot: lotClose, lotStart, dupLot, source: 'lot',
         warning: dupLot ? 'กด 1 ซ้ำในรอบเดิม (ไม่บวกยอดซ้ำ)'
-          : top.amount > myTop.amount ? ('ราคาสูงสุดก่อนปิดคือ ' + (top.name || top.uid) + ' ' + top.amount.toLocaleString('en-US')) : ''
+          : [top.amount > myLast.amount ? ('ราคาสูงสุดก่อนปิดคือ ' + (top.name || top.uid) + ' ' + top.amount.toLocaleString('en-US')) : '',
+             myTop.amount > myLast.amount ? ('คนนี้เคยพิมพ์ ' + myTop.amount.toLocaleString('en-US') + ' ในช่วงนี้ (ใช้ราคาล่าสุด ' + myLast.amount.toLocaleString('en-US') + ')') : ''].filter(Boolean).join(' · ')
       };
     }
   }
@@ -215,7 +218,7 @@ function auctionAmountFor(session, uid, at) {
   const from = Math.max(c.lastWinAt || 0, lotClose || 0, at - 15 * 60000);
   const own = c.bids.filter(b => b.time > from && b.time <= at);
   if (!own.length) return null;
-  const bid = own.reduce((m, b) => b.amount > m.amount ? b : m, own[0]); // ราคาสูงสุดของคนนี้
+  const bid = own.reduce((m, b) => b.time >= m.time ? b : m, own[0]); // ราคาล่าสุดของคนนี้
   const higher = log.filter(b => b.uid !== uid && b.time >= bid.time && b.time <= at && b.amount > bid.amount)
     .sort((x, y) => y.amount - x.amount)[0];
   return { amount: bid.amount, bidTime: bid.time, lot: 0, lotStart: from, source: 'latest',
