@@ -184,10 +184,17 @@ function auctionStartPriceFor(session, at, lotClose, prevClose) {
   const log = session.bidLog || [];
   const noBids = (from, to) => !log.some(b => b.time > from && b.time <= to);
   const warning = 'ไม่มีคนบิด ใช้ราคาเปิด ' + def.toLocaleString('en-US');
-  // รอบที่ปิดแล้ว (❤️/❌) ไม่มีใครบิดเลย
-  if (lotClose && noBids(prevClose || 0, lotClose)) return { amount: def, bidTime: 0, lot: lotClose, lotStart: prevClose || 0, source: 'start', warning };
+  // รอบที่ปิดล่าสุดมีผู้ชนะกด 1 ไปแล้วหรือยัง
+  let lotWon = false;
+  if (lotClose) for (const x of session.commenters.values()) if (Array.isArray(x.wonLots) && x.wonLots.includes(lotClose)) { lotWon = true; break; }
+  // รอบที่ปิดแล้ว (❤️/❌) ไม่มีใครบิดเลย และยังไม่มีคนกด 1
+  if (lotClose && !lotWon && noBids(prevClose || 0, lotClose)) return { amount: def, bidTime: 0, lot: lotClose, lotStart: prevClose || 0, source: 'start', warning };
   // ยังไม่มีสัญญาณปิดเลย และไม่มีใครบิดใน 15 นาทีที่ผ่านมา
   if (!lotClose && noBids(at - 15 * 60000, at)) return { amount: def, bidTime: 0, lot: 0, lotStart: at - 15 * 60000, source: 'start', warning };
+  // องค์ใหม่ (หลังสัญญาณปิดล่าสุด) ยังไม่มีใครบิด และองค์ก่อนมีผู้ชนะกด 1 ไปแล้ว -> คนที่กด 1 ตอนนี้คือผู้ชนะองค์ใหม่ที่ราคาเปิด
+  if (lotClose && noBids(lotClose, at)) {
+    if (lotWon) return { amount: def, bidTime: 0, lot: 0, lotStart: lotClose, source: 'start', warning: warning + ' (เพจยังไม่ส่งสัญญาณปิดองค์นี้)' };
+  }
   return null;
 }
 
@@ -306,19 +313,27 @@ function auctionLotsSummary(session) {
   const out = [];
   // ⚡ รวมผู้กด 1 ของแต่ละรอบครั้งเดียว (เดิมวนทุกคนทุกรอบ)
   const winnersByLot = new Map();
+  const looseWins = []; // กด 1 ก่อนเพจส่งสัญญาณปิด (เช่น องค์ที่ไม่มีใครบิด) -> จัดเข้ารอบตามเวลาที่กด
   for (const [uid, c] of session.commenters) for (const w of (c.wins || [])) {
-    if (!w.lot || w.dup) continue;
+    if (w.dup) continue;
+    if (!w.lot) { if (w.source === 'start' && w.amount > 0) looseWins.push({ time: w.time, name: c.name || uid, amount: w.amount }); continue; }
     if (!winnersByLot.has(w.lot)) winnersByLot.set(w.lot, []);
     winnersByLot.get(w.lot).push({ name: c.name || uid, amount: w.amount });
   }
+  const startPrice = Number(session.config && session.config.auctionStartPrice) || 0;
   const startIdx = Math.max(0, closes.length - 30); // แสดง 30 รอบล่าสุด
   for (let i = startIdx; i < closes.length; i++) {
     const close = closes[i], prev = i ? closes[i - 1] : 0;
     const bids = log.filter(b => b.time > prev && b.time <= close);
-    if (!bids.length) continue;
+    const winners = (winnersByLot.get(close) || []).concat(looseWins.filter(w => w.time > prev && w.time <= close));
+    if (!bids.length) {
+      // 🏁 ไม่มีใครบิดในรอบนี้ -> ราคาจบ = ราคาเปิดประมูลที่ตั้งไว้ คนกด 1 คือผู้ชนะ
+      if (startPrice > 0 || winners.length) out.push({ closeAt: close, topAmount: startPrice, topNames: [], startPrice: true, bids: 0, winners });
+      continue;
+    }
     let topAmt = 0; for (const b of bids) if (b.amount > topAmt) topAmt = b.amount;
     const tops = bids.filter(b => b.amount === topAmt);
-    out.push({ closeAt: close, topAmount: topAmt, topNames: Array.from(new Set(tops.map(b => b.name || b.uid))), bids: bids.length, winners: winnersByLot.get(close) || [] });
+    out.push({ closeAt: close, topAmount: topAmt, topNames: Array.from(new Set(tops.map(b => b.name || b.uid))), bids: bids.length, winners });
   }
   return out.reverse();
 }
@@ -4399,8 +4414,8 @@ app.get('/', (req, res) => {
                 const w = l.winners || [];
                 const ok = w.length === 1 && w[0].amount === l.topAmount;
                 html += '<tr class="border-b border-amber-100 align-top"><td class="py-1.5 pr-2 text-slate-500 whitespace-nowrap">' + fmtTime(l.closeAt) + '</td>'
-                    + '<td class="py-1.5 pr-2 text-right font-bold text-slate-800">' + fmtMoney(l.topAmount) + '</td>'
-                    + '<td class="py-1.5 pr-2">' + escapeHtml(l.topNames.join(', ')) + (l.topNames.length > 1 ? ' <span class="text-[10px] text-amber-700">(ราคาเท่ากัน)</span>' : '') + '</td>'
+                    + '<td class="py-1.5 pr-2 text-right font-bold text-slate-800">' + (l.topAmount > 0 ? fmtMoney(l.topAmount) : '-') + '</td>'
+                    + '<td class="py-1.5 pr-2">' + (l.startPrice ? '<span class="text-amber-700">🏁 ไม่มีคนบิด · ใช้ราคาเปิด' + (l.topAmount > 0 ? '' : ' (ยังไม่ได้ตั้งราคาเปิด)') + '</span>' : escapeHtml(l.topNames.join(', ')) + (l.topNames.length > 1 ? ' <span class="text-[10px] text-amber-700">(ราคาเท่ากัน)</span>' : '')) + '</td>'
                     + '<td class="py-1.5 pr-2 ' + (w.length ? (ok ? 'text-emerald-700 font-semibold' : 'text-rose-600 font-semibold') : 'text-slate-400') + '">'
                         + (w.length ? w.map(function(x) { return escapeHtml(x.name) + ' (' + fmtMoney(x.amount) + ')'; }).join(', ') + (ok ? ' ✓' : ' ⚠️') : 'ยังไม่มีคนกด 1') + '</td>'
                     + '<td class="py-1.5 text-slate-400">' + l.bids + '</td></tr>';
