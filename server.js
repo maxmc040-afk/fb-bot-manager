@@ -342,9 +342,9 @@ function auctionLotsSummary(session) {
   const looseWins = []; // กด 1 ก่อนเพจส่งสัญญาณปิด (เช่น องค์ที่ไม่มีใครบิด) -> จัดเข้ารอบตามเวลาที่กด
   for (const [uid, c] of session.commenters) for (const w of (c.wins || [])) {
     if (w.dup) continue;
-    if (!w.lot) { if (w.source === 'start' && w.amount > 0) looseWins.push({ time: w.time, name: c.name || uid, amount: w.amount }); continue; }
+    if (!w.lot) { if (w.source === 'start' && w.amount > 0) looseWins.push({ uid, time: w.time, name: c.name || uid, amount: w.amount }); continue; }
     if (!winnersByLot.has(w.lot)) winnersByLot.set(w.lot, []);
-    winnersByLot.get(w.lot).push({ name: c.name || uid, amount: w.amount });
+    winnersByLot.get(w.lot).push({ uid, name: c.name || uid, amount: w.amount, manual: w.source === 'manual' });
   }
   const startPrice = Number(session.config && session.config.auctionStartPrice) || 0;
   const startIdx = Math.max(0, closes.length - 30); // แสดง 30 รอบล่าสุด
@@ -352,14 +352,30 @@ function auctionLotsSummary(session) {
     const close = closes[i], prev = i ? closes[i - 1] : 0;
     const bids = log.filter(b => b.time > prev && b.time <= close);
     const winners = (winnersByLot.get(close) || []).concat(looseWins.filter(w => w.time > prev && w.time <= close));
+    // ✍️ รายชื่อให้แอดมินเลือกผู้ชนะ: คนกด 1 (หลังรอบก่อนปิด ถึงก่อนรอบถัดไปปิด) + คนบิดในรอบนี้
+    const next = i + 1 < closes.length ? closes[i + 1] : Infinity;
+    const cand = new Map();
+    for (const p of (session.auctionPresses || [])) {
+      if (!(p.at > prev && p.at <= next)) continue;
+      const x = cand.get(p.uid) || { uid: p.uid, name: p.name || (session.commenters.get(p.uid) || {}).name || p.uid, bid: 0, pressAt: 0 };
+      if (!x.pressAt) x.pressAt = p.at;
+      cand.set(p.uid, x);
+    }
+    for (const b of bids) {
+      const x = cand.get(b.uid) || { uid: b.uid, name: b.name || (session.commenters.get(b.uid) || {}).name || b.uid, bid: 0, pressAt: 0 };
+      x.bid = b.time >= (x.bidAt || 0) ? b.amount : x.bid; x.bidAt = Math.max(x.bidAt || 0, b.time); // ราคาล่าสุดของคนนี้ในรอบ
+      cand.set(b.uid, x);
+    }
+    const candidates = Array.from(cand.values()).sort((a, b) => (a.pressAt || Infinity) - (b.pressAt || Infinity) || b.bid - a.bid).slice(0, 15)
+      .map(x => ({ uid: x.uid, name: x.name, bid: x.bid, pressAt: x.pressAt }));
     if (!bids.length) {
       // 🏁 ไม่มีใครบิดในรอบนี้ -> ราคาจบ = ราคาเปิดประมูลที่ตั้งไว้ คนกด 1 คือผู้ชนะ
-      if (startPrice > 0 || winners.length) out.push({ closeAt: close, topAmount: startPrice, topNames: [], startPrice: true, bids: 0, winners });
+      if (startPrice > 0 || winners.length || candidates.length) out.push({ closeAt: close, topAmount: startPrice, topNames: [], startPrice: true, bids: 0, winners, candidates });
       continue;
     }
     let topAmt = 0; for (const b of bids) if (b.amount > topAmt) topAmt = b.amount;
     const tops = bids.filter(b => b.amount === topAmt);
-    out.push({ closeAt: close, topAmount: topAmt, topNames: Array.from(new Set(tops.map(b => b.name || b.uid))), bids: bids.length, winners });
+    out.push({ closeAt: close, topAmount: topAmt, topNames: Array.from(new Set(tops.map(b => b.name || b.uid))), bids: bids.length, winners, candidates });
   }
   return out.reverse();
 }
@@ -3220,6 +3236,29 @@ app.get('/', (req, res) => {
                     </div>
                 </div>
             </div>
+            <div id="assign-modal" class="hidden fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4" onclick="if(event.target===this) closeAssignLot()">
+                <div class="bg-white rounded-2xl shadow-xl border border-slate-200 p-5 w-full max-w-md max-h-[92vh] overflow-y-auto space-y-3">
+                    <div class="flex items-center justify-between">
+                        <h3 id="assign-title" class="text-base font-bold text-slate-800">✍️ กำหนดผู้ชนะ</h3>
+                        <button type="button" onclick="closeAssignLot()" class="text-slate-400 hover:text-slate-600 text-xl leading-none">×</button>
+                    </div>
+                    <div class="text-xs font-semibold text-slate-600">เลือกผู้ชนะ (เรียงตามคนที่กด 1 ก่อน)</div>
+                    <div id="assign-list" class="space-y-1.5"></div>
+                    <input type="search" id="assign-search" oninput="assignSearch()" placeholder="🔍 ค้นหาชื่ออื่น..." class="w-full p-2 text-xs border border-slate-200 rounded-lg focus:outline-none focus:border-amber-500">
+                    <div id="assign-search-list" class="space-y-0.5 text-xs"></div>
+                    <label class="block text-xs font-semibold text-slate-600">ยอดประมูล (บาท)
+                        <input type="number" id="assign-amount" min="0" class="mt-1 w-full p-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-amber-500">
+                    </label>
+                    <label class="flex items-center gap-2 text-xs text-slate-600"><input type="checkbox" id="assign-send" checked> ส่งข้อความแจ้งยอดเข้าแชทลูกค้า (ใช้ "ข้อความแจ้งยอดประมูล" ที่ตั้งไว้)</label>
+                    <label class="flex items-center gap-2 text-xs text-slate-600"><input type="checkbox" id="assign-payinfo"> แนบข้อความวิธีโอน (ข้อความส่งเข้าแชทส่วนตัว) ด้วย</label>
+                    <div id="assign-msg" class="text-xs"></div>
+                    <div class="flex gap-2">
+                        <button type="button" onclick="closeAssignLot()" class="flex-1 py-2 text-sm font-semibold rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700">ยกเลิก</button>
+                        <button type="button" id="assign-btn" onclick="saveAssignLot()" class="flex-1 py-2 text-sm font-semibold rounded-xl bg-amber-500 hover:bg-amber-600 text-white">✍️ บันทึก + แจ้งยอด</button>
+                    </div>
+                    <p class="text-[11px] text-slate-400">ระบบบวกยอดเข้า "ยอดที่ต้องจ่าย" ของลูกค้า และล้างคำเตือน "รอแอดมินแจ้งยอด" ของคนนี้ให้</p>
+                </div>
+            </div>
             <div id="pay-editor" class="hidden fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4" onclick="if(event.target===this) closePayEditor()">
                 <div class="bg-white rounded-2xl shadow-xl border border-slate-200 p-5 w-full max-w-sm space-y-3">
                     <h3 class="text-base font-bold text-slate-800">✍️ บันทึกการโอนเงิน (แมนนวล)</h3>
@@ -4430,7 +4469,65 @@ app.get('/', (req, res) => {
 
         // 💰 ยอดที่ลูกค้าต้องจ่าย (แอดมินใส่เอง) เทียบกับยอดสลิปรวมทุกใบ
         // 🔨 ตารางผลประมูลแต่ละรอบ (รอบปิดเมื่อเพจคอมเมนต์หัวใจ)
+        let auctionLotsData = [];
+        let assignLot = null;
+        function openAssignLot(tr) {
+            const close = Number(tr.getAttribute('data-close'));
+            assignLot = auctionLotsData.find(function(l) { return l.closeAt === close; });
+            if(!assignLot) return;
+            const c = assignLot.candidates || [];
+            document.getElementById('assign-title').innerText = '✍️ กำหนดผู้ชนะ · รอบปิด ' + fmtTime(assignLot.closeAt) + (assignLot.topAmount > 0 ? ' · ราคาสูงสุด ' + fmtMoney(assignLot.topAmount) : '');
+            let h = '';
+            c.forEach(function(x, i) {
+                h += '<label class="flex items-center gap-2 p-2 rounded-lg border border-slate-200 hover:bg-amber-50 cursor-pointer"><input type="radio" name="assign-who" value="' + escapeHtml(x.uid) + '" data-bid="' + (x.bid || 0) + '" onchange="assignPick(this)"' + (i === 0 ? ' checked' : '') + '>'
+                    + '<span class="flex-1"><b>' + escapeHtml(x.name) + '</b><span class="block text-[11px] text-slate-500">' + (x.pressAt ? 'กด 1 เวลา ' + fmtTime(x.pressAt) : 'ไม่ได้กด 1') + (x.bid ? ' · บิดล่าสุด ' + fmtMoney(x.bid) : ' · ไม่ได้บิด') + '</span></span></label>';
+            });
+            document.getElementById('assign-list').innerHTML = h || '<div class="text-xs text-slate-400 p-2">ไม่พบคนกด 1 หรือคนบิดในรอบนี้ · ค้นหาชื่อด้านล่าง</div>';
+            document.getElementById('assign-search').value = '';
+            document.getElementById('assign-search-list').innerHTML = '';
+            document.getElementById('assign-msg').innerText = '';
+            const first = c[0];
+            document.getElementById('assign-amount').value = first && first.bid ? first.bid : (assignLot.topAmount || '');
+            document.getElementById('assign-modal').classList.remove('hidden');
+        }
+        function closeAssignLot() { document.getElementById('assign-modal').classList.add('hidden'); assignLot = null; }
+        function assignPick(el) {
+            const bid = Number(el.getAttribute('data-bid')) || 0;
+            document.getElementById('assign-amount').value = bid || (assignLot && assignLot.topAmount) || '';
+        }
+        function assignSearch() {
+            const q = document.getElementById('assign-search').value.trim().toLowerCase();
+            const box = document.getElementById('assign-search-list');
+            if(!q) { box.innerHTML = ''; return; }
+            let h = '';
+            commenterList.filter(function(c) { return String(c.name || '').toLowerCase().indexOf(q) >= 0; }).slice(0, 8).forEach(function(c) {
+                h += '<label class="flex items-center gap-2 p-1.5 rounded-lg hover:bg-slate-50 cursor-pointer"><input type="radio" name="assign-who" value="' + escapeHtml(c.userId) + '" data-bid="0" onchange="assignPick(this)"> ' + escapeHtml(c.name || c.userId) + '</label>';
+            });
+            box.innerHTML = h || '<div class="text-[11px] text-slate-400 p-1">ไม่พบชื่อ</div>';
+        }
+        async function saveAssignLot() {
+            if(!assignLot) return;
+            const who = document.querySelector('input[name="assign-who"]:checked');
+            const msg = document.getElementById('assign-msg');
+            if(!who) { msg.className = 'text-xs text-rose-600'; msg.innerText = '❌ กรุณาเลือกผู้ชนะ'; return; }
+            const amount = document.getElementById('assign-amount').value;
+            if(!(Number(amount) > 0)) { msg.className = 'text-xs text-rose-600'; msg.innerText = '❌ กรุณาใส่ยอด'; return; }
+            const btn = document.getElementById('assign-btn');
+            btn.disabled = true; msg.className = 'text-xs text-slate-500'; msg.innerText = '⏳ กำลังบันทึกและส่งข้อความ...';
+            try {
+                const r = await (await fetch(liveUrl('/api/live/auction/assign', '&sid=' + currentLiveId), {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ closeAt: assignLot.closeAt, userId: who.value, amount: amount, send: document.getElementById('assign-send').checked, withPayInfo: document.getElementById('assign-payinfo').checked })
+                })).json();
+                if(!r.success) { msg.className = 'text-xs text-rose-600'; msg.innerText = '❌ ' + r.error; return; }
+                if(r.sendErr) { msg.className = 'text-xs text-amber-700'; msg.innerText = '⚠️ บันทึกยอดแล้ว (ยอดรวม ' + fmtMoney(r.dueAmount) + ') แต่ส่งข้อความไม่สำเร็จ: ' + r.sendErr; loadLiveDetail(false); return; }
+                closeAssignLot();
+                loadLiveDetail(false);
+            } catch(e) { msg.className = 'text-xs text-rose-600'; msg.innerText = '❌ ' + e.message; }
+            finally { btn.disabled = false; }
+        }
         function renderAuctionLots(d) {
+            auctionLotsData = d.auctionLots || [];
             const box = document.getElementById('lv-auction-box');
             const on = !!(d.config && d.config.auctionMode);
             box.classList.toggle('hidden', !on);
@@ -4439,11 +4536,11 @@ app.get('/', (req, res) => {
             (d.auctionLots || []).forEach(function(l) {
                 const w = l.winners || [];
                 const ok = w.length === 1 && w[0].amount === l.topAmount;
-                html += '<tr class="border-b border-amber-100 align-top"><td class="py-1.5 pr-2 text-slate-500 whitespace-nowrap">' + fmtTime(l.closeAt) + '</td>'
+                html += '<tr data-close="' + l.closeAt + '" onclick="openAssignLot(this)" title="คลิกเพื่อกำหนดผู้ชนะและยอดของรอบนี้" class="border-b border-amber-100 align-top cursor-pointer hover:bg-amber-100/60"><td class="py-1.5 pr-2 text-slate-500 whitespace-nowrap">' + fmtTime(l.closeAt) + '</td>'
                     + '<td class="py-1.5 pr-2 text-right font-bold text-slate-800">' + (l.topAmount > 0 ? fmtMoney(l.topAmount) : '-') + '</td>'
                     + '<td class="py-1.5 pr-2">' + (l.startPrice ? '<span class="text-amber-700">🏁 ไม่มีคนบิด · ใช้ราคาเปิด' + (l.topAmount > 0 ? '' : ' (ยังไม่ได้ตั้งราคาเปิด)') + '</span>' : escapeHtml(l.topNames.join(', ')) + (l.topNames.length > 1 ? ' <span class="text-[10px] text-amber-700">(ราคาเท่ากัน)</span>' : '')) + '</td>'
                     + '<td class="py-1.5 pr-2 ' + (w.length ? (ok ? 'text-emerald-700 font-semibold' : 'text-rose-600 font-semibold') : 'text-slate-400') + '">'
-                        + (w.length ? w.map(function(x) { return escapeHtml(x.name) + ' (' + fmtMoney(x.amount) + ')'; }).join(', ') + (ok ? ' ✓' : ' ⚠️') : 'ยังไม่มีคนกด 1') + '</td>'
+                        + (w.length ? w.map(function(x) { return escapeHtml(x.name) + ' (' + fmtMoney(x.amount) + ')' + (x.manual ? ' ✍️' : ''); }).join(', ') + (ok ? ' ✓' : ' ⚠️') : 'ยังไม่มีคนกด 1') + ' <span class="text-[10px] font-normal text-amber-700 underline">✍️ กำหนดผู้ชนะ</span></td>'
                     + '<td class="py-1.5 text-slate-400">' + l.bids + '</td></tr>';
             });
             document.getElementById('lv-auction-lots').innerHTML = html || '<tr><td colspan="5" class="py-2 text-slate-400">ยังไม่มีรอบที่ปิด · เพจคอมเมนต์ ❤️ ในไลฟ์เพื่อปิดรอบประมูล</td></tr>';
@@ -7023,6 +7120,68 @@ app.post('/api/live/finance', checkAuth, (req, res) => {
 });
 
 // 💰 ใส่/แก้ ยอดที่ลูกค้าต้องจ่าย (เทียบกับยอดสลิปรวม)
+// ✍️ แอดมินกำหนดผู้ชนะ + ยอด ของรอบประมูล จากตาราง "ผลประมูลแต่ละรอบ" -> บวกยอด + ส่งข้อความแจ้งยอดเข้าแชท
+app.post('/api/live/auction/assign', checkAuth, async (req, res) => {
+  const ctx = getLiveContext(req, res);
+  if (!ctx) return;
+  const s = ctx.live;
+  if (!s) return res.json({ success: false, error: 'ไม่พบ session นี้' });
+  const b = req.body || {};
+  const lot = Number(b.closeAt) || 0;
+  const uid = String(b.userId || '');
+  const amount = Math.round((parseFloat(String(b.amount || '').replace(/[^0-9.]/g, '')) || 0) * 100) / 100;
+  const c = s.commenters.get(uid);
+  if (!lot || !(s.auctionCloses || []).includes(lot)) return res.json({ success: false, error: 'ไม่พบรอบประมูลนี้' });
+  if (!c) return res.json({ success: false, error: 'ไม่พบลูกค้าคนนี้ใน session' });
+  if (!(amount > 0) || amount > 10000000) return res.json({ success: false, error: 'กรุณาใส่ยอดให้ถูกต้อง' });
+  if (!Array.isArray(c.wins)) c.wins = [];
+  const had = c.wins.find(w => w.lot === lot && !w.dup && w.amount > 0);
+  if (had) return res.json({ success: false, error: (c.name || 'ลูกค้า') + ' มียอดของรอบนี้แล้ว ' + had.amount.toLocaleString('en-US') + ' บาท (แก้ที่ช่อง "ยอดที่ต้องจ่าย" ในตารางรายชื่อ)' });
+  // บวกยอดเข้า "ยอดที่ต้องจ่าย" แบบเดียวกับระบบอัตโนมัติ
+  const prevDue = Number(c.dueAmount) || 0;
+  c.dueExpr = prevDue > 0 ? (c.dueExpr || String(prevDue)) + '+' + amount : '';
+  if (!c.dueExpr) delete c.dueExpr;
+  c.dueAmount = Math.round((prevDue + amount) * 100) / 100;
+  // คำเตือน "รอแอดมินแจ้งยอด" เดิมของคนนี้ ถือว่าตรวจแล้ว
+  c.wins.forEach(w => { if (!(w.amount > 0)) w.ack = true; });
+  c.wins.push({ amount, time: Date.now(), lot, bidTime: 0, lotStart: 0, source: 'manual', dup: false, warning: '', ack: true });
+  if (c.wins.length > 30) c.wins.shift();
+  if (!Array.isArray(c.wonLots)) c.wonLots = [];
+  if (!c.wonLots.includes(lot)) c.wonLots.push(lot);
+  c.lastWinAt = Math.max(c.lastWinAt || 0, lot);
+  // ส่งข้อความแจ้งยอดเข้าแชท
+  let sent = '', sendErr = '';
+  if (b.send !== false) {
+    const cfg = s.config || {};
+    const name = c.name || '';
+    let text = renderReplyText(typeof cfg.auctionText === 'string' && cfg.auctionText.trim() ? cfg.auctionText : '🔨 ยอดประมูล {amount} บาท', name).replace(/\{amount\}/gi, amount.toLocaleString('en-US'));
+    if (b.withPayInfo) {
+      const inbox = renderReplyText(cfg.inboxText || ctx.pageData.config.inboxText || '', name);
+      if (inbox.trim()) text = /\{amount\}/i.test(inbox) ? inbox.replace(/\{amount\}/gi, amount.toLocaleString('en-US')) : text + '\n\n' + inbox;
+    }
+    if (c.dueAmount > amount) text += '\n\n💰 ยอดรวมทั้งหมด ' + c.dueAmount.toLocaleString('en-US') + ' บาท';
+    const psid = c.psid || getPsidMap(ctx.pageData).get(uid) || '';
+    try {
+      if (psid) { await sendMessengerText(ctx.pageData, String(psid), text, { humanAgent: true }); sent = 'chat'; }
+      else {
+        const pc = (c.pendingComments || []).filter(x => Date.now() - x.time < PRIVATE_REPLY_MS);
+        if (!pc.length) throw new Error('ลูกค้ายังไม่มีแชท และไม่มีคอมเมนต์ที่ส่งข้อความได้');
+        const r = await fbPost('https://graph.facebook.com/v19.0/me/messages', { recipient: { comment_id: pc[pc.length - 1].id }, message: { text } }, { access_token: ctx.pageData.config.pageAccessToken });
+        c.pendingComments = c.pendingComments.filter(x => x.id !== pc[pc.length - 1].id);
+        const np = r.data && r.data.recipient_id;
+        if (np) { c.psid = String(np); getPsidMap(ctx.pageData).set(uid, String(np)); }
+        sent = 'comment';
+      }
+      delete c.inboxErr;
+    } catch (e) {
+      sendErr = e.message === 'OUTSIDE_24H' ? 'เกิน 24 ชม.' : graphErrorMessage(e);
+      c.inboxErr = { at: Date.now(), msg: 'แจ้งยอดประมูลไม่สำเร็จ: ' + sendErr };
+    }
+  }
+  console.log('✍️ [Auction] แอดมินกำหนดผู้ชนะ ' + (c.name || uid) + ' ' + amount + (sent ? ' · ส่งแชทแล้ว' : sendErr ? ' · ส่งไม่สำเร็จ ' + sendErr : ''));
+  res.json({ success: true, dueAmount: c.dueAmount, sent, sendErr });
+});
+
 app.post('/api/live/due-amount', checkAuth, (req, res) => {
   const ctx = getLiveContext(req, res);
   if (!ctx) return;
