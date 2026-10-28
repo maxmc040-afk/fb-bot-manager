@@ -360,7 +360,7 @@ function auctionLotsSummary(session) {
     if (w.dup) continue;
     if (!w.lot) { if (w.amount > 0) looseWins.push({ uid, time: w.time, name: c.name || uid, amount: w.amount }); continue; }
     if (!winnersByLot.has(w.lot)) winnersByLot.set(w.lot, []);
-    winnersByLot.get(w.lot).push({ uid, name: c.name || uid, amount: w.amount, manual: w.source === 'manual' });
+    winnersByLot.get(w.lot).push({ uid, time: w.time || 0, name: c.name || uid, amount: w.amount, manual: w.source === 'manual' });
   }
   const startPrice = Number(session.config && session.config.auctionStartPrice) || 0;
   const startIdx = Math.max(0, closes.length - 30); // แสดง 30 รอบล่าสุด
@@ -4494,15 +4494,23 @@ app.get('/', (req, res) => {
             const c = (assignLot.candidates || []).slice();
             // ผู้ชนะที่มียอดแล้ว -> แสดงยอดเดิม ให้แก้ราคาได้
             const wonBy = {};
-            (assignLot.winners || []).forEach(function(w) { if(w.uid) wonBy[w.uid] = w.amount; });
+            const wonAt = {};
+            (assignLot.winners || []).forEach(function(w) { if(w.uid) { wonBy[w.uid] = w.amount; wonAt[w.uid] = w.time || 0; } });
             Object.keys(wonBy).forEach(function(uid) { if(!c.some(function(x) { return x.uid === uid; })) { const w = assignLot.winners.find(function(x) { return x.uid === uid; }); c.unshift({ uid: uid, name: w.name, bid: 0, pressAt: 0 }); } });
-            c.forEach(function(x) { x.won = wonBy[x.uid]; });
+            c.forEach(function(x) { x.won = wonBy[x.uid]; x.wonAt = wonAt[x.uid] || 0; });
             document.getElementById('assign-title').innerText = '✍️ กำหนดผู้ชนะ · รอบปิด ' + fmtTime(assignLot.closeAt) + (assignLot.topAmount > 0 ? ' · ราคาสูงสุด ' + fmtMoney(assignLot.topAmount) : '');
             let h = '';
             c.forEach(function(x, i) {
                 h += '<label class="flex items-center gap-2 p-2 rounded-lg border border-slate-200 hover:bg-amber-50 cursor-pointer"><input type="radio" name="assign-who" value="' + escapeHtml(x.uid) + '" data-bid="' + (x.bid || 0) + '" data-won="' + (x.won || 0) + '" onchange="assignPick(this)"' + (i === 0 ? ' checked' : '') + '>'
-                    + '<span class="flex-1"><b>' + escapeHtml(x.name) + '</b>' + (x.won ? ' <span class="text-[11px] font-semibold text-emerald-700">✔ ยอดรอบนี้ ' + fmtMoney(x.won) + '</span>' : '') + '<span class="block text-[11px] text-slate-500">' + (x.pressAt ? 'กด 1 เวลา ' + fmtTime(x.pressAt) : 'ไม่ได้กด 1') + (x.bid ? ' · บิดล่าสุด ' + fmtMoney(x.bid) : ' · ไม่ได้บิด') + '</span></span></label>';
+                    + '<span class="flex-1"><b>' + escapeHtml(x.name) + '</b>' + (x.won ? ' <span class="text-[11px] font-semibold text-emerald-700">✔ ยอดรอบนี้ ' + fmtMoney(x.won) + '</span> <button type="button" data-uid="' + escapeHtml(x.uid) + '" data-time="' + (x.wonAt || 0) + '" onclick="event.preventDefault(); event.stopPropagation(); unassignLot(this)" class="ml-1 px-1.5 py-0.5 text-[10px] font-semibold rounded border border-rose-300 text-rose-600 hover:bg-rose-50">🗑️ ลบ</button>' : '') + '<span class="block text-[11px] text-slate-500">' + (x.pressAt ? 'กด 1 เวลา ' + fmtTime(x.pressAt) : 'ไม่ได้กด 1') + (x.bid ? ' · บิดล่าสุด ' + fmtMoney(x.bid) : ' · ไม่ได้บิด') + '</span></span></label>';
             });
+            // มีผู้ชนะ 2 คนขึ้นไปในรอบเดียว -> ปุ่มลบคนเก่า เหลือคนล่าสุด
+            const ws = c.filter(function(x) { return x.won; });
+            if(ws.length >= 2) {
+                const latest = ws.reduce(function(m, x) { return x.wonAt > m.wonAt ? x : m; }, ws[0]);
+                h = '<button type="button" onclick="keepLatestWinner()" class="w-full mb-1 px-2 py-1.5 text-xs font-semibold rounded-lg bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100">🧹 ลบคนเก่า เหลือคนล่าสุด: ' + escapeHtml(latest.name) + ' (' + fmtMoney(latest.won) + ')</button>' + h;
+            }
+            assignWinners = ws;
             document.getElementById('assign-list').innerHTML = h || '<div class="text-xs text-slate-400 p-2">ไม่พบคนกด 1 หรือคนบิดในรอบนี้ · ค้นหาชื่อด้านล่าง</div>';
             document.getElementById('assign-search').value = '';
             document.getElementById('assign-search-list').innerHTML = '';
@@ -4510,6 +4518,42 @@ app.get('/', (req, res) => {
             document.getElementById('assign-modal').classList.remove('hidden');
             const firstEl = document.querySelector('input[name="assign-who"]:checked');
             if(firstEl) assignPick(firstEl); else document.getElementById('assign-amount').value = assignLot.topAmount || '';
+        }
+        let assignWinners = [];
+        async function postUnassign(uid, time) {
+            return (await fetch(liveUrl('/api/live/auction/unassign', '&sid=' + currentLiveId), {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ closeAt: assignLot.closeAt, userId: uid, time: time })
+            })).json();
+        }
+        async function afterUnassign(text) {
+            const msg = document.getElementById('assign-msg');
+            msg.className = 'text-xs font-semibold text-emerald-700'; msg.innerText = text;
+            const close = assignLot.closeAt;
+            await loadLiveDetail(false);
+            const tr = document.querySelector('#lv-auction-lots tr[data-close="' + close + '"]');
+            if(tr) { openAssignLot(tr); document.getElementById('assign-msg').className = 'text-xs font-semibold text-emerald-700'; document.getElementById('assign-msg').innerText = text; }
+        }
+        async function unassignLot(btn) {
+            if(!assignLot) return;
+            const uid = btn.getAttribute('data-uid');
+            const x = assignWinners.find(function(w) { return w.uid === uid; }) || {};
+            if(!confirm('ลบ ' + (x.name || '') + ' ออกจากรอบนี้ และหักยอด ' + fmtMoney(x.won || 0) + ' บาท ออกจาก "ยอดที่ต้องจ่าย"?' + NL + '(ระบบไม่ส่งข้อความหาลูกค้า)')) return;
+            const r = await postUnassign(uid, Number(btn.getAttribute('data-time')) || 0);
+            if(!r.success) return alert('❌ ' + r.error);
+            afterUnassign('🗑️ ลบ ' + r.name + ' แล้ว · ยอดที่ต้องจ่ายตอนนี้: ' + (r.dueExpr ? r.dueExpr.split('+').join(' + ') + ' = ' : '') + fmtMoney(r.dueAmount) + ' ฿');
+        }
+        async function keepLatestWinner() {
+            if(!assignLot || assignWinners.length < 2) return;
+            const latest = assignWinners.reduce(function(m, x) { return x.wonAt > m.wonAt ? x : m; }, assignWinners[0]);
+            const old = assignWinners.filter(function(x) { return x !== latest; });
+            if(!confirm('เก็บ ' + latest.name + ' (' + fmtMoney(latest.won) + ') ไว้ และลบ ' + old.map(function(x) { return x.name + ' (' + fmtMoney(x.won) + ')'; }).join(', ') + ' ออกจากรอบนี้ พร้อมหักยอดออกจาก "ยอดที่ต้องจ่าย"?')) return;
+            const done = [];
+            for(const x of old) {
+                const r = await postUnassign(x.uid, x.wonAt || 0);
+                if(!r.success) return alert('❌ ' + x.name + ': ' + r.error);
+                done.push(r.name + ' (ยอดตอนนี้ ' + fmtMoney(r.dueAmount) + ' ฿)');
+            }
+            afterUnassign('🧹 ลบแล้ว: ' + done.join(', ') + ' · เหลือ ' + latest.name);
         }
         function closeAssignLot() { document.getElementById('assign-modal').classList.add('hidden'); assignLot = null; }
         function assignPick(el) {
@@ -7220,6 +7264,38 @@ app.post('/api/live/auction/assign', checkAuth, async (req, res) => {
   }
   console.log('✍️ [Auction] แอดมิน' + (edited ? 'แก้ราคา ' + oldAmount + ' -> ' : 'กำหนดผู้ชนะ ') + (c.name || uid) + ' ' + amount + (sent ? ' · ส่งแชทแล้ว' : sendErr ? ' · ส่งไม่สำเร็จ ' + sendErr : ''));
   res.json({ success: true, dueAmount: c.dueAmount, sent, sendErr, edited, oldAmount });
+});
+
+// 🗑️ ลบผู้ชนะออกจากรอบประมูล + หักยอดของรอบนั้นออกจาก "ยอดที่ต้องจ่าย" ของคนนั้น
+app.post('/api/live/auction/unassign', checkAuth, (req, res) => {
+  const ctx = getLiveContext(req, res);
+  if (!ctx) return;
+  const s = ctx.live;
+  if (!s) return res.json({ success: false, error: 'ไม่พบ session นี้' });
+  const b = req.body || {};
+  const lot = Number(b.closeAt) || 0;
+  const time = Number(b.time) || 0;
+  const c = s.commenters.get(String(b.userId || ''));
+  if (!c || !Array.isArray(c.wins)) return res.json({ success: false, error: 'ไม่พบลูกค้าคนนี้ใน session' });
+  const hit = c.wins.filter(w => !w.dup && w.amount > 0 && ((lot && w.lot === lot) || (time && w.time === time)));
+  if (!hit.length) return res.json({ success: false, error: 'ไม่พบยอดของคนนี้ในรอบนี้' });
+  let removed = 0;
+  for (const w of hit) {
+    removed += w.amount;
+    // หักยอดออกจากสูตร (ตัวเลขที่ตรงกับยอดของรอบนี้ ตัวท้ายสุด)
+    if (c.dueExpr) {
+      const terms = String(c.dueExpr).split('+');
+      for (let i = terms.length - 1; i >= 0; i--) if ((parseFloat(terms[i].replace(/,/g, '')) || 0) === w.amount) { terms.splice(i, 1); break; }
+      c.dueExpr = terms.join('+');
+    }
+    c.dueAmount = Math.max(0, Math.round(((Number(c.dueAmount) || 0) - w.amount) * 100) / 100);
+  }
+  c.wins = c.wins.filter(w => !hit.includes(w));
+  if (lot && Array.isArray(c.wonLots)) c.wonLots = c.wonLots.filter(x => x !== lot);
+  if (!(c.dueAmount > 0)) { delete c.dueAmount; delete c.dueExpr; }
+  else if (!c.dueExpr || String(c.dueExpr).split('+').length < 2) delete c.dueExpr;
+  console.log('🗑️ [Auction] ลบ ' + (c.name || b.userId) + ' ออกจากรอบ · หักยอด ' + removed);
+  res.json({ success: true, removed, dueAmount: c.dueAmount || 0, dueExpr: c.dueExpr || '', name: c.name || '' });
 });
 
 app.post('/api/live/due-amount', checkAuth, (req, res) => {
