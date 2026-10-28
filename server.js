@@ -178,22 +178,24 @@ function isAuctionCloseSignal(text, cfg) {
 }
 
 // 🏁 ไม่มีใครบิดเลย -> ใช้ "ราคาเปิดประมูล" ที่ตั้งไว้ใน session เป็นยอดจบ
-function auctionStartPriceFor(session, at, lotClose, prevClose) {
+function auctionStartPriceFor(session, at, lotClose, prevClose, uid) {
   const def = Number(session.config && session.config.auctionStartPrice) || 0;
   if (!(def > 0)) return null;
   const log = session.bidLog || [];
   const noBids = (from, to) => !log.some(b => b.time > from && b.time <= to);
   const warning = 'ไม่มีคนบิด ใช้ราคาเปิด ' + def.toLocaleString('en-US');
   // รอบที่ปิดล่าสุดมีผู้ชนะกด 1 ไปแล้วหรือยัง
-  let lotWon = false;
-  if (lotClose) for (const x of session.commenters.values()) if (Array.isArray(x.wonLots) && x.wonLots.includes(lotClose)) { lotWon = true; break; }
+  let lotWon = false, wonByOther = false;
+  if (lotClose) for (const [id, x] of session.commenters) if (Array.isArray(x.wonLots) && x.wonLots.includes(lotClose)) { lotWon = true; if (id !== uid) wonByOther = true; }
   // รอบที่ปิดแล้ว (❤️/❌) ไม่มีใครบิดเลย และยังไม่มีคนกด 1
   if (lotClose && !lotWon && noBids(prevClose || 0, lotClose)) return { amount: def, bidTime: 0, lot: lotClose, lotStart: prevClose || 0, source: 'start', warning };
   // ยังไม่มีสัญญาณปิดเลย และไม่มีใครบิดใน 15 นาทีที่ผ่านมา
   if (!lotClose && noBids(at - 15 * 60000, at)) return { amount: def, bidTime: 0, lot: 0, lotStart: at - 15 * 60000, source: 'start', warning };
   // องค์ใหม่ (หลังสัญญาณปิดล่าสุด) ยังไม่มีใครบิด และองค์ก่อนมีผู้ชนะกด 1 ไปแล้ว -> คนที่กด 1 ตอนนี้คือผู้ชนะองค์ใหม่ที่ราคาเปิด
   if (lotClose && noBids(lotClose, at)) {
-    if (lotWon) return { amount: def, bidTime: 0, lot: 0, lotStart: lotClose, source: 'start', warning: warning + ' (เพจยังไม่ส่งสัญญาณปิดองค์นี้)' };
+    if (wonByOther) return { amount: def, bidTime: 0, lot: 0, lotStart: lotClose, source: 'start', warning: warning + ' (เพจยังไม่ส่งสัญญาณปิดองค์นี้)' };
+    // คนเดิมที่ชนะรอบนี้ไปแล้ว กด 1 ซ้ำ (ยังไม่มีใครบิดองค์ใหม่) -> ถือว่ากดซ้ำรอบเดิม
+    if (lotWon) return { amount: def, bidTime: 0, lot: lotClose, lotStart: prevClose || 0, source: 'start', warning };
   }
   return null;
 }
@@ -202,7 +204,21 @@ function auctionStartPriceFor(session, at, lotClose, prevClose) {
 // มีสัญญาณปิด (หัวใจของเพจ): รอบประมูล = ราคาที่บิดระหว่างสัญญาณปิดครั้งก่อน ถึงสัญญาณปิดล่าสุดก่อนกด 1
 //   -> ยอด = ราคาล่าสุดที่คนกด 1 บิดในรอบนั้น ก่อนสัญญาณปิด (ราคาเท่ากัน ให้คนกด 1 เป็นผู้ชนะ ตามที่แอดมินประกาศหน้าไลฟ์)
 // ไม่มีสัญญาณปิด: ยอด = ราคาล่าสุดที่คนนั้นบิด หลังการกด 1 ครั้งก่อนของเขา
+// 🛡️ กันบวกยอดซ้ำ: ลูกค้ากด 1 ซ้ำเกิน 1 นาที สำหรับองค์เดิมที่ยังไม่มีสัญญาณปิด (ราคาเดิม / ราคาเปิดเดิม)
 function auctionAmountFor(session, uid, at) {
+  const r = auctionAmountForRaw(session, uid, at);
+  const c = session.commenters.get(uid);
+  if (!r || r.dupLot || r.lot || !c || !Array.isArray(c.wins)) return r;
+  const closes = (session.auctionCloses || []).filter(t => t <= at);
+  const lotClose = closes.length ? closes[closes.length - 1] : 0;
+  const log = session.bidLog || [];
+  const prior = c.wins.find(w => !w.dup && !w.lot && w.amount > 0 && w.time < at && (
+    (r.bidTime && w.bidTime === r.bidTime) ||
+    (r.source === 'start' && w.source === 'start' && w.time > lotClose && !log.some(b => b.time > w.time && b.time <= at))));
+  if (prior) { r.dupLot = true; r.warning = 'กด 1 ซ้ำในองค์เดิม (ไม่บวกยอดซ้ำ)'; }
+  return r;
+}
+function auctionAmountForRaw(session, uid, at) {
   const c = session.commenters.get(uid);
   if (!c) return null;
   const log = session.bidLog || [];
@@ -265,7 +281,7 @@ function auctionAmountFor(session, uid, at) {
       if (tp) return topWin(tp, 0, from);
     }
     // 🏁 ไม่มีใครบิดเลย -> ใช้ราคาเปิดประมูล
-    const sp = auctionStartPriceFor(session, at, lotClose, closes.length > 1 ? closes[closes.length - 2] : 0);
+    const sp = auctionStartPriceFor(session, at, lotClose, closes.length > 1 ? closes[closes.length - 2] : 0, uid);
     if (sp) sp.dupLot = !!(sp.lot && Array.isArray(c.wonLots) && c.wonLots.includes(sp.lot));
     return sp;
   }
@@ -342,7 +358,7 @@ function auctionLotsSummary(session) {
   const looseWins = []; // กด 1 ก่อนเพจส่งสัญญาณปิด (เช่น องค์ที่ไม่มีใครบิด) -> จัดเข้ารอบตามเวลาที่กด
   for (const [uid, c] of session.commenters) for (const w of (c.wins || [])) {
     if (w.dup) continue;
-    if (!w.lot) { if (w.source === 'start' && w.amount > 0) looseWins.push({ uid, time: w.time, name: c.name || uid, amount: w.amount }); continue; }
+    if (!w.lot) { if (w.amount > 0) looseWins.push({ uid, time: w.time, name: c.name || uid, amount: w.amount }); continue; }
     if (!winnersByLot.has(w.lot)) winnersByLot.set(w.lot, []);
     winnersByLot.get(w.lot).push({ uid, name: c.name || uid, amount: w.amount, manual: w.source === 'manual' });
   }
@@ -6522,10 +6538,10 @@ app.post('/api/labels/test', checkAuth, async (req, res) => {
   const pageData = usersDB[req.userId]?.pages[req.query.pageId];
   if (!pageData) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
   const labelId = String((req.body || {}).labelId || '');
-  const psid = String(req.body.psid || '').trim();
+  const psid = String((req.body || {}).psid || '').trim();
   if (!labelId || !psid) return res.json({ success: false, error: 'กรุณาเลือกบัญชีทดสอบ' });
   try {
-    await setInboxLabelById(pageData, psid, labelId, !!req.body.remove);
+    await setInboxLabelById(pageData, psid, labelId, !!(req.body || {}).remove);
     res.json({ success: true });
   } catch (e) {
     res.json({ success: false, error: graphErrorMessage(e) });
