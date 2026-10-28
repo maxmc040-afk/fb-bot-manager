@@ -7159,7 +7159,6 @@ app.post('/api/live/auction/assign', checkAuth, async (req, res) => {
       const inbox = renderReplyText(cfg.inboxText || ctx.pageData.config.inboxText || '', name);
       if (inbox.trim()) text = /\{amount\}/i.test(inbox) ? inbox.replace(/\{amount\}/gi, amount.toLocaleString('en-US')) : text + '\n\n' + inbox;
     }
-    if (c.dueAmount > amount) text += '\n\n💰 ยอดรวมทั้งหมด ' + c.dueAmount.toLocaleString('en-US') + ' บาท';
     const psid = c.psid || getPsidMap(ctx.pageData).get(uid) || '';
     try {
       if (psid) { await sendMessengerText(ctx.pageData, String(psid), text, { humanAgent: true }); sent = 'chat'; }
