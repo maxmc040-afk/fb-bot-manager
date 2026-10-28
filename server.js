@@ -3221,7 +3221,7 @@ app.get('/', (req, res) => {
                     <div>
                         <label class="text-xs font-semibold text-slate-600 block mb-1">ข้อความที่จะส่ง</label>
                         <textarea id="remind-text" rows="7" oninput="remindTextChanged()" class="w-full p-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-amber-500"></textarea>
-                        <p class="text-[11px] text-slate-500 mt-1"><b>{name}</b> ชื่อลูกค้า · <b>{due}</b> ยอดที่ต้องโอน · <b>{paid}</b> โอนแล้ว (คนที่ยังไม่โอนเลย ระบบตัดบรรทัดนี้ออกให้) · <b>{short}</b> คงเหลือ · <b>{items}</b> รายการยอด เช่น 330+200+300 · หลายแบบคั่นด้วยบรรทัด <b>---</b> ระบบสุ่มส่ง</p>
+                        <p class="text-[11px] text-slate-500 mt-1"><b>{name}</b> ชื่อลูกค้า · <b>{due}</b> ยอดที่ต้องโอน (มีหลายรายการจะขึ้นแบบ 240 + 20 + 50 = 310) · <b>{paid}</b> โอนแล้ว (คนที่ยังไม่โอนเลย ระบบตัดบรรทัดนี้ออกให้) · <b>{short}</b> คงเหลือ · <b>{items}</b> รายการยอด เช่น 330+200+300 · หลายแบบคั่นด้วยบรรทัด <b>---</b> ระบบสุ่มส่ง</p>
                         <p class="text-[11px] text-amber-700 mt-0.5">💡 ใส่เลขบัญชีแบบมีขีด เช่น 199-2-94664-0 (กัน Messenger สร้าง "คำขอโอนเงิน" อัตโนมัติ)</p>
                     </div>
                     <div class="text-xs font-semibold text-slate-600" id="remind-summary"></div>
@@ -8267,7 +8267,10 @@ function renderRemindText(tpl, info) {
   t = t.split(/\r?\n/).filter(line => !(only(line, 'paid') && !(info.paid > 0)) && !(only(line, 'items') && !info.items)).join('\n');
   if (!info.items) t = t.replace(/[ \t]*[(\[]\s*\{items\}\s*[)\]]/gi, '');
   t = renderReplyText(t, info.name);
-  return t.replace(/\{due\}/gi, fmtBaht(info.due)).replace(/\{paid\}/gi, fmtBaht(info.paid))
+  // {due} แสดงรายละเอียดยอดด้วย ถ้ามีหลายรายการ เช่น 240 + 20 + 50 = 310
+  const parts = String(info.items || '').split('+').map(x => x.trim()).filter(Boolean);
+  const dueText = parts.length > 1 ? parts.map(x => fmtBaht(parseFloat(x.replace(/,/g, '')) || 0)).join(' + ') + ' = ' + fmtBaht(info.due) : fmtBaht(info.due);
+  return t.replace(/\{due\}/gi, dueText).replace(/\{paid\}/gi, fmtBaht(info.paid))
     .replace(/\{short\}/gi, fmtBaht(info.short)).replace(/\{items\}/gi, info.items || '').trim();
 }
 function remindCandidates(pageData, s, userIds) {
