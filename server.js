@@ -2838,6 +2838,7 @@ app.get('/', (req, res) => {
                                         <input type="number" id="lv-auction-start" min="0" step="10" class="mt-1 w-full p-2 text-sm font-normal border border-amber-300 rounded-lg bg-white focus:outline-none focus:border-amber-500" placeholder="เช่น 180 (เว้นว่าง = ส่งข้อความรอแอดมินแจ้งยอด)">
                                         <span class="block text-[11px] font-normal text-slate-500 mt-0.5">ไม่มีใครบิดในรอบนั้น (ระหว่างสัญญาณปิดครั้งก่อน ถึงครั้งนี้) แล้วมีคนกด 1 → ใช้ราคานี้เป็นยอดจบ · เปลี่ยนราคาได้ทุกองค์ก่อนเปิดประมูล</span>
                                     </label>
+                                    <label class="flex items-start gap-2 text-xs font-semibold text-amber-800 cursor-pointer"><input type="checkbox" id="lv-auction-total" class="mt-0.5 w-4 h-4 rounded"> <span>💰 แจ้งยอดรวมใต้ยอดประมูล (เมื่อลูกค้าชนะตั้งแต่ 2 รายการ)<span class="block text-[11px] font-normal text-slate-500">เช่น "🔨 ยอดประมูล 200 บาท" ตามด้วย "💰 ยอดรวม 370+200 = 570 บาท" · ปิด = แจ้งแค่ยอดประมูลของรายการนั้น</span></span></label>
                                     <label class="block text-xs font-semibold text-amber-800">❔ ข้อความเมื่อหายอดไม่เจอ (กด 1 แต่ไม่ได้บิด)
                                         <input type="text" id="lv-auction-nobid" class="mt-1 w-full p-2 text-sm font-normal border border-amber-300 rounded-lg bg-white focus:outline-none focus:border-amber-500" placeholder="รอแอดมินแจ้งยอด">
                                         <span class="block text-[11px] font-normal text-slate-500 mt-0.5">ใช้แทนตำแหน่ง "{amount} บาท" เช่น "🔨 ยอดประมูล รอแอดมินแจ้งยอด"</span>
@@ -4106,6 +4107,7 @@ app.get('/', (req, res) => {
             document.getElementById('lv-auction-text').value = typeof liveCfg.auctionText === 'string' ? liveCfg.auctionText : '🔨 ยอดประมูล {amount} บาท';
             document.getElementById('lv-auction-nobid').value = liveCfg.auctionNoBidText || 'รอแอดมินแจ้งยอด';
             document.getElementById('lv-auction-start').value = Number(liveCfg.auctionStartPrice) > 0 ? liveCfg.auctionStartPrice : '';
+            document.getElementById('lv-auction-total').checked = liveCfg.auctionShowTotal !== false;
             document.getElementById('lv-auction-hearts').checked = liveCfg.auctionCloseHearts !== false;
             document.getElementById('lv-auction-words').value = (liveCfg.auctionCloseWords || []).join(', ');
             if (!Array.isArray(liveCfg.keywordLabels)) liveCfg.keywordLabels = [];
@@ -4941,7 +4943,8 @@ app.get('/', (req, res) => {
                 auctionCloseHearts: document.getElementById('lv-auction-hearts').checked,
                 auctionCloseWords: document.getElementById('lv-auction-words').value.split(',').map(function(w) { return w.trim(); }).filter(Boolean),
                 auctionNoBidText: document.getElementById('lv-auction-nobid').value,
-                auctionStartPrice: document.getElementById('lv-auction-start').value
+                auctionStartPrice: document.getElementById('lv-auction-start').value,
+                auctionShowTotal: document.getElementById('lv-auction-total').checked
             };
             const res = await fetch(liveUrl('/api/live/config', '&sid=' + currentLiveId), {
                 method: 'POST',
@@ -7137,6 +7140,7 @@ app.post('/api/live/create', checkAuth, (req, res) => {
       auctionMode: !!c.auctionMode,
       auctionNoBidText: c.auctionNoBidText || 'รอแอดมินแจ้งยอด',
       auctionStartPrice: Number(c.auctionStartPrice) || 0,
+      auctionShowTotal: c.auctionShowTotal !== false,
       auctionText: typeof c.auctionText === 'string' ? c.auctionText : '🔨 ยอดประมูล {amount} บาท',
       auctionCloseHearts: c.auctionCloseHearts !== false,
       auctionCloseWords: Array.isArray(c.auctionCloseWords) ? c.auctionCloseWords.slice() : []
@@ -7423,6 +7427,7 @@ app.post('/api/live/config', checkAuth, (req, res) => {
     ctx.pageData.config.auctionCloseWords = s.config.auctionCloseWords;
   }
   if (typeof b.auctionText === 'string') { s.config.auctionText = b.auctionText.slice(0, 1000); ctx.pageData.config.auctionText = s.config.auctionText; }
+  if (typeof b.auctionShowTotal === 'boolean') { s.config.auctionShowTotal = b.auctionShowTotal; ctx.pageData.config.auctionShowTotal = b.auctionShowTotal; }
   if (b.auctionStartPrice !== undefined) {
     const sp = parseInt(String(b.auctionStartPrice).replace(/[^0-9]/g, ''), 10) || 0;
     s.config.auctionStartPrice = sp > 0 && sp <= 10000000 ? sp : 0;
@@ -8956,7 +8961,7 @@ app.post('/webhook', async (req, res) => {
                       c.dueAmount = Math.round((prevDue + win.amount) * 100) / 100;
                       if (!c.dueExpr) delete c.dueExpr;
                       // 💰 มีหลายรายการ -> เพิ่มบรรทัดยอดรวมใต้บรรทัดยอดประมูล เช่น "💰 ยอดรวม 370+200 = 570 บาท"
-                      if (c.dueExpr && inboxMsg) {
+                      if (c.dueExpr && inboxMsg && liveSession.config.auctionShowTotal !== false) {
                         const fmtN = (n) => (Math.round((Number(n) || 0) * 100) / 100).toLocaleString('en-US', { maximumFractionDigits: 2 });
                         const totalLine = '💰 ยอดรวม ' + String(c.dueExpr).split('+').map(x => fmtN(parseFloat(x.replace(/,/g, '')) || 0)).join('+') + ' = ' + fmtN(c.dueAmount) + ' บาท';
                         const amountText = Number(win.amount).toLocaleString('en-US');
