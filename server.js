@@ -209,6 +209,12 @@ function auctionAmountFor(session, uid, at) {
   const r = auctionAmountForRaw(session, uid, at);
   // ⏳ กด 1 ก่อนสัญญาณปิด (องค์ที่ยังไม่ได้ส่ง ❤️/❌) -> ไม่เดายอด ให้ "รอแอดมินแจ้งยอด"
   if (r && !r.lot) return { amount: 0, waitAdmin: true, lot: 0, warning: 'กด 1 ก่อนสัญญาณปิด (❤️/❌) · รอแอดมินแจ้งยอด' };
+  // 🥇 รอบนี้มีคนอื่นกด 1 ชนะไปก่อนแล้ว -> คนที่กดทีหลังไม่ได้ยอดอัตโนมัติ ให้ "รอแอดมินแจ้งยอด"
+  if (r && r.lot && !r.dupLot) {
+    const firsts = [];
+    for (const [id, x] of session.commenters) if (id !== uid && Array.isArray(x.wonLots) && x.wonLots.includes(r.lot)) firsts.push(x.name || id);
+    if (firsts.length) return { amount: 0, waitAdmin: true, lot: 0, warning: 'รอบนี้ ' + firsts.slice(0, 3).join(', ') + ' กด 1 ชนะไปก่อนแล้ว · รอแอดมินแจ้งยอด' };
+  }
   const c = session.commenters.get(uid);
   if (!r || r.dupLot || r.lot || !c || !Array.isArray(c.wins)) return r;
   const closes = (session.auctionCloses || []).filter(t => t <= at);
