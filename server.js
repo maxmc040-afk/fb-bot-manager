@@ -8951,6 +8951,16 @@ app.post('/webhook', async (req, res) => {
                       c.dueExpr = prevDue > 0 ? (c.dueExpr || String(prevDue)) + '+' + win.amount : '';
                       c.dueAmount = Math.round((prevDue + win.amount) * 100) / 100;
                       if (!c.dueExpr) delete c.dueExpr;
+                      // 💰 มีหลายรายการ -> เพิ่มบรรทัดยอดรวมใต้บรรทัดยอดประมูล เช่น "💰 ยอดรวม 370+200 = 570 บาท"
+                      if (c.dueExpr && inboxMsg) {
+                        const fmtN = (n) => (Math.round((Number(n) || 0) * 100) / 100).toLocaleString('en-US', { maximumFractionDigits: 2 });
+                        const totalLine = '💰 ยอดรวม ' + String(c.dueExpr).split('+').map(x => fmtN(parseFloat(x.replace(/,/g, '')) || 0)).join('+') + ' = ' + fmtN(c.dueAmount) + ' บาท';
+                        const amountText = Number(win.amount).toLocaleString('en-US');
+                        const lines = inboxMsg.split('\n');
+                        const idx = lines.findIndex(l => l.includes(amountText));
+                        if (idx >= 0) lines.splice(idx + 1, 0, totalLine); else lines.unshift(totalLine);
+                        inboxMsg = lines.join('\n');
+                      }
                     }
                   }
                   // กด 1 ซ้ำในรอบเดิม: ไม่ส่งข้อความซ้ำ
