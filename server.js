@@ -207,6 +207,8 @@ function auctionStartPriceFor(session, at, lotClose, prevClose, uid) {
 // 🛡️ กันบวกยอดซ้ำ: ลูกค้ากด 1 ซ้ำเกิน 1 นาที สำหรับองค์เดิมที่ยังไม่มีสัญญาณปิด (ราคาเดิม / ราคาเปิดเดิม)
 function auctionAmountFor(session, uid, at) {
   const r = auctionAmountForRaw(session, uid, at);
+  // ⏳ กด 1 ก่อนสัญญาณปิด (องค์ที่ยังไม่ได้ส่ง ❤️/❌) -> ไม่เดายอด ให้ "รอแอดมินแจ้งยอด"
+  if (r && !r.lot) return { amount: 0, waitAdmin: true, lot: 0, warning: 'กด 1 ก่อนสัญญาณปิด (❤️/❌) · รอแอดมินแจ้งยอด' };
   const c = session.commenters.get(uid);
   if (!r || r.dupLot || r.lot || !c || !Array.isArray(c.wins)) return r;
   const closes = (session.auctionCloses || []).filter(t => t <= at);
@@ -8905,6 +8907,8 @@ app.post('/webhook', async (req, res) => {
                   catch (e) { console.error('⚠️ [Auction] ดึงคอมเมนต์จาก Facebook ไม่สำเร็จ', graphErrorMessage(e)); }
                   const c = liveSession.commenters.get(senderId);
                   let win = auctionAmountFor(liveSession, senderId, commentAt);
+                  let waitWarn = '';
+                  if (win && win.waitAdmin) { waitWarn = win.warning; win = null; }
                   // ลูกค้ากด 1 ซ้ำภายใน 1 นาที หลังกด 1 ครั้งแรก -> ถือเป็นคอมเมนต์ซ้ำ ไม่ส่งข้อความ/ไม่บวกยอด
                   // (มีสัญญาณปิดรอบใหม่คั่นระหว่าง 2 ครั้ง = ชนะคนละองค์ ไม่ถือว่าซ้ำ)
                   const newLotBetween = c && c.lastWinAt && (liveSession.auctionCloses || []).some(t => t > c.lastWinAt && t <= commentAt);
@@ -8941,7 +8945,7 @@ app.post('/webhook', async (req, res) => {
                   }
                   if (c) {
                     if (!Array.isArray(c.wins)) c.wins = [];
-                    c.wins.push({ amount: win ? win.amount : 0, time: commentAt, lot: win ? win.lot : 0, bidTime: win ? win.bidTime : 0, lotStart: win ? win.lotStart || 0 : 0, source: win ? win.source : '', dup: !!(win && win.dupLot), warning: win ? win.warning : (nearWarn || 'กด 1 แต่ไม่พบราคาที่บิด (ลงท้ายด้วย 0)'), commentId });
+                    c.wins.push({ amount: win ? win.amount : 0, time: commentAt, lot: win ? win.lot : 0, bidTime: win ? win.bidTime : 0, lotStart: win ? win.lotStart || 0 : 0, source: win ? win.source : '', dup: !!(win && win.dupLot), warning: win ? win.warning : (nearWarn || waitWarn || 'กด 1 แต่ไม่พบราคาที่บิด (ลงท้ายด้วย 0)'), commentId });
                     if (c.wins.length > 30) c.wins.shift();
                     c.lastWinAt = commentAt;
                     if (win && win.lot) { if (!Array.isArray(c.wonLots)) c.wonLots = []; if (!c.wonLots.includes(win.lot)) c.wonLots.push(win.lot); if (c.wonLots.length > 100) c.wonLots.shift(); }
