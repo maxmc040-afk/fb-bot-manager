@@ -8902,8 +8902,10 @@ app.post('/webhook', async (req, res) => {
                   if (win && win.waitAdmin) { waitWarn = win.warning; win = null; }
                   // ลูกค้ากด 1 ซ้ำภายใน 1 นาที หลังกด 1 ครั้งแรก -> ถือเป็นคอมเมนต์ซ้ำ ไม่ส่งข้อความ/ไม่บวกยอด
                   // (มีสัญญาณปิดรอบใหม่คั่นระหว่าง 2 ครั้ง = ชนะคนละองค์ ไม่ถือว่าซ้ำ)
-                  const newLotBetween = c && c.lastWinAt && (liveSession.auctionCloses || []).some(t => t > c.lastWinAt && t <= commentAt);
-                  if (c && c.lastWinAt && commentAt >= c.lastWinAt && commentAt - c.lastWinAt <= 60000 && !newLotBetween) {
+                  // (ใช้เวลากด 1 ครั้งล่าสุด ไม่ว่าครั้งนั้นจะได้ยอดหรือได้ "รอแอดมิน")
+                  const lastPress = c ? (c.lastPressAt || c.lastWinAt || 0) : 0;
+                  const newLotBetween = c && lastPress && (liveSession.auctionCloses || []).some(t => t > lastPress && t <= commentAt);
+                  if (c && lastPress && commentAt >= lastPress && commentAt - lastPress <= 60000 && !newLotBetween) {
                     c.dupPresses = (c.dupPresses || 0) + 1;
                     console.log('🔁 [Auction] ' + customerName + ' กด 1 ซ้ำ (ข้าม)');
                     return;
@@ -8938,7 +8940,13 @@ app.post('/webhook', async (req, res) => {
                     if (!Array.isArray(c.wins)) c.wins = [];
                     c.wins.push({ amount: win ? win.amount : 0, time: commentAt, lot: win ? win.lot : 0, bidTime: win ? win.bidTime : 0, lotStart: win ? win.lotStart || 0 : 0, source: win ? win.source : '', dup: !!(win && win.dupLot), warning: win ? win.warning : (nearWarn || waitWarn || 'กด 1 แต่ไม่พบราคาที่บิด (ลงท้ายด้วย 0)'), commentId });
                     if (c.wins.length > 30) c.wins.shift();
-                    c.lastWinAt = commentAt;
+                    c.lastPressAt = commentAt;
+                    // ⏳ กด 1 ก่อนสัญญาณปิด / รอแอดมิน = ไม่นับเป็นการชนะ (ไม่ตัดช่วงราคาที่บิดไว้ของรอบนี้)
+                    if (win && win.amount > 0 && !win.dupLot) {
+                      c.lastWinAt = commentAt;
+                      // ชนะจริงแล้ว -> คำเตือน "กด 1 ก่อนสัญญาณปิด" ของรอบเดียวกันไม่ต้องแสดง
+                      c.wins.forEach(w => { if (!(w.amount > 0) && w.time >= (win.lotStart || 0) && w.time < commentAt) w.ack = true; });
+                    }
                     if (win && win.lot) { if (!Array.isArray(c.wonLots)) c.wonLots = []; if (!c.wonLots.includes(win.lot)) c.wonLots.push(win.lot); if (c.wonLots.length > 100) c.wonLots.shift(); }
                     // 💰 บวกยอดประมูลเข้า "ยอดที่ต้องจ่าย" อัตโนมัติ (เช่น 380+1500)
                     if (win && win.amount > 0 && !win.dupLot) {
