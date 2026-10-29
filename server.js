@@ -8967,7 +8967,16 @@ app.post('/webhook', async (req, res) => {
                         const amountText = Number(win.amount).toLocaleString('en-US');
                         const lines = inboxMsg.split('\n');
                         const idx = lines.findIndex(l => l.includes(amountText));
-                        if (idx >= 0) lines.splice(idx + 1, 0, totalLine); else lines.unshift(totalLine);
+                        // หักยอดที่ลูกค้าโอนมาแล้ว -> บอกยอดที่ต้องโอนเพิ่ม
+                        const add = [totalLine];
+                        let paidNow = 0;
+                        try { paidNow = Math.round((paymentStatus(pageDataRef, liveSession, senderId, c.psid || getPsidMap(pageDataRef).get(senderId)).paidTotal || 0) * 100) / 100; } catch (e) {}
+                        if (paidNow > 0) {
+                          add.push('✅ โอนแล้ว ' + fmtN(paidNow) + ' บาท');
+                          const left = Math.round((c.dueAmount - paidNow) * 100) / 100;
+                          add.push(left > 0 ? '👉 เหลือโอนอีก ' + fmtN(left) + ' บาท' : (left < 0 ? '👉 โอนเกินมา ' + fmtN(-left) + ' บาท' : '👉 โอนครบแล้ว'));
+                        }
+                        if (idx >= 0) lines.splice(idx + 1, 0, ...add); else lines.unshift(...add);
                         inboxMsg = lines.join('\n');
                       }
                     }
