@@ -200,6 +200,21 @@ function auctionStartPriceFor(session, at, lotClose, prevClose, uid) {
   return null;
 }
 
+// 🔗 ราคาที่พิมพ์ช้า (หลังสัญญาณปิด แต่ก่อนผู้ชนะรอบนั้นกด 1) = ราคาของรายการก่อน ไม่นับเป็นราคาของรายการใหม่
+// เช่น A 500 → ❤️ → B 600 (ช้าไป) → A กด 1 → ... -> 600 ของ B ไม่ใช่ราคาเปิดของรายการถัดไป
+function lateBidEndFor(session, prevClose, cache) {
+  if (!prevClose) return 0;
+  if (cache && cache.has(prevClose)) return cache.get(prevClose);
+  let first = 0;
+  for (const x of session.commenters.values()) for (const w of (x.wins || [])) {
+    if (w.lot === prevClose && !w.dup && w.amount > 0 && w.source !== 'manual' && w.time > prevClose) first = first ? Math.min(first, w.time) : w.time;
+  }
+  // ผู้ชนะกด 1 ช้ากว่า 2 นาทีหลังปิด -> ไม่ตัด (กันตัดราคาจริงของรายการใหม่ทิ้ง)
+  const end = first && first - prevClose <= 120000 ? first : 0;
+  if (cache) cache.set(prevClose, end);
+  return end;
+}
+
 // ยอดของคนที่กด 1
 // มีสัญญาณปิด (หัวใจของเพจ): รอบประมูล = ราคาที่บิดระหว่างสัญญาณปิดครั้งก่อน ถึงสัญญาณปิดล่าสุดก่อนกด 1
 //   -> ยอด = ราคาล่าสุดที่คนกด 1 บิดในรอบนั้น ก่อนสัญญาณปิด (ราคาเท่ากัน ให้คนกด 1 เป็นผู้ชนะ ตามที่แอดมินประกาศหน้าไลฟ์)
@@ -207,6 +222,7 @@ function auctionStartPriceFor(session, at, lotClose, prevClose, uid) {
 // 🛡️ กันบวกยอดซ้ำ: ลูกค้ากด 1 ซ้ำเกิน 1 นาที สำหรับองค์เดิมที่ยังไม่มีสัญญาณปิด (ราคาเดิม / ราคาเปิดเดิม)
 function auctionAmountFor(session, uid, at) {
   const r = auctionAmountForRaw(session, uid, at);
+  if (r && r.waitAdmin) return r;
   // ⏳ กด 1 ก่อนสัญญาณปิด (องค์ที่ยังไม่ได้ส่ง ❤️/❌) -> ไม่เดายอด ให้ "รอแอดมินแจ้งยอด"
   if (r && !r.lot) return { amount: 0, waitAdmin: true, lot: 0, warning: 'กด 1 ก่อนสัญญาณปิด (❤️/❌) · รอแอดมินแจ้งยอด' };
   // 🥇 รอบนี้มีคนอื่นกด 1 ชนะไปก่อนแล้ว -> คนที่กดทีหลังไม่ได้ยอดอัตโนมัติ ให้ "รอแอดมินแจ้งยอด"
@@ -238,7 +254,7 @@ function auctionAmountForRaw(session, uid, at) {
   if (lotClose && !(wonThisLot && openBids.length)) {
     const prevClose = closes.length > 1 ? closes[closes.length - 2] : 0;
     // เริ่มนับรอบหลังสัญญาณปิดครั้งก่อน และหลังการชนะครั้งก่อนของคนนี้ (กันราคาจากรอบเก่าหลุดเข้ามา ถ้าสัญญาณปิดครั้งก่อนตกหล่น)
-    const lotStart = Math.max(prevClose, c.lastWinAt || 0);
+    const lotStart = Math.max(prevClose, c.lastWinAt || 0, lateBidEndFor(session, prevClose));
     const lotBids = log.filter(b => b.time > lotStart && b.time <= lotClose).sort((x, y) => x.time - y.time);
     const mine = lotBids.filter(b => b.uid === uid);
     if (mine.length) {
@@ -264,11 +280,21 @@ function auctionAmountForRaw(session, uid, at) {
   if (!own.length) {
     // 🙋 คนกด 1 ไม่ได้บิดเองในรอบนี้ -> จบที่ "ราคาเปิดประมูล" (ห้ามดึงราคาที่คนอื่นบิด เช่น ราคาของรายการก่อนที่พิมพ์ช้าหลังสัญญาณปิด)
     const def = Number(session.config && session.config.auctionStartPrice) || 0;
+    if (lotClose) {
+      // มีคนอื่นบิดในรอบนี้ (ไม่นับราคาที่พิมพ์ช้าของรายการก่อน) แต่คนกด 1 ไม่ได้บิด -> ไม่ใช่ผู้ชนะ ให้รอแอดมิน
+      const prevC = closes.length > 1 ? closes[closes.length - 2] : 0;
+      const fromC = Math.max(prevC, lateBidEndFor(session, prevC));
+      const others = log.filter(b => b.time > fromC && b.time <= lotClose && b.uid !== uid);
+      if (others.length) {
+        const top = others.reduce((m, b) => b.amount > m.amount ? b : m, others[0]);
+        return { amount: 0, waitAdmin: true, lot: 0, warning: 'ไม่ได้บิดในรอบนี้ (ราคาสูงสุด ' + (top.name || top.uid) + ' ' + top.amount.toLocaleString('en-US') + ') · รอแอดมินแจ้งยอด' };
+      }
+    }
     if (lotClose && def > 0) {
       const prevClose0 = closes.length > 1 ? closes[closes.length - 2] : 0;
       return { amount: def, bidTime: 0, lot: lotClose, lotStart: prevClose0, source: 'start',
         dupLot: !!(Array.isArray(c.wonLots) && c.wonLots.includes(lotClose)),
-        warning: 'คนกด 1 ไม่ได้บิด ใช้ราคาเปิด ' + def.toLocaleString('en-US') };
+        warning: 'ไม่มีคนบิดในรอบนี้ ใช้ราคาเปิด ' + def.toLocaleString('en-US') };
     }
     // ยังไม่มีสัญญาณปิด = กด 1 ก่อนปิด / ไม่ได้ตั้งราคาเปิด -> รอแอดมินแจ้งยอด
     return lotClose ? null : { amount: 0, bidTime: 0, lot: 0, source: 'start' };
@@ -351,10 +377,12 @@ function auctionLotsSummary(session) {
     winnersByLot.get(w.lot).push({ uid, time: w.time || 0, name: c.name || uid, amount: w.amount, manual: w.source === 'manual' });
   }
   const startPrice = Number(session.config && session.config.auctionStartPrice) || 0;
+  const lateCache = new Map();
   const startIdx = Math.max(0, closes.length - 30); // แสดง 30 รอบล่าสุด
   for (let i = startIdx; i < closes.length; i++) {
     const close = closes[i], prev = i ? closes[i - 1] : 0;
-    const bids = log.filter(b => b.time > prev && b.time <= close);
+    const bidFrom = Math.max(prev, lateBidEndFor(session, prev, lateCache)); // ไม่นับราคาที่พิมพ์ช้าของรายการก่อน
+    const bids = log.filter(b => b.time > bidFrom && b.time <= close);
     const winners = (winnersByLot.get(close) || []).concat(looseWins.filter(w => w.time > prev && w.time <= close));
     // ✍️ รายชื่อให้แอดมินเลือกผู้ชนะ: คนกด 1 (หลังรอบก่อนปิด ถึงก่อนรอบถัดไปปิด) + คนบิดในรอบนี้
     const next = i + 1 < closes.length ? closes[i + 1] : Infinity;
