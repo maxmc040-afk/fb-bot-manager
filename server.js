@@ -1907,6 +1907,7 @@ const compactTh = (v) => String(v || '')
   .replace(/[̀-ͯ]/g, '')
   .normalize('NFC')
   .replace(/ํา/g, 'ำ')            // ํ + า -> ำ (พิมพ์ต่างกันแต่ตาเห็นเหมือนกัน)
+  .replace(/เเ/g, 'แ')            // เ + เ -> แ (ลูกค้าพิมพ์ "ปากเเรต" แทน "ปากแรต" ตาเห็นเหมือนกัน)
   .replace(/[​-‍⁠﻿]/g, '')   // ตัวอักษรล่องหน
   .replace(/[\s.]/g, '').toLowerCase();
 
@@ -2002,6 +2003,7 @@ function applyProvinceAliases(t) {
 // จัดบ้านเลขที่/หมู่ให้อ่านง่าย และตัดคำที่ไม่ใช่ที่อยู่
 function tidyStreet(t) {
   return String(t || '')
+    .replace(/[,]+/g, ' ').replace(/\s+/g, ' ').trim()                    // ตัดจุลภาคก่อน (ลูกค้าพิมพ์ "16,,,ต,,," -> ตัด ต ที่ค้างได้)
     .replace(/(\d)\s*(ม\.?|หมู่)\s*(\d)/g, '$1 ม.$3')                    // 363/5ม2 -> 363/5 ม.2
     .replace(/(\d)(ต|อ|จ|ตำบล|อำเภอ|จังหวัด|แขวง|เขต)\.?\s*$/, '$1')     // 363/5 ม.2ต -> 363/5 ม.2
     .replace(/(^|\s)(ต|อ|จ|ตำบล|อำเภอ|จังหวัด|แขวง|เขต)\.?\s*$/, '$1')
@@ -2202,6 +2204,36 @@ function checkAddressAgainstZip(address, postcode) {
       if (full.includes(r.dn) && full.includes(r.an.replace(/^เมือง/, '')) && (best < 0 || r.dn.length > rows[best].dn.length)) best = i;
     });
     if (best >= 0) return { status: 'ok', zip, matchIndex: best, options };
+  }
+  if (idx < 0) {
+    // 🔎 เดาใกล้เคียง (ลูกค้าพิมพ์ผิด/เกิน เช่น "ต ต.ปากแรต", "ปากแรด" แทน "ปากแรต") -> ตอบเป็น "check" พร้อมตัวที่ใกล้ที่สุด (★)
+    const lev = (a, b) => {
+      if (a === b) return 0;
+      const m = a.length, n = b.length;
+      if (!m || !n) return Math.max(m, n);
+      let prev = Array.from({ length: n + 1 }, (_, j) => j);
+      for (let i = 1; i <= m; i++) {
+        const cur = [i];
+        for (let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+        prev = cur;
+      }
+      return prev[n];
+    };
+    const mdRaw = compactTh(String(marked.district || '').replace(/^(ตำบล|แขวง|ต\.?)/, ''));
+    const mc = compactTh(marked.city || '');
+    let best = -1, bestScore = Infinity;
+    rows.forEach((r, i) => {
+      const aOk = mc ? (mc === r.an || lev(mc, r.an) <= 1 || (r.an.startsWith('เมือง') && (mc === 'เมือง' || mc === r.an.replace(/^เมือง/, '')))) : hay.includes(r.an);
+      if (!aOk && rows.some(x => x.an !== r.an)) return; // รหัสไปรษณีย์ครอบหลายอำเภอ -> อำเภอต้องตรง
+      let score = Infinity;
+      if (countOcc(hay, r.dn) >= (r.dn === r.an ? 2 : 1)) score = 0; // ชื่อตำบลอยู่ในข้อความ (เช่น มีคำนำหน้าเกิน "ต ต.ปากแรต") · ชื่อซ้ำกับอำเภอต้องเจอ 2 ครั้ง
+      else if (mdRaw.length >= 2) {
+        const d = lev(mdRaw, r.dn);
+        if (d <= (r.dn.length >= 5 ? 2 : 1)) score = d;
+      }
+      if (score < bestScore || (score === bestScore && best >= 0 && r.dn.length > rows[best].dn.length)) { best = i; bestScore = score; }
+    });
+    if (best >= 0) return { status: 'check', zip, matchIndex: best, options, fuzzy: true };
   }
   if (idx < 0) {
     // ไม่ตรงกับรหัสไปรษณีย์นี้: อาจเป็นรหัสไปรษณีย์เก่า (เช่น ต.บางเสาธง เปลี่ยนจาก 10540 เป็น 10570)
@@ -5740,7 +5772,7 @@ app.get('/', (req, res) => {
             const opts = b.addrOptions || [];
             if(!opts.length) return '';
             const needCheck = b.addrCheck === 'check' || b.addrGuess;
-            const sel = needCheck && b.addrGuess && b.addrMatch >= 0 ? -1 : b.addrMatch;
+            const sel = needCheck && b.addrMatch >= 0 ? -1 : b.addrMatch; // ตัวที่เดา (★) ให้แอดมินเลือกยืนยันเอง
             let html = '<div class="mt-1 rounded-md ' + (needCheck ? 'bg-amber-50 border border-amber-300 p-1.5' : '') + '">';
             if(needCheck && b.addrAltZip) {
                 const a0 = opts[0];
