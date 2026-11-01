@@ -960,6 +960,7 @@ const defaultPageConfig = {
   easySlipApiKey: '',      // EasySlip API Key (สำรอง)
   slipProvider: 'zwiz',    // ผู้ให้บริการตรวจสลิป: 'zwiz' (หลัก) หรือ 'easyslip'
   zwizApiKey: '',          // ZWIZ.AI Slip Verification API Key
+  gvisionApiKey: '',       // Google Cloud Vision API Key (อ่านสลิปจากรูป · ไม่ได้ยืนยันกับธนาคาร)
   enableCommentBot: true,  // สวิตช์หลัก เปิด/ปิด บอตตอบกลับคอมเมนต์ (โพสต์ทั่วไป)
   
   matchType: 'contains',
@@ -1155,8 +1156,111 @@ async function verifySlipWithZwiz(imageUrl, cfg) {
   return { slip, errCode: '', quota: res.remaining_quota };
 }
 
+// =====================================================================
+// 👁️ Google Cloud Vision: อ่านข้อความในรูปสลิป (OCR) แล้วแยก ยอดเงิน / เลขที่รายการ / บัญชี-ชื่อผู้รับ / วันเวลา
+// ⚠️ อ่านจากรูปอย่างเดียว ไม่ได้ยืนยันกับธนาคาร (สลิปปลอมที่ทำเหมือนจริงอาจผ่านได้) -> ใช้ร่วมกับการตรวจบัญชีผู้รับ + กันสลิปซ้ำ
+// =====================================================================
+const TH_MON_RE = '(?:ม\\.?ค\\.?|ก\\.?พ\\.?|มี\\.?ค\\.?|เม\\.?ย\\.?|พ\\.?ค\\.?|มิ\\.?ย\\.?|ก\\.?ค\\.?|ส\\.?ค\\.?|ก\\.?ย\\.?|ต\\.?ค\\.?|พ\\.?ย\\.?|ธ\\.?ค\\.?|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?';
+function parseThaiSlipText(text) {
+  const t = String(text || '').replace(/[๐-๙]/g, d => String('๐๑๒๓๔๕๖๗๘๙'.indexOf(d))).replace(/\r/g, '');
+  const lines = t.split('\n').map(l => l.trim()).filter(Boolean);
+  const all = lines.join('\n');
+  // 💰 ยอดเงิน: ตัวเลขทศนิยม 2 ตำแหน่ง · เลือกตัวที่อยู่บรรทัด/บรรทัดถัดจากคำว่า "จำนวน" ก่อน ไม่เอาค่าธรรมเนียม/ยอดคงเหลือ
+  const money = [];
+  lines.forEach((l, i) => {
+    const re = /(?<![\d.,])(\d{1,3}(?:,\d{3})+|\d+)\.(\d{2})(?!\d)/g;
+    let m;
+    while ((m = re.exec(l))) money.push({ v: parseFloat(m[1].replace(/,/g, '') + '.' + m[2]), i, line: l });
+  });
+  const isFeeLine = (l) => /ค่าธรรมเนียม|fee|คงเหลือ|balance|ยอดเงินคงเหลือ/i.test(l);
+  let amount = 0;
+  const amtIdx = lines.findIndex(l => /จำนวนเงิน|จำนวน|amount|ยอดโอน|ยอดเงิน(?!คงเหลือ)/i.test(l) && !isFeeLine(l));
+  if (amtIdx >= 0) {
+    const near = money.filter(x => (x.i === amtIdx || x.i === amtIdx + 1 || x.i === amtIdx + 2) && !isFeeLine(x.line) && x.v > 0);
+    if (near.length) amount = near[0].v;
+  }
+  if (!amount) {
+    const cand = money.filter(x => !isFeeLine(x.line) && x.v > 0);
+    if (cand.length) amount = Math.max(...cand.map(x => x.v));
+  }
+  // 🔖 เลขที่รายการ / รหัสอ้างอิง
+  let transRef = '';
+  const refIdx = lines.findIndex(l => /เลขที่รายการ|รหัสอ้างอิง|เลขที่อ้างอิง|หมายเลขอ้างอิง|รหัสรายการ|เลขอ้างอิง|ref(?:erence)?\s*(?:no|id)?|transaction\s*(?:no|id)/i.test(l));
+  const refTok = (l) => (String(l || '').replace(/^.*?[:：]/, ' ').match(/[A-Za-z0-9]{8,}/g) || []).find(x => /\d/.test(x) && x.replace(/\D/g, '').length >= 6);
+  if (refIdx >= 0) transRef = refTok(lines[refIdx]) || refTok(lines[refIdx + 1]) || '';
+  if (!transRef) {
+    const longTok = (all.match(/\b[A-Z0-9]{14,}\b/g) || []).filter(x => /\d{6,}/.test(x));
+    if (longTok.length) transRef = longTok.sort((a, b) => b.length - a.length)[0];
+  }
+  // 🏦 บัญชี (มักปิดบางหลัก เช่น xxx-x-x4664-x) · ลำดับในสลิป: ผู้โอนก่อน แล้วผู้รับ
+  const accounts = (all.match(/(?<![A-Za-z0-9])[xX*\d](?:[xX*\d\- ]{5,20})[xX*\d](?![A-Za-z0-9])/g) || [])
+    .map(x => x.trim()).filter(x => (x.match(/\d/g) || []).length >= 3 && /[xX*\-]/.test(x) && (x.replace(/[^0-9xX*]/g, '').length >= 9) && x.replace(/\D/g, '').length <= 15);
+  const uniqAcc = Array.from(new Set(accounts));
+  // 👤 ชื่อ: บรรทัดที่ขึ้นต้นด้วยคำนำหน้า · ลำดับ: ผู้โอนก่อน แล้วผู้รับ
+  const names = lines.map(l => l.replace(/^(?:จาก|ไปยัง|ไป|ถึง|ผู้โอน|ผู้รับ|from|to)\s*[:：]?\s*/i, ''))
+    .filter(l => /^(นาย|นาง|น\.ส\.|นางสาว|ด\.ช\.|ด\.ญ\.|MR\.?|MRS\.?|MS\.?|MISS|บจก\.?|บริษัท|หจก\.?|ร้าน)\s*\S/i.test(l)).map(l => l.slice(0, 80));
+  // 📅 วันเวลา
+  const dm = all.match(new RegExp('(\\d{1,2})\\s*' + TH_MON_RE + '\\s*(\\d{2,4})', 'i'));
+  const tm = all.match(/(\d{1,2}):(\d{2})(?::\d{2})?/);
+  const dateText = [dm ? dm[0] : '', tm ? tm[0] + ' น.' : ''].filter(Boolean).join(' ');
+  const looksSlip = /โอนเงินสำเร็จ|โอนสำเร็จ|ทำรายการสำเร็จ|รายการสำเร็จ|ชำระเงินสำเร็จ|จ่ายบิลสำเร็จ|successful|transfer|พร้อมเพย์|promptpay|เลขที่รายการ|รหัสอ้างอิง/i.test(all);
+  return {
+    amount, transRef, dateText, looksSlip,
+    receiverAccounts: uniqAcc.length >= 2 ? uniqAcc.slice(1) : uniqAcc,
+    senderAccount: uniqAcc.length >= 2 ? uniqAcc[0] : '',
+    receiverNameTh: names.length >= 2 ? names[1] : '',
+    senderName: names.length >= 2 ? names[0] : (names[0] || '')
+  };
+}
+async function verifySlipWithGoogleVision(imageUrl, cfg) {
+  const key = String(cfg.gvisionApiKey || '').trim(); // 🔒 ใช้เฉพาะ Key ของเพจนั้น
+  if (!key) return { slip: null, errCode: 'MISSING_API_KEY' };
+  let img;
+  try { img = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 20000 }); }
+  catch (e) { return { slip: null, errCode: 'IMAGE_DOWNLOAD_FAILED' }; }
+  const buf = Buffer.from(img.data);
+  if (buf.length > 10 * 1024 * 1024) return { slip: null, errCode: 'FILE_TOO_LARGE' };
+  let r;
+  try {
+    r = await axios.post('https://vision.googleapis.com/v1/images:annotate', {
+      requests: [{ image: { content: buf.toString('base64') }, features: [{ type: 'DOCUMENT_TEXT_DETECTION' }], imageContext: { languageHints: ['th', 'en'] } }]
+    }, { params: { key }, timeout: 30000 });
+  } catch (err) {
+    const e = err.response?.data?.error || {};
+    const st = err.response?.status;
+    const msg = String(e.message || err.message || '');
+    const errCode = !err.response ? 'NETWORK_ERROR'
+      : (st === 400 && /api key/i.test(msg)) ? 'INVALID_API_KEY'
+      : st === 403 ? (/billing/i.test(msg) ? 'VISION_BILLING_DISABLED' : 'VISION_API_NOT_ENABLED')
+      : st === 429 ? 'RATE_LIMIT_EXCEEDED'
+      : 'HTTP_' + st;
+    console.error('❌ [Google Vision] อ่านสลิปไม่สำเร็จ:', errCode, msg.slice(0, 200));
+    return { slip: null, errCode, detail: msg.slice(0, 160) };
+  }
+  const resp = (r.data && r.data.responses && r.data.responses[0]) || {};
+  if (resp.error) {
+    console.error('❌ [Google Vision]', resp.error.message);
+    return { slip: null, errCode: 'VISION_' + (resp.error.status || resp.error.code || 'ERROR'), detail: String(resp.error.message || '').slice(0, 160) };
+  }
+  const text = (resp.fullTextAnnotation && resp.fullTextAnnotation.text) || (resp.textAnnotations && resp.textAnnotations[0] && resp.textAnnotations[0].description) || '';
+  if (!text.trim()) return { slip: null, errCode: 'NO_TEXT' };
+  const p = parseThaiSlipText(text);
+  if (!p.looksSlip || !(p.amount > 0)) return { slip: null, errCode: 'NOT_A_SLIP', detail: 'อ่านรูปได้ แต่ไม่พบรูปแบบสลิปโอนเงิน/ยอดเงิน' };
+  // ไม่พบเลขที่รายการ -> สร้างรหัสจากข้อมูลในสลิป (กันส่งสลิปใบเดิมซ้ำ)
+  const transRef = p.transRef || ('GV-' + crypto.createHash('md5').update([p.amount, p.dateText, p.senderAccount, p.receiverAccounts.join(','), p.senderName].join('|')).digest('hex').slice(0, 16));
+  console.log('✅ [Google Vision] อ่านสลิป: ' + p.amount + ' บาท · ref ' + transRef);
+  return {
+    slip: {
+      transRef, amount: p.amount, dateText: p.dateText,
+      receiverAccounts: p.receiverAccounts, receiverNameTh: p.receiverNameTh, receiverBank: '',
+      isDuplicate: false, matchResult: 'skipped', provider: 'gvision', unverified: true
+    }, errCode: ''
+  };
+}
+
 // ตัวเลือกผู้ให้บริการ: ZWIZ (หลัก) หรือ EasySlip (สำรอง)
 async function verifySlip(imageUrl, cfg, pageData) {
+  if (cfg.slipProvider === 'gvision') return verifySlipWithGoogleVision(imageUrl, cfg);
   if ((cfg.slipProvider || 'zwiz') === 'zwiz') {
     const out = await verifySlipWithZwiz(imageUrl, cfg);
     if (pageData && out.quota !== undefined) pageData.slipQuota = { provider: 'zwiz', remaining: out.quota, at: Date.now() };
@@ -2552,11 +2656,17 @@ app.get('/', (req, res) => {
                                 <select id="slip-provider" onchange="toggleSlipProvider()" class="w-full p-2.5 text-sm bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-rose-400">
                                     <option value="zwiz">ZWIZ.AI (หลัก)</option>
                                     <option value="easyslip">EasySlip (สำรอง)</option>
+                                    <option value="gvision">Google Vision (อ่านจากรูป)</option>
                                 </select>
                             </div>
                             <div id="zwiz-key-box" class="md:col-span-2">
                                 <label class="text-xs font-semibold text-slate-600 block mb-1">ZWIZ API Key (x-api-key):</label>
                                 <input type="text" id="zwiz-api-key" class="w-full p-2.5 text-sm bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-rose-400" placeholder="กรอก API Key จาก ZWIZ.AI...">
+                            </div>
+                            <div id="gvision-key-box" class="md:col-span-2 hidden">
+                                <label class="text-xs font-semibold text-slate-600 block mb-1">Google Cloud Vision API Key:</label>
+                                <input type="text" id="gvision-api-key" autocomplete="off" class="w-full p-2.5 text-sm bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-rose-400" placeholder="AIza... (Google Cloud Console → APIs &amp; Services → Credentials)">
+                                <p class="text-[11px] text-amber-700 mt-1">⚠️ Google Vision อ่านตัวหนังสือจากรูปสลิปเท่านั้น <b>ไม่ได้ยืนยันกับธนาคาร</b> สลิปปลอมที่ทำเหมือนจริงอาจผ่านได้ · ระบบยังตรวจบัญชีผู้รับและกันสลิปซ้ำให้ · ควรตั้ง "เลขบัญชี" ด้านล่างให้ถูกต้อง</p>
                             </div>
                             <div id="easyslip-key-box" class="md:col-span-2 hidden">
                                 <label class="text-xs font-semibold text-slate-600 block mb-1">EasySlip API Key:</label>
@@ -3579,6 +3689,7 @@ app.get('/', (req, res) => {
             document.getElementById('enable-slip-verify').checked = !!currentConfig.enableSlipVerify;
             document.getElementById('easyslip-api-key').value = currentConfig.easySlipApiKey || '';
             document.getElementById('zwiz-api-key').value = currentConfig.zwizApiKey || '';
+            document.getElementById('gvision-api-key').value = currentConfig.gvisionApiKey || '';
             document.getElementById('slip-provider').value = currentConfig.slipProvider || 'zwiz';
             toggleSlipProvider();
             loadSlipStatus();
@@ -3768,6 +3879,7 @@ app.get('/', (req, res) => {
             currentConfig.enableSlipVerify = document.getElementById('enable-slip-verify').checked;
             currentConfig.easySlipApiKey = document.getElementById('easyslip-api-key').value.trim();
             currentConfig.zwizApiKey = document.getElementById('zwiz-api-key').value.trim();
+            currentConfig.gvisionApiKey = document.getElementById('gvision-api-key').value.trim();
             currentConfig.slipProvider = document.getElementById('slip-provider').value;
             currentConfig.merchantBank = document.getElementById('merchant-bank').value;
             currentConfig.merchantAccount = document.getElementById('merchant-account').value;
@@ -3875,6 +3987,7 @@ app.get('/', (req, res) => {
             const v = document.getElementById('slip-provider').value;
             document.getElementById('zwiz-key-box').classList.toggle('hidden', v !== 'zwiz');
             document.getElementById('easyslip-key-box').classList.toggle('hidden', v !== 'easyslip');
+            document.getElementById('gvision-key-box').classList.toggle('hidden', v !== 'gvision');
         }
 
         async function loadSlipStatus() {
@@ -8699,7 +8812,7 @@ async function processSlipImage(targetRecord, pageId, senderId, imageUrl, attemp
       return;
     }
     // ปัญหาฝั่งระบบ (key / โควตา / เซิร์ฟเวอร์ EasySlip) ไม่ใช่ความผิดลูกค้า -> ไม่แจ้งลูกค้า
-    const systemErr = ['MISSING_API_KEY', 'INVALID_API_KEY', 'QUOTA_EXCEEDED', 'INSUFFICIENT_QUOTA', 'IP_NOT_ALLOWED', 'BRANCH_INACTIVE', 'SERVICE_BANNED', 'SERVICE_DELETED', 'USER_BANNED', 'RATE_LIMIT_EXCEEDED', 'API_SERVER_ERROR', 'INTERNAL_SERVER_ERROR', 'INTERNAL_ERROR', 'IMAGE_DOWNLOAD_FAILED', 'NETWORK_ERROR', 'HTTP_500', 'HTTP_502', 'HTTP_503', 'HTTP_504'].includes(errCode);
+    const systemErr = ['MISSING_API_KEY', 'INVALID_API_KEY', 'QUOTA_EXCEEDED', 'INSUFFICIENT_QUOTA', 'IP_NOT_ALLOWED', 'BRANCH_INACTIVE', 'SERVICE_BANNED', 'SERVICE_DELETED', 'USER_BANNED', 'RATE_LIMIT_EXCEEDED', 'API_SERVER_ERROR', 'INTERNAL_SERVER_ERROR', 'INTERNAL_ERROR', 'IMAGE_DOWNLOAD_FAILED', 'NETWORK_ERROR', 'HTTP_500', 'HTTP_502', 'HTTP_503', 'HTTP_504', 'VISION_API_NOT_ENABLED', 'VISION_BILLING_DISABLED', 'HTTP_400', 'HTTP_401', 'HTTP_403'].includes(errCode);
     if (systemErr) targetRecord.pageData.lastSlipError = { code: errCode, at: Date.now() };
     const mode = configStore.slipUnreadableMode || 'smart';
     const payCtx = isPaymentContext(targetRecord.pageData, senderId);
@@ -8745,7 +8858,8 @@ async function processSlipImage(targetRecord, pageId, senderId, imageUrl, attemp
   }
 
   usedSlips.add(slip.transRef);
-  logSlipAttempt(pageData, { senderId, provider, result: 'valid', code: slip.transRef, amount: slip.amount, note: attempt ? 'ผ่านหลังลองใหม่ ' + attempt + ' ครั้ง' : '' });
+  logSlipAttempt(pageData, { senderId, provider, result: 'valid', code: slip.transRef, amount: slip.amount, note: [attempt ? 'ผ่านหลังลองใหม่ ' + attempt + ' ครั้ง' : '',
+    slip.unverified ? '👁️ อ่านจากรูป (Google Vision) · ยังไม่ยืนยันกับธนาคาร' + (slip.receiverAccounts.length ? ' · บัญชีผู้รับ ' + slip.receiverAccounts.join(', ') : '') + (slip.receiverNameTh ? ' · ' + slip.receiverNameTh : '') : ''].filter(Boolean).join(' · ') });
   labelSlipResult(targetRecord.pageData, senderId, 'valid');
   if (usedSlips.size > 50000) { let i = 0; for (const k of usedSlips) { usedSlips.delete(k); if (++i >= 5000) break; } }
 
