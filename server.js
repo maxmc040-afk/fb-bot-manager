@@ -1478,6 +1478,11 @@ function parseAddressBlock(texts, nameHint) {
   }
   if (!recipientName && nameHint && isNameLike(nameHint)) recipientName = String(nameHint).trim();
   recipientName = cleanName(recipientName);
+  // ชื่อเฟสภาษาอังกฤษติดกับชื่อจริงภาษาไทย (เช่น "Sonkung Hongtongสนธยา ปานสอาด") -> ใช้ชื่อภาษาไทยเป็นชื่อผู้รับ
+  {
+    const mix = String(recipientName || '').match(/^[A-Za-z][A-Za-z .'\-]*?([\u0E00-\u0E7F][\u0E00-\u0E7F .]*)$/);
+    if (mix && mix[1].trim().split(/\s+/).length >= 2) recipientName = mix[1].replace(/\s+/g, ' ').trim();
+  }
 
   return { recipientName, address: lines.filter(Boolean).join(' '), phone, postcode, raw: full.slice(0, 1500) };
 }
