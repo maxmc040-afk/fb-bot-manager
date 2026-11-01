@@ -2933,7 +2933,7 @@ app.get('/', (req, res) => {
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                                 <div>
                                     <label class="text-xs font-semibold text-slate-600 block mb-1">ข้อมูล</label>
-                                    <input type="text" id="lv-chat-q" class="w-full p-2.5 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-500" placeholder="ค้นหา ชื่อเฟสบุ๊ค, ชื่อผู้รับ, ที่อยู่, เบอร์โทร (เว้นว่าง = ทุกแชทในช่วงวันที่)">
+                                    <input type="text" id="lv-chat-q" autocomplete="off" class="w-full p-2.5 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-500" placeholder="ค้นหา ชื่อเฟสบุ๊ค, ชื่อผู้รับ, ที่อยู่, เบอร์โทร (เว้นว่าง = ทุกแชทในช่วงวันที่)">
                                 </div>
                                 <div class="relative">
                                     <label class="text-xs font-semibold text-slate-600 block mb-1">วันที่</label>
@@ -3435,6 +3435,7 @@ app.get('/', (req, res) => {
         }
 
         function logout() {
+            clearAllChatStates(); // ไม่ให้ผลค้นหาแชทค้างไปให้ user ถัดไปเห็น
             localStorage.removeItem('auth_token');
             authToken = '';
             document.getElementById('auth-container').classList.remove('hidden');
@@ -3520,6 +3521,7 @@ app.get('/', (req, res) => {
         }
 
         async function loadConfigForActivePage() {
+            restoreChatState(); // 💬 ผลค้นหาแชท แยกตาม user + เพจ
             if(!currentActivePageId) return;
             const res = await fetch('/api/config?token=' + authToken + '&pageId=' + currentActivePageId);
             const data = await res.json();
@@ -5352,6 +5354,54 @@ app.get('/', (req, res) => {
         let chatPicking = false;
         let chatResults = [];
         let chatSel = new Set();
+
+        // 💬 สถานะการค้นหาแชท เก็บแยกตาม "user + เพจ" ในหน่วยความจำของแท็บนี้เท่านั้น (ไม่บันทึกลงเครื่อง/เซิร์ฟเวอร์)
+        const chatStates = {};
+        let chatStateKey = '';
+        function chatKeyNow() {
+            const u = (document.getElementById('current-username') || {}).innerText || '';
+            return u + '|' + (currentActivePageId || '');
+        }
+        function saveChatState() {
+            if(!chatStateKey) return;
+            const st = document.getElementById('lv-chat-status');
+            chatStates[chatStateKey] = {
+                q: document.getElementById('lv-chat-q').value,
+                onlyAddr: document.getElementById('lv-chat-onlyaddr').checked,
+                deep: document.getElementById('lv-chat-deep').checked,
+                range: chatRange ? { s: chatRange.start.getTime(), e: chatRange.end ? chatRange.end.getTime() : 0 } : null,
+                results: chatResults, sel: Array.from(chatSel),
+                status: st.innerText, statusShown: !st.classList.contains('hidden')
+            };
+        }
+        function applyChatState(x) {
+            const st = document.getElementById('lv-chat-status');
+            document.getElementById('lv-chat-q').value = x ? x.q : '';
+            document.getElementById('lv-chat-onlyaddr').checked = !!(x && x.onlyAddr);
+            document.getElementById('lv-chat-deep').checked = !!(x && x.deep);
+            chatRange = x && x.range ? { start: new Date(x.range.s), end: x.range.e ? new Date(x.range.e) : null } : null;
+            if(chatRange) { chatCalView = new Date(chatRange.start.getFullYear(), chatRange.start.getMonth(), 1); updateChatRangeText(); }
+            else { const t = document.getElementById('lv-chat-range-text'); if(t) t.innerText = ''; initChatRange(); }
+            chatResults = x ? x.results : [];
+            chatSel = new Set(x ? x.sel : []);
+            st.innerText = x ? x.status : '';
+            st.classList.toggle('hidden', !(x && x.statusShown));
+            const cal = document.getElementById('lv-chat-cal'); if(cal) cal.classList.add('hidden');
+            pagerState('chat').page = 1;
+            renderChatResults();
+        }
+        function restoreChatState() {
+            const k = chatKeyNow();
+            if(k === chatStateKey) return;
+            saveChatState();
+            chatStateKey = k;
+            applyChatState(chatStates[k] || null);
+        }
+        function clearAllChatStates() {
+            Object.keys(chatStates).forEach(function(k) { delete chatStates[k]; });
+            chatStateKey = '';
+            try { applyChatState(null); } catch(e) {}
+        }
 
         function pad2(n) { return (n < 10 ? '0' : '') + n; }
         function ymd(d) { return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
