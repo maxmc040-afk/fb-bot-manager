@@ -5756,7 +5756,9 @@ app.get('/', (req, res) => {
                 const isBkk = o.p.indexOf('กรุงเทพ') >= 0;
                 const label = (isBkk ? 'แขวง' : 'ต.') + o.d + ' › ' + (isBkk ? 'เขต' : 'อ.') + o.a + ' › ' + o.p + ' ' + o.z;
                 const mark = o.alt ? '★ ' : ((i === b.addrMatch && !needCheck) ? '✓ ' : (i === b.addrMatch ? '★ ' : ''));
-                html += '<option value="' + i + '"' + (i === sel ? ' selected' : '') + '>' + escapeHtml(mark + label) + '</option>';
+                // ★ = ตัวที่ระบบเดาว่าใกล้เคียงที่สุด -> ไฮไลต์สีเขียวให้เห็นชัด
+                const star = mark === '★ ';
+                html += '<option value="' + i + '"' + (i === sel ? ' selected' : '') + (star ? ' style="background-color:#dcfce7;color:#166534;font-weight:700"' : '') + '>' + escapeHtml(mark + label) + '</option>';
             });
             html += '</select></div>';
             return html;
