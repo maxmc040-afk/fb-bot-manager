@@ -1910,6 +1910,15 @@ const compactTh = (v) => String(v || '')
   .replace(/[​-‍⁠﻿]/g, '')   // ตัวอักษรล่องหน
   .replace(/[\s.]/g, '').toLowerCase();
 
+// 🗺️ แขวงที่ตั้งใหม่ในกรุงเทพฯ แต่ฐานข้อมูลที่อยู่ (jquery.Thailand.js) ยังไม่มี -> เติมให้เอง
+const THAI_ADDR_EXTRA = [
+  { district: 'พญาไท', amphoe: 'พญาไท', province: 'กรุงเทพมหานคร', zipcode: '10400' },
+  { district: 'รัชดาภิเษก', amphoe: 'ดินแดง', province: 'กรุงเทพมหานคร', zipcode: '10400' },
+  { district: 'พระโขนงใต้', amphoe: 'พระโขนง', province: 'กรุงเทพมหานคร', zipcode: '10260' },
+  { district: 'บางบอนเหนือ', amphoe: 'บางบอน', province: 'กรุงเทพมหานคร', zipcode: '10150' },
+  { district: 'บางบอนใต้', amphoe: 'บางบอน', province: 'กรุงเทพมหานคร', zipcode: '10150' },
+  { district: 'คลองบางบอน', amphoe: 'บางบอน', province: 'กรุงเทพมหานคร', zipcode: '10150' }
+];
 function loadThaiAddressDb() {
   if (thaiAddrDb) return Promise.resolve(true);
   if (thaiAddrLoading) return thaiAddrLoading;
@@ -1919,6 +1928,10 @@ function loadThaiAddressDb() {
       dn: compactTh(x.district), an: compactTh(x.amphoe), pn: compactTh(x.province)
     })).filter(x => x.d && x.a && x.p);
     if (!rows.length) throw new Error('ข้อมูลว่าง');
+    for (const x of THAI_ADDR_EXTRA) {
+      if (rows.some(r => r.d === x.district && r.a === x.amphoe && r.z === x.zipcode)) continue;
+      rows.push({ d: x.district, a: x.amphoe, p: x.province, z: x.zipcode, dn: compactTh(x.district), an: compactTh(x.amphoe), pn: compactTh(x.province) });
+    }
     thaiAddrDb = rows;
     locationNameCache = null;
     thaiAddrByZip = new Map();
