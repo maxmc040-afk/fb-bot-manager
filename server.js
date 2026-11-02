@@ -157,7 +157,9 @@ function parseBid(text) {
   if (!t || t.length > 30) return null;
   t = t.replace(/[๐-๙]/g, d => String('๐๑๒๓๔๕๖๗๘๙'.indexOf(d)));
   // ตัดสัญลักษณ์ที่ลูกค้าพิมพ์ครอบราคา เช่น @320@ / 210@ / #300 / *250* / =400
-  t = t.replace(/^[@#*=+~]+\s*/, '').replace(/\s*[@#*=+~]+$/, '');
+  t = t.replace(/^[\s@#*=+~,.?!;:'"`…・_\-]+/, '').replace(/[\s@#*=+~,?!;:'"`…・_]+$/, '');
+  t = t.replace(/[\s@#*=+~,.?!;:'"`…・_]+$/, (m) => /^\.-$/.test(m) ? m : m.replace(/[^.\-]/g, '')); // เก็บ "฿.-" ไว้ให้ตัวตรวจด้านล่าง
+  t = t.replace(/([0-9])[\s,?!@#*=+~]+(?=[\u0E00-\u0E7F])/, '$1 '); // "300,?ครับ" -> "300 ครับ"
   // รองรับจุด/เครื่องหมายต่อท้าย (520. / 550.. / 600!) และคำลงท้าย (250ครับ / 300 ค่ะ / 400จ้า)
   const m = t.match(/^(?:บิด|สู้|ประมูล|bid)?\s*([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)\s*(?:บาท|บ\.?|฿|\.-|-)?\s*(?:ครับ|คับ|ค่ะ|คะ|ค้ะ|จ้า|จ้ะ|จ้|นะ|ฮะ)?\s*[.!。]*\s*$/i);
   if (!m) return null;
@@ -1323,12 +1325,15 @@ const LABEL_RE = /^(ข้อมูล\s*(ผู้รับ|การจัด�
 // บรรทัดที่เป็นแค่หัวข้อ (ไม่ใช่ชื่อคน)
 const HEADER_ONLY = /^(จัดส่ง|ส่ง|ส่งของ|ที่อยู่|ที่อยู่จัดส่ง|ข้อมูล|ข้อมูลจัดส่ง|ข้อมูลผู้รับ|ผู้รับ|รายละเอียด|ชื่อ|ชื่อที่อยู่|ชื่อ ที่อยู่ เบอร์|ชื่อที่อยู่เบอร์โทร|ตามนี้|ตามนี้ค่ะ|ตามนี้ครับ|ค่ะ|ครับ|คะ|นะคะ)[\s:：\-.]*$/i;
 // คำนำหน้าชื่อ ยศทหาร/ตำรวจ และตำแหน่งวิชาการ (ยาวก่อนสั้น)
-const RANK_SRC = String.raw`(?:ว่าที่\s*)?(?:พล\.(?:ร\.|ต\.|อ\.|ท\.)?[อทต]\.|[พร]\.ต\.[อทต]\.|จ\.ส\.[อทต]\.|[พรน]\.[อทต]\.|ส\.[อทต]\.|ด\.ต\.|จ\.ต\.|จ\.อ\.|พ\.จ\.[อทต]\.|ร\.ต\.)`;
+// ยศแบบไม่มีจุดคั่น เช่น จอ. จสอ. พจอ. สอ. รต. ดต. (ลูกค้าพิมพ์ "จอ.ชุมพร" -> ไม่ใช่ อ.ชุมพร)
+const RANK_SRC = String.raw`(?:ว่าที่\s*)?(?:พล[อทต]\.|พลฯ|จส[อทต]\.|พจ[อทต]\.|จ[อทต]\.|[พรนส][อทต]\.|ดต\.|พล\.(?:ร\.|ต\.|อ\.|ท\.)?[อทต]\.|[พร]\.ต\.[อทต]\.|จ\.ส\.[อทต]\.|[พรน]\.[อทต]\.|ส\.[อทต]\.|ด\.ต\.|จ\.ต\.|จ\.อ\.|พ\.จ\.[อทต]\.|ร\.ต\.)`;
 const NAME_TITLES = String.raw`(?:` + RANK_SRC + String.raw`(?:\s*หญิง)?|ศ\.|รศ\.|ผศ\.|ดร\.|นพ\.|พญ\.|ทพญ?\.|ภ[กญ]\.|สพ\.ญ\.|น\.?สพ\.|ด\.ช\.|ด\.ญ\.|น\.ส\.|นางสาว|นาย|นาง|คุณ|mr\.?|mrs\.?|ms\.?|miss|dr\.?)`;
 const NAME_TITLE_RE = new RegExp(String.raw`(?:^|\s)(` + NAME_TITLES + String.raw`\s*[^\s\d,]+(?:\s+[^\s\d,]+)?)`, 'i');
 const NAME_TITLE_PREFIX_RE = new RegExp('^' + NAME_TITLES + String.raw`\s*`, 'i');
 // ลบยศออกก่อนอ่าน ต./อ./จ. (กัน จ.ส.อ. ถูกมองเป็นจังหวัด/อำเภอ)
 const RANK_MASK_RE = new RegExp(String.raw`(^|\s)` + RANK_SRC + String.raw`\s*[^\s\d,]*`, 'g');
+// ขึ้นต้นด้วยยศ (จอ./ด.ต./ร.ต.อ. ...) = ชื่อคนแน่นอน แม้ชื่อจะซ้ำกับชื่อจังหวัด/อำเภอ (เช่น จอ.ชุมพร)
+const RANK_PREFIX_RE = new RegExp('^' + RANK_SRC + String.raw`\s*[^\s\d,]`);
 
 function stripPhones(t) { return String(t || '').replace(PHONE_RE_G, ' '); }
 
@@ -1381,6 +1386,7 @@ function isNameLike(s) {
   if (PLACE_RE.test(t)) return false;
   if (t.length < 2 || t.length > 45) return false;
   if (/\d/.test(t)) return false;
+  if (RANK_PREFIX_RE.test(t) && t.split(/\s+/).length <= 4) return true;
   // หมายเหตุการส่ง ไม่ใช่ชื่อคน เช่น "(ส่งที่หอพักป้ามาลาเท่านั้น)", "ฝากไว้ที่ป้อม"
   if (/^[(\[（]/.test(t) || /(ส่งที่|เท่านั้น|หอพัก|ฝากไว้|ฝากที่|ฝากป้อม|วางไว้|โทรก่อน|ก่อนส่ง)/.test(t)) return false;
   if (NAME_TITLE_PREFIX_RE.test(t) && t.split(/\s+/).length <= 4 && !looksLikeLocation(t.replace(NAME_TITLE_PREFIX_RE, ''))) return true;
@@ -1448,7 +1454,7 @@ function parseAddressBlock(texts, nameHint) {
     let name = m[1].trim();
     // ตัดคำที่เป็นที่อยู่ติดมาท้ายนามสกุล
     name = name.split(/\s+/).filter((w, k) => k === 0 || NAME_TITLE_PREFIX_RE.test(w) || !ADDR_PATTERNS.some(re => re.test(w))).join(' ');
-    if (looksLikeLocation(name.replace(NAME_TITLE_PREFIX_RE, ''))) continue;
+    if (!RANK_PREFIX_RE.test(name) && looksLikeLocation(name.replace(NAME_TITLE_PREFIX_RE, ''))) continue;
     recipientName = name;
     const rest = (lines[i].slice(0, m.index) + ' ' + lines[i].slice(m.index + m[0].length)).trim();
     lines[i] = rest;
