@@ -1174,7 +1174,9 @@ function parseThaiSlipText(text, engText) {
     .replace(/ํา/g, 'ำ').replace(/เเ/g, 'แ')                        // OCR อ่าน "ำ" เป็น ํ+า / "แ" เป็น เ+เ
     .split('\n').map(l => ((l.match(/(?:^|\s)[\u0E00-\u0E7F](?=\s)/g) || []).length >= 3
       ? l.replace(/([\u0E00-\u0E7F])\s(?=[\u0E00-\u0E7F])/g, '$1') : l)).join('\n'); // "จ ำ น ว น" (OCR เว้นทุกตัวอักษร) -> "จำนวน"
-  const lines = t.split('\n').map(l => l.trim()).filter(Boolean);
+  const lines = t.split('\n').map(l => l.trim()).filter(Boolean)
+    // OCR อ่านเลข 0 เป็นตัว O / เว้นวรรคในยอดเงิน / ใช้ , แทนจุดทศนิยม: "2.0O" "2 . 00" "2,00 บาท" -> "2.00"
+    .map(l => l.replace(/\d[\d,]*\s?[.,]\s?[\dOoD]{2}(?![\dA-Za-z])/g, m => m.replace(/[OoD]/g, '0').replace(/\s/g, '').replace(/,(\d{2})$/, '.$1')));
   const all = lines.join('\n');
   // 💰 ยอดเงิน: ตัวเลขทศนิยม 2 ตำแหน่ง · เลือกตัวที่อยู่บรรทัด/บรรทัดถัดจากคำว่า "จำนวน" ก่อน ไม่เอาค่าธรรมเนียม/ยอดคงเหลือ
   const money = [];
@@ -1347,7 +1349,8 @@ async function verifySlipWithOcrServer(imageUrl, cfg) {
     const BANK_RE = /กสิกร|ไทยพาณิชย์|กรุงไทย|กรุงเทพ|กรุงศรี|ทีทีบี|ทหารไทย|ออมสิน|ธ\.ก\.ส|อาคารสงเคราะห์|ยูโอบี|ซีไอเอ็มบี|เกียรตินาคิน|แลนด์\s*แอนด์|พร้อมเพย์|K\s*PLUS|K\+|SCB|KBANK|Krungthai|Krungsri|ttb|MyMo|PromptPay|เลขที่รายการ|รหัสอ้างอิง|จำนวนเงิน|ค่าธรรมเนียม/i;
     const slipLike = p.looksSlip || !!o.qr || BANK_RE.test(String(o.text).replace(/ํา/g, 'ำ') + '\n' + String(o.textEng || ''));
     return slipLike
-      ? { slip: null, errCode: 'SLIP_UNREADABLE', detail: o.qr ? 'พบ QR สลิป แต่อ่านยอดเงินไม่ได้' : 'ดูเหมือนสลิป แต่อ่านยอดเงินไม่ได้ (รูปเบลอ/ครอปขาด)' }
+      ? { slip: null, errCode: 'SLIP_UNREADABLE', detail: (o.qr ? 'พบ QR สลิป แต่อ่านยอดเงินไม่ได้' : 'ดูเหมือนสลิป แต่อ่านยอดเงินไม่ได้ (รูปเบลอ/ครอปขาด)')
+          + ' · อ่านได้: ' + (String(o.text || '').split('\n').map(l => l.trim()).filter(l => /\d/.test(l)).join(' / ').slice(0, 160) || '(ไม่มีตัวเลข)') }
       : { slip: null, errCode: 'NOT_A_SLIP', detail: 'ไม่ใช่รูปสลิป (ไม่มี QR / ไม่มีข้อความแบบสลิปโอนเงิน)' };
   }
   // 📷 สลิปจริงทุกธนาคารต้องมี QR · QR ต้องอ่านได้ถูกต้อง (CRC ตรง) และเลขที่รายการที่พิมพ์ในสลิปต้องตรงกับใน QR
