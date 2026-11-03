@@ -7096,7 +7096,7 @@ app.get('/api/slip/image', checkAuth, async (req, res) => {
 app.get('/api/slip/status', checkAuth, async (req, res) => {
   const pageData = usersDB[req.userId]?.pages[req.query.pageId];
   if (!pageData) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
-  const attempts = (pageData.slipAttempts || []).slice(0, 30);
+  const attempts = (pageData.slipAttempts || []).filter(a => a.result !== 'notslip').slice(0, 30);
   // เติมชื่อเฟสของคนส่ง (ถาม Facebook เฉพาะคนที่ยังไม่รู้ชื่อ ไม่เกิน 10 คนต่อครั้ง)
   const missing = Array.from(new Set(attempts.filter(a => a.senderId && !a.name && !knownNameForPsid(pageData, a.senderId)).map(a => a.senderId))).slice(0, 10);
   await Promise.all(missing.map(id => nameForPsid(pageData, id)));
@@ -7567,8 +7567,9 @@ app.post('/api/chat/verify-slip', checkAuth, async (req, res) => {
   if (!t.pageData.config.enableSlipVerify) return res.json({ success: false, error: 'ยังไม่ได้เปิดระบบตรวจสลิป (หน้าตั้งค่าตรวจสลิป)' });
   const before = Date.now();
   try {
-    await processSlipImage({ pageData: t.pageData }, t.pid, t.psid, url, 0);
+    var outcome = await processSlipImage({ pageData: t.pageData }, t.pid, t.psid, url, 0);
   } catch (e) { return res.json({ success: false, error: e.message }); }
+  if (outcome === 'notslip') return res.json({ success: true, result: 'notslip', note: 'รูปนี้ไม่ใช่สลิปโอนเงิน' });
   const at = (t.pageData.slipAttempts || []).find(a => a.senderId === t.psid && a.time >= before);
   if (!at) return res.json({ success: true, result: 'duplicate', note: 'สลิปใบนี้ตรวจไปแล้ว' });
   res.json({ success: true, result: at.result, amount: at.amount || 0, note: at.note || '' });
@@ -9204,6 +9205,11 @@ async function processSlipImageInner(targetRecord, pageId, senderId, imageUrl, a
     const slipLikeErr = errCode === 'SLIP_UNREADABLE';
     // ไม่ใช่สลิปแน่ ๆ -> ไม่ตอบอะไรเลย ทุกโหมด
     const notify = !systemErr && !notSlipSure && (mode === 'always' || (mode === 'smart' && (slipLikeErr || payCtx)));
+    // ไม่ใช่สลิปแน่ ๆ (รูปพระ/รูปที่อยู่/รูปทั่วไป) -> ไม่ตอบ และไม่บันทึกในประวัติตรวจสลิป
+    if (notSlipSure) {
+      console.log(`🖼️ [Page: ${pageId}] รูปจาก ${senderId} ไม่ใช่สลิป -> ข้าม`);
+      return 'notslip';
+    }
     logSlipAttempt(pageData, { senderId, provider, result: systemErr ? 'system' : (notSlipSure ? 'notslip' : 'unreadable'), code: errCode || 'ไม่ทราบสาเหตุ', note: systemErr ? 'ปัญหาฝั่งระบบตรวจสลิป (ไม่แจ้งลูกค้า)' : ((slipResult.detail ? slipResult.detail + ' · ' : '') + (notify ? 'แจ้งลูกค้าให้ส่งใหม่' : 'ไม่ตอบ')) });
     if (notify) {
       labelSlipResult(targetRecord.pageData, senderId, 'unreadable');
