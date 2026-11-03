@@ -3003,6 +3003,11 @@ app.get('/', (req, res) => {
                                     <p class="text-xs text-slate-400 mt-1">ใส่ <b>{name}</b> = ชื่อลูกค้า · หลายแบบคั่นด้วยบรรทัด <b>---</b> ได้เหมือนกัน</p>
                                 </div>
                             </div>
+                            <div class="bg-emerald-50/60 border border-emerald-200 rounded-xl p-3 space-y-2">
+                                <label class="flex items-start gap-2 cursor-pointer"><input type="checkbox" id="lv-newcust-on" class="mt-0.5 w-4 h-4 rounded"><span class="text-sm font-semibold text-emerald-800">🆕 ข้อความสำหรับลูกค้าใหม่ (ส่งครั้งแรกครั้งเดียว)<span class="block text-[11px] font-normal text-slate-500">ลูกค้าที่ไม่เคยซื้อกับเพจนี้ (ไม่เคยชนะประมูล / ไม่เคยโอน / ไม่เคยอยู่ในรายชื่อลูกค้า) กดคำดักครั้งแรก → ต่อข้อความนี้ท้ายข้อความเข้าแชท · ส่งให้แต่ละคนแค่ครั้งเดียว ไม่ว่าจะไลฟ์ไหน</span></span></label>
+                                <textarea id="lv-newcust-text" rows="2" class="w-full p-3 text-sm border border-emerald-200 rounded-xl focus:outline-none focus:border-emerald-500 bg-white" placeholder="เช่น ลูกค้าใหม่โอนยอดแรกก่อนได้เลยค่ะ ยอดต่อไปรวมโอนได้ค่ะ 🙏"></textarea>
+                                <p class="text-[11px] text-slate-400">ใส่ <b>{name}</b> = ชื่อลูกค้า · หลายแบบคั่นด้วยบรรทัด <b>---</b> ระบบจะสุ่มส่ง</p>
+                            </div>
                             <div id="lv-reply-warn" class="hidden text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2"></div>
                             <div class="flex flex-wrap gap-5">
                                 <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" id="lv-enable-like" class="w-4 h-4 rounded"><span class="text-sm text-slate-700">👍 กดไลก์คอมเมนต์</span></label>
@@ -4301,6 +4306,8 @@ app.get('/', (req, res) => {
             document.getElementById('live-name-input').value = d.session.name;
             document.getElementById('lv-reply-text').value = liveCfg.replyCommentText || '';
             document.getElementById('lv-inbox-text').value = liveCfg.inboxText || '';
+            document.getElementById('lv-newcust-on').checked = !!liveCfg.newCustomerOn;
+            document.getElementById('lv-newcust-text').value = liveCfg.newCustomerText || '';
             document.getElementById('lv-enable-like').checked = !!liveCfg.enableAutoLike;
             document.getElementById('lv-enable-reply').checked = !!liveCfg.enableCommentReply;
             document.getElementById('lv-enable-inbox').checked = !!liveCfg.enableInbox;
@@ -4668,7 +4675,7 @@ app.get('/', (req, res) => {
                 const dueWarn = c.auctionWarn ? '<div class="mt-0.5 text-[10px] text-rose-600 whitespace-normal max-w-[11rem]">⚠️ ' + escapeHtml(c.auctionWarn) + '</div>' : '';
                 ch += '<tr data-cid="' + escapeHtml(c.userId) + '" class="border-b border-slate-100">'
                     + '<td class="py-1.5 pr-2"><input type="checkbox" class="cm-sel w-4 h-4 rounded"' + (commenterSel.has(c.userId) ? ' checked' : '') + '></td>'
-                    + '<td class="py-1.5 pr-2 font-medium text-slate-700">' + escapeHtml(c.name || c.userId) + (c.inBuyers ? '<div class="text-[10px] text-indigo-500 font-normal">อยู่ในรายชื่อลูกค้าแล้ว</div>' : '')
+                    + '<td class="py-1.5 pr-2 font-medium text-slate-700">' + escapeHtml(c.name || c.userId) + (c.newCustomer ? '<div class="text-[10px] text-emerald-600 font-semibold">🆕 ลูกค้าใหม่ (ส่งข้อความลูกค้าใหม่แล้ว)</div>' : '') + (c.inBuyers ? '<div class="text-[10px] text-indigo-500 font-normal">อยู่ในรายชื่อลูกค้าแล้ว</div>' : '')
                         + (c.inboxErr && c.inboxErr.msg ? '<div class="text-[10px] font-semibold text-rose-600" title="' + escapeHtml(c.inboxErr.msg) + '">❌ ส่งเข้าแชทไม่สำเร็จ ' + fmtTime(c.inboxErr.at) + ': ' + escapeHtml(c.inboxErr.msg.slice(0, 60)) + '</div>' : '')
                         + (c.kwLabelStatus ? '<div class="text-[10px] font-normal ' + (c.kwLabelStatus.charAt(0) === '❌' ? 'text-rose-600' : (c.kwLabelStatus.charAt(0) === '⏳' ? 'text-amber-600' : 'text-pink-600')) + '">🏷️ ' + escapeHtml(c.kwLabelStatus) + '</div>' : '') + '</td>'
                     + '<td class="py-1.5 pr-2">' + c.count + '</td>'
@@ -5135,6 +5142,8 @@ app.get('/', (req, res) => {
                 matchType: liveCfg.matchType,
                 replyCommentText: document.getElementById('lv-reply-text').value,
                 inboxText: document.getElementById('lv-inbox-text').value,
+                newCustomerOn: document.getElementById('lv-newcust-on').checked,
+                newCustomerText: document.getElementById('lv-newcust-text').value,
                 enableAutoLike: document.getElementById('lv-enable-like').checked,
                 enableCommentReply: document.getElementById('lv-enable-reply').checked,
                 enableInbox: document.getElementById('lv-enable-inbox').checked,
@@ -7391,6 +7400,8 @@ app.post('/api/live/create', checkAuth, (req, res) => {
       keywordRemoveLabels: Array.isArray(c.keywordRemoveLabels) ? c.keywordRemoveLabels.slice() : [],
       replyCooldownMin: Number(c.replyCooldownMin) || 0,
       auctionMode: !!c.auctionMode,
+      newCustomerOn: !!c.newCustomerOn,
+      newCustomerText: typeof c.newCustomerText === 'string' ? c.newCustomerText : '',
       auctionNoBidText: c.auctionNoBidText || 'รอแอดมินแจ้งยอด',
       auctionStartPrice: Number(c.auctionStartPrice) || 0,
       auctionShowTotal: c.auctionShowTotal !== false,
@@ -7670,6 +7681,9 @@ app.post('/api/live/config', checkAuth, (req, res) => {
   if (b.matchType === 'exact' || b.matchType === 'contains') s.config.matchType = b.matchType;
   if (typeof b.replyCommentText === 'string') s.config.replyCommentText = b.replyCommentText;
   if (typeof b.inboxText === 'string') s.config.inboxText = b.inboxText;
+  // 🆕 ข้อความลูกค้าใหม่: จำไว้ที่เพจด้วย ไลฟ์ถัดไปใช้ต่อได้เลย
+  if (typeof b.newCustomerOn === 'boolean') { s.config.newCustomerOn = b.newCustomerOn; ctx.pageData.config.newCustomerOn = b.newCustomerOn; }
+  if (typeof b.newCustomerText === 'string') { s.config.newCustomerText = b.newCustomerText.slice(0, 2000); ctx.pageData.config.newCustomerText = s.config.newCustomerText; }
   if (typeof b.enableCommentReply === 'boolean') s.config.enableCommentReply = b.enableCommentReply;
   if (typeof b.enableInbox === 'boolean') s.config.enableInbox = b.enableInbox;
   if (typeof b.enableAutoLike === 'boolean') s.config.enableAutoLike = b.enableAutoLike;
@@ -8969,6 +8983,44 @@ function logSlipAttempt(pageData, rec) {
   pageData.slipAttempts.unshift({ time: Date.now(), ...rec, name, amount: rec.amount !== undefined ? Number(rec.amount) || 0 : undefined });
   if (pageData.slipAttempts.length > 50) pageData.slipAttempts.length = 50;
 }
+// 🆕 ลูกค้าเคยซื้อกับเพจนี้หรือยัง: ชนะประมูล / มียอดที่ต้องจ่าย / เคยโอน / อยู่ในรายชื่อลูกค้า (ทุกไลฟ์ที่ยังเก็บไว้)
+function hasPurchaseHistory(pageData, uid) {
+  const psid = getPsidMap(pageData).get(String(uid)) || '';
+  const ids = [String(uid), psid ? String(psid) : ''].filter(Boolean);
+  const idSet = new Set(ids);
+  if (pageData.knownBuyers instanceof Set && ids.some(id => pageData.knownBuyers.has(id))) return true;
+  for (const ls of Object.values(pageData.liveSessions || {})) {
+    for (const id of ids) {
+      const c = ls.commenters && ls.commenters.get(id);
+      if (c && ((Number(c.dueAmount) || 0) > 0 || (Array.isArray(c.wins) && c.wins.some(w => (Number(w.amount) || 0) > 0)))) return true;
+      if (ls.buyers && ls.buyers.has(id)) return true;
+    }
+    if ((ls.slips || []).some(x => idSet.has(String(x.senderId)))) return true;
+  }
+  return (pageData.slipLog || []).some(x => idSet.has(String(x.senderId)));
+}
+// 🆕 ส่งข้อความลูกค้าใหม่ให้คนนี้ได้ไหม (ยังไม่เคยได้รับ + ไม่เคยซื้อ)
+function isNewCustomer(pageData, uid) {
+  if (!uid) return false;
+  const sent = pageData.newCustomerSent instanceof Set ? pageData.newCustomerSent : null;
+  if (sent && sent.has(String(uid))) return false;
+  return !hasPurchaseHistory(pageData, uid);
+}
+// กันลูกค้าใหม่กดคำดักติดกันหลายครั้ง แล้วได้ข้อความลูกค้าใหม่ซ้ำ (จองไว้ 60 วิ ระหว่างรอส่ง)
+const newCustReserve = new Set();
+function reserveNewCustomer(pageData, uid) {
+  const key = String(pageData.config && pageData.config.pageId || '') + ':' + String(uid);
+  if (newCustReserve.has(key)) return false;
+  newCustReserve.add(key);
+  setTimeout(() => newCustReserve.delete(key), 60000);
+  return true;
+}
+function markNewCustomerSent(pageData, uid) {
+  if (!(pageData.newCustomerSent instanceof Set)) pageData.newCustomerSent = new Set();
+  pageData.newCustomerSent.add(String(uid));
+  if (pageData.newCustomerSent.size > 100000) { let i = 0; for (const k of pageData.newCustomerSent) { pageData.newCustomerSent.delete(k); if (++i >= 10000) break; } }
+}
+
 const BANK_CODE_NAMES = { '002': 'กรุงเทพ', '004': 'กสิกรไทย', '006': 'กรุงไทย', '011': 'ทีทีบี', '014': 'ไทยพาณิชย์', '022': 'ซีไอเอ็มบี', '024': 'ยูโอบี', '025': 'กรุงศรี', '030': 'ออมสิน', '033': 'อาคารสงเคราะห์', '034': 'ธ.ก.ส.', '067': 'ทิสโก้', '069': 'เกียรตินาคิน', '073': 'แลนด์แอนด์เฮ้าส์' };
 function bankNameFromCode(c) { return BANK_CODE_NAMES[String(c)] || String(c); }
 
@@ -9157,6 +9209,9 @@ app.post('/webhook', async (req, res) => {
               let replyMsg = renderReplyText(cfg.replyCommentText, customerName);
               // ⚡ ส่งเข้าแชท + ตอบคอมเมนต์ ใช้คิวหลัก (สำคัญ) · กดไลก์แยกคิวรอง ไม่แย่งช่องของงานสำคัญ
               runTask(async () => {
+                // 🆕 ลูกค้าใหม่ (ไม่เคยซื้อ) -> ต่อข้อความลูกค้าใหม่ท้ายข้อความเข้าแชท (ครั้งแรกครั้งเดียว) · เช็คก่อนบันทึกยอดประมูลของรอบนี้
+                const newCustText = (cfg.newCustomerOn && cfg.enableInbox && senderId && String(cfg.newCustomerText || '').trim() && isNewCustomer(pageDataRef, senderId) && reserveNewCustomer(pageDataRef, senderId))
+                  ? renderReplyText(cfg.newCustomerText, customerName).trim() : '';
                 if (auctionOn && senderId) {
                  try {
                   // 🔨 รอ 3 วิ เผื่อคอมเมนต์ราคาที่พิมพ์ก่อนกด 1 ยังมาไม่ถึง แล้วหายอดจบประมูล
@@ -9257,6 +9312,7 @@ app.post('/webhook', async (req, res) => {
                   inboxMsg = inboxMsg.replace(/\{amount\}/gi, '');
                   replyMsg = replyMsg.replace(/\{amount\}/gi, '');
                 }
+                if (newCustText && inboxMsg) inboxMsg = inboxMsg.replace(/\s+$/, '') + '\n\n' + newCustText;
                 return fbLimit(pageId, async () => {
                 const jobs = [];
                 if (cfg.enableInbox && inboxMsg && !fbPaused(pageDataRef, 'inbox')) {
@@ -9277,6 +9333,7 @@ app.post('/webhook', async (req, res) => {
                     console.log('⚡ [Inbox] ' + commentId + ' ส่งเข้าแชทใน ' + (Date.now() - t0) + ' ms');
                     const c0 = senderId ? liveSession?.commenters.get(senderId) : null;
                     if (c0) delete c0.inboxErr;
+                    if (newCustText && senderId) { markNewCustomerSent(pageDataRef, senderId); if (c0) c0.newCustomer = true; }
                   }).catch(async inbErr => {
                     if (isFbSpamBlock(inbErr)) setFbPause(pageDataRef, 'inbox', inbErr);
                     console.error('❌ [Inbox Error]', inbErr.response?.data?.error?.message || inbErr.message);
@@ -9288,6 +9345,7 @@ app.post('/webhook', async (req, res) => {
                         await sendMessengerText(pageDataRef, String(psid), inboxMsg);
                         console.log('⚡ [Inbox] ส่งสำรองเข้าแชทตรงสำเร็จ ' + customerName);
                         if (c) delete c.inboxErr;
+                        if (newCustText && senderId) { markNewCustomerSent(pageDataRef, senderId); if (c) c.newCustomer = true; }
                         return;
                       } catch (e2) { console.error('❌ [Inbox Fallback]', e2.message === 'OUTSIDE_24H' ? 'เกิน 24 ชม.' : graphErrorMessage(e2)); }
                     }
