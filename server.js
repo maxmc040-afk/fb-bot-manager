@@ -1300,6 +1300,21 @@ async function callOcrServer(cfg, buf) {
   }
   return { errCode: 'OCR_SERVER_ERROR' };
 }
+// ☕ เซิร์ฟเวอร์ OCR ที่เพจไหนเลือกใช้อยู่ -> เรียก /healthz ให้ตื่นตลอด (เรียกครั้งเดียวต่อ URL)
+const ocrPingState = new Map(); // url -> { at, ok, error }
+async function pingOcrServers() {
+  const bases = new Set();
+  for (const u of Object.values(usersDB)) {
+    for (const pd of Object.values((u && u.pages) || {})) {
+      const c = pd && pd.config;
+      if (c && c.slipProvider === 'ocr' && c.enableSlipVerify) { const b = ocrServerBase(c); if (b) bases.add(b); }
+    }
+  }
+  await Promise.all(Array.from(bases).map(async (b) => {
+    try { await axios.get(b + '/healthz', { timeout: 90000 }); ocrPingState.set(b, { at: Date.now(), ok: true }); }
+    catch (e) { ocrPingState.set(b, { at: Date.now(), ok: false, error: e.response ? 'HTTP ' + e.response.status : e.message }); console.error('⚠️ [OCR Ping] ' + b + ' ไม่ตอบ:', e.message); }
+  }));
+}
 async function verifySlipWithOcrServer(imageUrl, cfg) {
   if (!ocrServerBase(cfg) || !String(cfg.ocrServerKey || '').trim()) return { slip: null, errCode: 'OCR_NOT_CONFIGURED' };
   let buf;
@@ -9540,6 +9555,9 @@ server = app.listen(PORT, () => {
   if (DB_ENABLED) setInterval(() => saveDb(false), 15 * 1000);
   loadThaiAddressDb();
   setInterval(() => { if (!thaiAddrDb) loadThaiAddressDb(); }, 10 * 60 * 1000);
+  // ☕ ปลุกเซิร์ฟเวอร์ OCR (Render ฟรีหลับเมื่อไม่มีคนใช้ 15 นาที) -> เรียกทุก 10 นาที ให้ตื่นตลอด สลิปไม่ต้องรอ
+  pingOcrServers();
+  setInterval(pingOcrServers, 10 * 60 * 1000);
   setInterval(async () => {
     try { await axios.get(serverUrl + '/healthz', { timeout: 5000 }); } catch (e) {}
   }, 10 * 60 * 1000);
