@@ -1262,7 +1262,7 @@ async function verifySlipWithGoogleVision(imageUrl, cfg) {
     slip: {
       transRef, amount: p.amount, dateText: p.dateText,
       receiverAccounts: p.receiverAccounts, receiverNameTh: p.receiverNameTh, receiverBank: '',
-      isDuplicate: false, matchResult: 'skipped', provider: 'gvision', unverified: true
+      isDuplicate: false, matchResult: 'skipped', provider: 'gvision', unverified: true, ocrText: text.slice(0, 4000)
     }, errCode: ''
   };
 }
@@ -1332,7 +1332,7 @@ async function verifySlipWithOcrServer(imageUrl, cfg) {
     slip: {
       transRef, amount: p.amount, dateText: p.dateText,
       receiverAccounts: p.receiverAccounts, receiverNameTh: p.receiverNameTh, receiverBank: '',
-      isDuplicate: false, matchResult: 'skipped', provider: 'ocr', unverified: true
+      isDuplicate: false, matchResult: 'skipped', provider: 'ocr', unverified: true, ocrText: o.text.slice(0, 4000)
     }, errCode: ''
   };
 }
@@ -1349,6 +1349,31 @@ async function verifySlip(imageUrl, cfg, pageData) {
   const r = await verifySlipByImageUrl(imageUrl, cfg.easySlipApiKey);
   const slip = r && r.success ? normalizeSlip(r.data) : null;
   return { slip, errCode: slip ? '' : (r?.error?.error?.code || r?.data?.error?.code || (r?.message === 'API Key missing' ? 'MISSING_API_KEY' : '')) };
+}
+
+// 👁️ สลิปที่อ่านจากรูป (OCR): ตัวอักษรอาจอ่านเพี้ยน (x เป็น % / ฐ เป็น ร) -> ตรวจผู้รับแบบยืดหยุ่น
+// 1) เลขบัญชีที่ปิดบางหลัก (เช่น xxx-x-x3012-x): เลขที่เห็นติดกัน ≥4 หลัก ต้องอยู่ในเลขบัญชีร้าน
+// 2) ชื่อผู้รับคล้ายชื่อบัญชีร้าน ≥ 85% (อ่านผิด 1-2 ตัวอักษร)
+function ocrReceiverLooseMatch(cfg, slip) {
+  const merchant = String(cfg.merchantAccount || '').replace(/\D/g, '');
+  const text = String(slip.ocrText || '').replace(/[๐-๙]/g, d => String('๐๑๒๓๔๕๖๗๘๙'.indexOf(d)));
+  if (merchant.length >= 6) {
+    for (const line of text.split('\n')) {
+      if (!/[xX*%×#]/.test(line)) continue; // บรรทัดเลขบัญชีที่ปิดบางหลัก
+      const runs = line.split(/[^0-9]+/).filter(r => r.length >= 4 && r.length <= 8);
+      if (runs.some(r => merchant.includes(r))) return 'account';
+    }
+  }
+  const clean = (v) => String(v || '').replace(/(นางสาว|น\.ส\.|นาย|นาง|MISS|MRS|MR|MS)\.?/gi, '').replace(/[^\u0E00-\u0E7Fa-zA-Z]/g, '').replace(/ํา/g, 'ำ').toLowerCase();
+  const want = clean(cfg.merchantName);
+  if (want.length >= 4) {
+    const cands = [slip.receiverNameTh].concat(text.split('\n').filter(l => /^\W{0,3}\s*(นาย|นาง|น\.ส\.|นางสาว|MR|MRS|MS|MISS)/i.test(l.trim())));
+    for (const c of cands) {
+      const got = clean(String(c || '').replace(/^\W{0,3}\s*/, ''));
+      if (got.length >= 4 && (similarity(got, want) >= 0.85 || (got.length >= 6 && (want.includes(got) || got.includes(want))))) return 'name';
+    }
+  }
+  return '';
 }
 
 // 🔧 เช็คเลขบัญชีผู้รับ (สลิปจะปิดเลขบางส่วน เช่น xxx-x-x9857-x) เทียบกับเลขบัญชีร้านค้า
@@ -4198,7 +4223,7 @@ app.get('/', (req, res) => {
                 if (r.quota && r.quota.remaining !== undefined && r.quota.remaining !== null) t += '📊 โควตาตรวจสลิปคงเหลือ ' + r.quota.remaining + ' ครั้ง';
                 if (r.lastError && Date.now() - r.lastError.at < 6 * 3600000) t += (t ? ' · ' : '') + '⚠️ ตรวจสลิปผิดพลาดล่าสุด: ' + r.lastError.code + ' (' + new Date(r.lastError.at).toLocaleTimeString('th-TH') + ')';
                 el.innerText = t;
-                const RES = { valid: ['✅ ผ่าน', 'text-emerald-700'], invalid: ['❌ บัญชีไม่ตรง', 'text-rose-700'], duplicate: ['🔄 สลิปซ้ำ', 'text-slate-600'], retry: ['⏳ รอธนาคาร', 'text-amber-700'], unreadable: ['⚠️ ตรวจไม่ได้', 'text-amber-700'], system: ['🛠️ ปัญหาระบบ', 'text-rose-700'], noimage: ['📎 ไม่พบรูป', 'text-slate-500'] };
+                const RES = { valid: ['✅ ผ่าน', 'text-emerald-700'], invalid: ['❌ บัญชีไม่ตรง', 'text-rose-700'], duplicate: ['🔄 สลิปซ้ำ', 'text-slate-600'], retry: ['⏳ รอธนาคาร', 'text-amber-700'], unreadable: ['⚠️ ตรวจไม่ได้', 'text-amber-700'], system: ['🛠️ ปัญหาระบบ', 'text-rose-700'], review: ['🔎 รอแอดมินตรวจ', 'text-sky-700'], noimage: ['📎 ไม่พบรูป', 'text-slate-500'] };
                 let rows = '';
                 (r.attempts || []).forEach(function(a) {
                     const m = RES[a.result] || [a.result, ''];
@@ -9075,7 +9100,17 @@ async function processSlipImage(targetRecord, pageId, senderId, imageUrl, attemp
       ? accountMatches(configStore.merchantAccount, slip.receiverAccounts)
       : (!configStore.merchantAccount && !configStore.merchantName) || nameMatches(configStore.merchantName, slip.receiverNameTh);
 
-  if (!receiverOk) {
+  // 👁️ อ่านจากรูป (OCR): ไม่ผ่านแบบเข้ม -> ลองแบบยืดหยุ่น (ตัวอักษรอาจอ่านเพี้ยน)
+  const looseHit = !receiverOk && slip.unverified ? ocrReceiverLooseMatch(configStore, slip) : '';
+  if (!receiverOk && slip.unverified && !looseHit) {
+    // OCR อ่านบัญชี/ชื่อผู้รับไม่ชัด -> ไม่ตัดสินว่าสลิปผิด (กันลูกค้าที่โอนถูกได้ข้อความ "สลิปไม่ถูกต้อง") ให้แอดมินตรวจเอง
+    console.log(`🔎 [Page: ${pageId}] อ่านผู้รับจากรูปไม่ชัด รอแอดมินตรวจ`, slip.receiverAccounts, slip.receiverNameTh);
+    logSlipAttempt(pageData, { senderId, provider, result: 'review', code: slip.transRef, amount: slip.amount,
+      note: 'อ่านบัญชี/ชื่อผู้รับจากรูปไม่ชัด รอแอดมินตรวจ · อ่านได้: ' + (slip.receiverAccounts.join(', ') || '-') + (slip.receiverNameTh ? ' (' + slip.receiverNameTh + ')' : '') + ' · ที่ตั้งไว้: ' + (configStore.merchantAccount || '-') + ' ' + (configStore.merchantName || '') });
+    await sendSlipReply(configStore.msgSlipReview || '✅ ได้รับสลิปแล้วค่ะ แอดมินกำลังตรวจสอบยอด จะแจ้งให้ทราบอีกครั้งนะคะ 🙏');
+    return;
+  }
+  if (!receiverOk && !looseHit) {
     console.log(`❌ [Page: ${pageId}] เลขบัญชีผู้รับไม่ตรงกับร้านค้า`, slip.receiverAccounts, slip.receiverNameTh);
     logSlipAttempt(pageData, { senderId, provider, result: 'invalid', code: slip.matchResult || 'account', amount: slip.amount,
       note: 'ปลายทางในสลิป: ' + (slip.receiverBank ? 'ธนาคาร ' + bankNameFromCode(slip.receiverBank) + ' ' : '') + (slip.receiverAccounts.join(', ') || '-') + (slip.receiverNameTh ? ' (' + slip.receiverNameTh + ')' : '')
@@ -9087,7 +9122,8 @@ async function processSlipImage(targetRecord, pageId, senderId, imageUrl, attemp
 
   usedSlips.add(slip.transRef);
   logSlipAttempt(pageData, { senderId, provider, result: 'valid', code: slip.transRef, amount: slip.amount, note: [attempt ? 'ผ่านหลังลองใหม่ ' + attempt + ' ครั้ง' : '',
-    slip.unverified ? (slip.provider === 'ocr' ? '🆓 อ่านจากรูป (เซิร์ฟเวอร์ OCR) · ยังไม่ยืนยันกับธนาคาร' : '👁️ อ่านจากรูป (Google Vision) · ยังไม่ยืนยันกับธนาคาร') + (slip.receiverAccounts.length ? ' · บัญชีผู้รับ ' + slip.receiverAccounts.join(', ') : '') + (slip.receiverNameTh ? ' · ' + slip.receiverNameTh : '') : ''].filter(Boolean).join(' · ') });
+    slip.unverified ? (slip.provider === 'ocr' ? '🆓 อ่านจากรูป (เซิร์ฟเวอร์ OCR) · ยังไม่ยืนยันกับธนาคาร' : '👁️ อ่านจากรูป (Google Vision) · ยังไม่ยืนยันกับธนาคาร') + (slip.receiverAccounts.length ? ' · บัญชีผู้รับ ' + slip.receiverAccounts.join(', ') : '') + (slip.receiverNameTh ? ' · ' + slip.receiverNameTh : '') : '',
+    looseHit ? (looseHit === 'account' ? 'ตรวจผู้รับจากเลขบัญชีที่เห็นบางส่วน' : 'ตรวจผู้รับจากชื่อ (อ่านใกล้เคียง)') : ''].filter(Boolean).join(' · ') });
   labelSlipResult(targetRecord.pageData, senderId, 'valid');
   if (usedSlips.size > 50000) { let i = 0; for (const k of usedSlips) { usedSlips.delete(k); if (++i >= 5000) break; } }
 
