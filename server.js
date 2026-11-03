@@ -1256,7 +1256,8 @@ function parseThaiSlipText(text, engText) {
   const dm = all.match(new RegExp('(\\d{1,2})\\s*' + TH_MON_RE + '\\s*(\\d{2,4})', 'i'));
   const tm = all.match(/(\d{1,2}):(\d{2})(?::\d{2})?/);
   const dateText = [dm ? dm[0] : '', tm ? tm[0] + ' น.' : ''].filter(Boolean).join(' ');
-  const looksSlip = /โอนเงินสำเร็จ|โอนสำเร็จ|ทำรายการสำเร็จ|รายการสำเร็จ|ชำระเงินสำเร็จ|จ่ายบิลสำเร็จ|successful|transfer|พร้อมเพย์|promptpay|เลขที่รายการ|รหัสอ้างอิง/i.test(all);
+  const looksSlip = /โอนเงินสำเร็จ|โอนสำเร็จ|ทำรายการสำเร็จ|รายการสำเร็จ|ชำระเงินสำเร็จ|จ่ายบิลสำเร็จ|successful|transfer|พร้อมเพย์|promptpay|เลขที่รายการ|รหัสอ้างอิง|หมายเลขอ้างอิง|เลขที่อ้างอิง|ค่าธรรมเนียม/i.test(all)
+    || /\b(Transfer|Successful|Reference|Ref\.?\s*No|Kasikorn|Bangkok Bank|Krungthai|Krungsri|UOB|TMRW|SCB|ttb)\b/i.test(eng); // สลิปภาษาอังกฤษ (UOB TMRW)
   // ได้เลขบัญชีแค่ 1 เลข แต่สลิปมีทั้งผู้โอนและผู้รับ -> ไม่รู้ว่าเป็นของใคร (กันเอาบัญชีผู้โอนไปเทียบเป็นบัญชีผู้รับ)
   const ambiguous = !accSure && uniqAcc.length === 1 && (names.length >= 2 || toIdx >= 0);
   return {
@@ -1428,6 +1429,8 @@ function ocrReceiverLooseMatch(cfg, slip) {
   const merchant = String(cfg.merchantAccount || '').replace(/\D/g, '');
   const text = String(slip.ocrText || '').replace(/[๐-๙]/g, d => String('๐๑๒๓๔๕๖๗๘๙'.indexOf(d)));
   if (merchant.length >= 6) {
+    // เลขบัญชีเต็มที่ไม่ปิดเลข (UOB TMRW แสดง "114 143 012 9") -> ตัดช่องว่าง/ขีดแล้วต้องตรงทุกหลัก
+    if (text.split('\n').some(l => (l.match(/\d[\d \-]{8,20}\d/g) || []).some(t => t.replace(/\D/g, '') === merchant))) return 'account';
     for (const line of text.split('\n')) {
       if (!/[xX*%×#]/.test(line)) continue; // บรรทัดเลขบัญชีที่ปิดบางหลัก
       const runs = line.split(/[^0-9]+/).filter(r => r.length >= 4 && r.length <= 8);
