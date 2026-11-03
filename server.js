@@ -5008,7 +5008,7 @@ app.get('/', (req, res) => {
                     const chk = !checkedDone && i === defaultIdx;
                     if(chk) checkedDone = true;
                     const what = isPress
-                        ? '<span class="px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 text-[11px] font-bold">กด 1</span>' + (after ? '' : ' <span class="text-[10px] text-slate-400">(ก่อนสัญญาณปิด)</span>')
+                        ? '<span class="px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 text-[11px] font-bold">กด 1</span>' + (after ? '' : ' <span class="text-[10px] text-slate-400">(รอบก่อน)</span>')
                         : '<span class="px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 text-[12px] font-bold">' + fmtMoney(e.amount) + '</span>' + (after ? ' <span class="text-[10px] text-slate-400">(หลังสัญญาณปิด)</span>' : '');
                     h += '<label class="flex items-center gap-2 p-1.5 rounded-lg border ' + (showBadge ? 'border-emerald-300 bg-emerald-50/60' : 'border-slate-200') + ' hover:bg-amber-50 cursor-pointer' + (after && !isPress ? ' opacity-60' : '') + '"><input type="radio" name="assign-who" value="' + escapeHtml(e.uid) + '" data-bid="' + bidVal + '" data-won="' + (x.won || 0) + '" onchange="assignPick(this)"' + (chk ? ' checked' : '') + '>'
                         + '<span class="flex-1 min-w-0"><span class="flex flex-wrap items-center gap-1.5"><b class="truncate">' + escapeHtml(e.name || x.name) + '</b>' + what + (showBadge ? wonBadge(x) : '') + '</span></span><span class="text-[10px] text-slate-400 whitespace-nowrap">' + fmtTime(e.at) + '</span></label>';
