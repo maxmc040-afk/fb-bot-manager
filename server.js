@@ -1176,7 +1176,9 @@ function parseThaiSlipText(text, engText) {
       ? l.replace(/([\u0E00-\u0E7F])\s(?=[\u0E00-\u0E7F])/g, '$1') : l)).join('\n'); // "จ ำ น ว น" (OCR เว้นทุกตัวอักษร) -> "จำนวน"
   const lines = t.split('\n').map(l => l.trim()).filter(Boolean)
     // OCR อ่านเลข 0 เป็นตัว O / เว้นวรรคในยอดเงิน / ใช้ , แทนจุดทศนิยม: "2.0O" "2 . 00" "2,00 บาท" -> "2.00"
-    .map(l => l.replace(/\d[\d,]*\s?[.,]\s?[\dOoD]{2}(?![\dA-Za-z])/g, m => m.replace(/[OoD]/g, '0').replace(/\s/g, '').replace(/,(\d{2})$/, '.$1')));
+    .map(l => l.replace(/\d[\d,]*\s?[.,]\s?[\dOoD]{2}(?![\dA-Za-z])/g, m => m.replace(/[OoD]/g, '0').replace(/\s/g, '').replace(/,(\d{2})$/, '.$1')))
+    // ลูกน้ำคั่นหลักพันหาย/กลายเป็นช่องว่าง: "4 480.00" (ttb) -> "4480.00" (เฉพาะยอดที่ขึ้นต้นบรรทัด / หลัง ฿ / หลัง :)
+    .map(l => l.replace(/(^|฿\s?|[:：]\s?)(\d{1,3}(?:[ ,]\d{3})+\.\d{2})(?!\d)/, (m, a, n) => a + n.replace(/ /g, ',')));
   const all = lines.join('\n');
   // 💰 ยอดเงิน: ตัวเลขทศนิยม 2 ตำแหน่ง · เลือกตัวที่อยู่บรรทัด/บรรทัดถัดจากคำว่า "จำนวน" ก่อน ไม่เอาค่าธรรมเนียม/ยอดคงเหลือ
   const money = [];
@@ -1234,6 +1236,15 @@ function parseThaiSlipText(text, engText) {
   const accList = (str) => Array.from(new Set((String(str || '').match(/(?<![A-Za-z0-9])[xX*%×\d](?:[xX*%×\d\- ]{5,20})[xX*%×\d](?![A-Za-z0-9])/g) || [])
     .map(x => x.trim().replace(/[%×]/g, 'x')).filter(x => (x.match(/\d/g) || []).length >= 3 && /[xX*\-]/.test(x) && (x.replace(/[^0-9xX*]/g, '').length >= 9) && x.replace(/\D/g, '').length <= 15)));
   const accTha = accList(all), accEng = accList(eng);
+  // สลิปที่มีหัวข้อ "จาก ... ไปยัง/ไปที่" (SCB / กรุงไทย / กรุงเทพ / ธ.ก.ส.) -> บัญชีหลังคำว่า ไปยัง = บัญชีผู้รับ
+  // รวมเลขแบบสั้นของ SCB เช่น "x-0129" / "x-6640"
+  const toIdx = lines.findIndex(l => { const x = l.replace(/^[^\u0E00-\u0E7FA-Za-z]+/, ''); return /^(ไปยัง|ไปที่)(?=\s|[:：]|$)/.test(x) || /^(ถึง|ผู้รับ|to)\s*[:：]?\s*$/i.test(x); });
+  let accAfterTo = [];
+  if (toIdx >= 0) {
+    const after = lines.slice(toIdx).join('\n');
+    accAfterTo = accList(after);
+    if (!accAfterTo.length) accAfterTo = Array.from(new Set((after.match(/(?<![A-Za-z0-9])[xX*%]{1,8}-?\d{4}(?![\d])/g) || []).map(x => x.replace(/%/g, 'x'))));
+  }
   const sig = (a) => a.replace(/[^0-9xX*]/g, '').toLowerCase();
   let uniqAcc = accEng.length >= 2 ? accEng : accTha.length >= 2 ? accTha : [];
   let accSure = uniqAcc.length >= 2; // เห็นครบทั้งบัญชีผู้โอน + ผู้รับ -> รู้ลำดับแน่นอน
@@ -1247,10 +1258,10 @@ function parseThaiSlipText(text, engText) {
   const dateText = [dm ? dm[0] : '', tm ? tm[0] + ' น.' : ''].filter(Boolean).join(' ');
   const looksSlip = /โอนเงินสำเร็จ|โอนสำเร็จ|ทำรายการสำเร็จ|รายการสำเร็จ|ชำระเงินสำเร็จ|จ่ายบิลสำเร็จ|successful|transfer|พร้อมเพย์|promptpay|เลขที่รายการ|รหัสอ้างอิง/i.test(all);
   // ได้เลขบัญชีแค่ 1 เลข แต่สลิปมีทั้งผู้โอนและผู้รับ -> ไม่รู้ว่าเป็นของใคร (กันเอาบัญชีผู้โอนไปเทียบเป็นบัญชีผู้รับ)
-  const ambiguous = !accSure && uniqAcc.length === 1 && names.length >= 2;
+  const ambiguous = !accSure && uniqAcc.length === 1 && (names.length >= 2 || toIdx >= 0);
   return {
     amount, transRef, dateText, looksSlip,
-    receiverAccounts: ambiguous ? [] : (uniqAcc.length >= 2 ? uniqAcc.slice(1) : uniqAcc),
+    receiverAccounts: accAfterTo.length ? accAfterTo.slice(0, 1) : ambiguous ? [] : (uniqAcc.length >= 2 ? uniqAcc.slice(1) : uniqAcc),
     senderAccount: uniqAcc.length >= 2 ? uniqAcc[0] : '',
     receiverNameTh: names.length >= 2 ? names[1] : '',
     senderName: names.length >= 2 ? names[0] : (names[0] || '')
