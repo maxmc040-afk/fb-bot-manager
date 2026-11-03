@@ -1201,6 +1201,22 @@ function parseThaiSlipText(text, engText) {
     const em = (eng.match(/(?<![\d.,])(\d{1,3}(?:,\d{3})+|\d+)\.(\d{2})(?!\d)/g) || []).map(x => parseFloat(x.replace(/,/g, ''))).filter(v => v > 0);
     if (em.length) amount = Math.max(...em);
   }
+  // OCR อ่านจุดทศนิยมหาย: "2.00 บาท" -> "200 um" · ยอดในสลิปธนาคารมีทศนิยม 2 ตำแหน่งเสมอ
+  // -> ตัวเลข (≥3 หลัก ไม่มีจุด) ที่อยู่หน้าคำว่า บาท (หรือที่ OCR อ่านเพี้ยน um/vm/ym…) = 2 หลักท้ายคือสตางค์
+  if (!amount) {
+    const BAHT = '(?:บาท|um|vm|ym|uw|wm|un|wn|nm|vn|THB)';
+    const dropRe = new RegExp('(?<![\\d.,:/])(\\d{1,3}(?:,\\d{3})*\\d{2}|\\d{3,})(?![\\d.,:/])\\s*' + BAHT, 'i');
+    const pick = (ls) => {
+      for (const l of ls) {
+        if (isFeeLine(l)) continue;
+        const m = l.match(dropRe);
+        if (m) { const v = parseInt(m[1].replace(/,/g, ''), 10) / 100; if (v > 0) return v; }
+      }
+      return 0;
+    };
+    const near = amtIdx >= 0 ? lines.slice(amtIdx, amtIdx + 3) : [];
+    amount = pick(near) || pick(lines) || pick(eng.split('\n'));
+  }
   // 🔖 เลขที่รายการ / รหัสอ้างอิง
   let transRef = '';
   const refIdx = lines.findIndex(l => /เลขที่รายการ|รหัสอ้างอิง|เลขที่อ้างอิง|หมายเลขอ้างอิง|รหัสรายการ|เลขอ้างอิง|ref(?:erence)?\s*(?:no|id)?|transaction\s*(?:no|id)/i.test(l));
