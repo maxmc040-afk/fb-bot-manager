@@ -3039,8 +3039,8 @@ app.get('/', (req, res) => {
                             <div class="mt-3 overflow-auto max-h-96">
                                 <div class="flex justify-end mb-2"><button type="button" onclick="loadSlipStatus()" class="px-3 py-1 text-xs font-medium bg-white border border-slate-300 rounded-lg hover:bg-slate-100">🔄 รีเฟรช</button></div>
                                 <table class="w-full text-xs">
-                                    <thead class="text-left text-slate-500 border-b border-slate-200"><tr><th class="py-1.5 pr-2">เวลา</th><th class="py-1.5 pr-2">ชื่อเฟส</th><th class="py-1.5 pr-2">ผล</th><th class="py-1.5 pr-2 text-right">ยอด</th><th class="py-1.5 pr-2">รหัส</th><th class="py-1.5">รายละเอียด</th></tr></thead>
-                                    <tbody id="slip-history-body"><tr><td colspan="6" class="py-3 text-slate-400">ยังไม่มีประวัติ</td></tr></tbody>
+                                    <thead class="text-left text-slate-500 border-b border-slate-200"><tr><th class="py-1.5 pr-2">เวลา</th><th class="py-1.5 pr-2">ชื่อเฟส</th><th class="py-1.5 pr-2">ผล</th><th class="py-1.5 pr-2 text-right">ยอด</th><th class="py-1.5 pr-2">รหัส</th><th class="py-1.5 pr-2">รายละเอียด</th><th class="py-1.5 text-center whitespace-nowrap">รูปสลิป</th></tr></thead>
+                                    <tbody id="slip-history-body"><tr><td colspan="7" class="py-3 text-slate-400">ยังไม่มีประวัติ</td></tr></tbody>
                                 </table>
                             </div>
                         </details>
@@ -4314,12 +4314,31 @@ app.get('/', (req, res) => {
                         + '<td class="py-1.5 pr-2 whitespace-nowrap font-semibold ' + m[1] + '">' + m[0] + '</td>'
                         + '<td class="py-1.5 pr-2 text-right">' + (a.amount !== undefined && a.amount !== null ? fmtMoney(a.amount) : '-') + '</td>'
                         + '<td class="py-1.5 pr-2 font-mono text-slate-500">' + escapeHtml(a.code || '') + '</td>'
-                        + '<td class="py-1.5 text-slate-600">' + escapeHtml(a.note || '') + (a.labelStatus ? '<div class="text-[11px] ' + (a.labelStatus.charAt(0) === '✅' ? 'text-pink-600' : 'text-rose-600') + '">🏷️ ' + escapeHtml(a.labelStatus) + '</div>' : '') + (a.replyStatus ? '<div class="text-[11px] ' + (a.replyStatus.charAt(0) === '💬' ? 'text-blue-600' : 'text-rose-600 font-semibold') + '">' + escapeHtml(a.replyStatus) + '</div>' : '') + '</td></tr>';
+                        + '<td class="py-1.5 text-slate-600">' + escapeHtml(a.note || '') + (a.labelStatus ? '<div class="text-[11px] ' + (a.labelStatus.charAt(0) === '✅' ? 'text-pink-600' : 'text-rose-600') + '">🏷️ ' + escapeHtml(a.labelStatus) + '</div>' : '') + (a.replyStatus ? '<div class="text-[11px] ' + (a.replyStatus.charAt(0) === '💬' ? 'text-blue-600' : 'text-rose-600 font-semibold') + '">' + escapeHtml(a.replyStatus) + '</div>' : '') + '</td>'
+                        + '<td class="py-1.5 text-center">' + (a.hasImage ? '<button type="button" data-id="' + escapeHtml(a.id || '') + '" onclick="showSlipImage(this)" title="ดูรูปสลิป" class="w-8 h-8 inline-flex items-center justify-center rounded-full border-2 border-pink-500 text-pink-600 hover:bg-pink-50">👁️</button>' : '<span class="text-slate-300">-</span>') + '</td></tr>';
                 });
                 const hb = document.getElementById('slip-history-body');
-                if (hb) hb.innerHTML = rows || '<tr><td colspan="6" class="py-3 text-slate-400">ยังไม่มีประวัติ</td></tr>';
+                if (hb) hb.innerHTML = rows || '<tr><td colspan="7" class="py-3 text-slate-400">ยังไม่มีประวัติ</td></tr>';
             } catch (e) { el.innerText = ''; }
         }
+
+        // 🖼️ ดูรูปสลิปจากประวัติตรวจสลิป
+        function showSlipImage(btn) {
+            let box = document.getElementById('slip-img-viewer');
+            if (!box) {
+                box = document.createElement('div');
+                box.id = 'slip-img-viewer';
+                box.className = 'fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4';
+                box.onclick = function(e) { if (e.target === box || e.target.getAttribute('data-close')) box.remove(); };
+                document.body.appendChild(box);
+            }
+            const src = '/api/slip/image?token=' + encodeURIComponent(authToken) + '&pageId=' + encodeURIComponent(currentActivePageId) + '&id=' + encodeURIComponent(btn.getAttribute('data-id'));
+            box.innerHTML = '<div class="relative bg-white rounded-2xl shadow-2xl p-3 max-w-md w-full max-h-[90vh] flex flex-col">'
+                + '<div class="flex items-center justify-between mb-2"><span class="text-sm font-semibold text-slate-700">🧾 รูปสลิป</span><button type="button" data-close="1" class="px-2 py-1 text-xs rounded-lg bg-slate-100 hover:bg-slate-200">✕ ปิด</button></div>'
+                + '<div class="overflow-auto flex-1 flex items-start justify-center"><img alt="รูปสลิป" class="max-w-full h-auto rounded-lg" src="' + src + '" onerror="this.outerHTML=&quot;<div class=&apos;py-10 text-center text-sm text-rose-600&apos;>❌ เปิดรูปไม่ได้ · ลิงก์รูปของ Facebook อาจหมดอายุแล้ว</div>&quot;"></div>'
+                + '<a href="' + src + '" target="_blank" rel="noopener" class="mt-2 text-center text-xs text-blue-600 hover:underline">เปิดรูปขนาดเต็มในแท็บใหม่</a></div>';
+        }
+        document.addEventListener('keydown', function(e) { if (e.key === 'Escape') { const b = document.getElementById('slip-img-viewer'); if (b) b.remove(); } });
 
         // ===== 🏷️ ป้ายกำกับตามผลตรวจสลิป (แอดมินเลือกเองจากป้ายที่มีในเพจ) =====
         let pageLabels = [];
@@ -7059,6 +7078,21 @@ app.post('/api/slip/ocr-test', checkAuth, async (req, res) => {
   }
 });
 
+// 🖼️ ดูรูปสลิปจากประวัติตรวจสลิป (เฉพาะรูปที่อยู่ในประวัติของเพจตัวเอง · ไม่เก็บสำเนารูป)
+app.get('/api/slip/image', checkAuth, async (req, res) => {
+  const pageData = usersDB[req.userId]?.pages[req.query.pageId];
+  if (!pageData) return res.status(404).send('ไม่พบเพจ');
+  const a = (pageData.slipAttempts || []).find(x => x.id === String(req.query.id || ''));
+  if (!a || !a.imageUrl) return res.status(404).send('ไม่พบรูป');
+  // ดึงจากลิงก์ของ Facebook ตรง ๆ (ไม่เก็บสำรอง) · ลิงก์หมดอายุ = เปิดไม่ได้
+  try {
+    const r = await axios.get(a.imageUrl, { responseType: 'arraybuffer', timeout: 20000, maxContentLength: 10 * 1024 * 1024 });
+    const buf = Buffer.from(r.data);
+    const type = buf[0] === 0x89 ? 'image/png' : (buf.slice(0, 4).toString('ascii') === 'RIFF' ? 'image/webp' : 'image/jpeg');
+    res.set('Content-Type', type).set('Cache-Control', 'private, max-age=3600').send(buf);
+  } catch (e) { res.status(410).send('ลิงก์รูปหมดอายุแล้ว (Facebook เก็บลิงก์รูปไว้ไม่นาน)'); }
+});
+
 app.get('/api/slip/status', checkAuth, async (req, res) => {
   const pageData = usersDB[req.userId]?.pages[req.query.pageId];
   if (!pageData) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
@@ -7067,7 +7101,9 @@ app.get('/api/slip/status', checkAuth, async (req, res) => {
   const missing = Array.from(new Set(attempts.filter(a => a.senderId && !a.name && !knownNameForPsid(pageData, a.senderId)).map(a => a.senderId))).slice(0, 10);
   await Promise.all(missing.map(id => nameForPsid(pageData, id)));
   for (const a of attempts) if (!a.name && a.senderId) { const n = knownNameForPsid(pageData, a.senderId); if (n) a.name = n; }
-  res.json({ success: true, provider: pageData.config.slipProvider || 'zwiz', quota: pageData.slipQuota || null, lastError: pageData.lastSlipError || null, attempts });
+  for (const a of attempts) if (!a.id) a.id = crypto.randomBytes(5).toString('hex'); // ประวัติเก่าก่อนอัปเดต
+  const outAttempts = attempts.map(({ imageUrl, ...a }) => ({ ...a, hasImage: !!imageUrl }));
+  res.json({ success: true, provider: pageData.config.slipProvider || 'zwiz', quota: pageData.slipQuota || null, lastError: pageData.lastSlipError || null, attempts: outAttempts });
 });
 
 // 🏷️ รายชื่อป้ายกำกับที่มีอยู่ในเพจ (ตัวเลือกในหน้าตั้งค่าสลิป)
@@ -9096,6 +9132,18 @@ app.get('/webhook', (req, res) => {
 
 // 🧾 ตรวจสลิป 1 รูป (เรียกซ้ำได้ เมื่อธนาคารยังยืนยันไม่ได้)
 async function processSlipImage(targetRecord, pageId, senderId, imageUrl, attempt = 0) {
+  const t0 = Date.now();
+  try {
+    return await processSlipImageInner(targetRecord, pageId, senderId, imageUrl, attempt);
+  } finally {
+    // ผูกลิงก์รูปกับผลตรวจของรูปนี้ (กดดูรูปสลิปได้ในประวัติ)
+    for (const a of (targetRecord.pageData.slipAttempts || [])) {
+      if (a.time < t0) break;
+      if (a.senderId === senderId && !a.imageUrl && a.result !== 'noimage') a.imageUrl = String(imageUrl || '').slice(0, 2000);
+    }
+  }
+}
+async function processSlipImageInner(targetRecord, pageId, senderId, imageUrl, attempt = 0) {
   const pageData = targetRecord.pageData;
   const configStore = pageData.config;
   const usedSlips = pageData.usedSlips || (pageData.usedSlips = new Set());
@@ -9255,7 +9303,7 @@ async function processSlipImage(targetRecord, pageId, senderId, imageUrl, attemp
 function logSlipAttempt(pageData, rec) {
   if (!pageData.slipAttempts) pageData.slipAttempts = [];
   const name = rec.name || (rec.senderId ? knownNameForPsid(pageData, rec.senderId) : '');
-  pageData.slipAttempts.unshift({ time: Date.now(), ...rec, name, amount: rec.amount !== undefined ? Number(rec.amount) || 0 : undefined });
+  pageData.slipAttempts.unshift({ id: crypto.randomBytes(5).toString('hex'), time: Date.now(), ...rec, name, amount: rec.amount !== undefined ? Number(rec.amount) || 0 : undefined });
   if (pageData.slipAttempts.length > 50) pageData.slipAttempts.length = 50;
 }
 // 🆕 ลูกค้าเคยซื้อกับเพจนี้หรือยัง: ชนะประมูล / มียอดที่ต้องจ่าย / เคยโอน / อยู่ในรายชื่อลูกค้า (ทุกไลฟ์ที่ยังเก็บไว้)
