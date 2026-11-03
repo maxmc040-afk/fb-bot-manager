@@ -1885,15 +1885,28 @@ function normalizeMarkers(t) {
 function parseThaiAddress(text, postcode) {
   let s = ' ' + normalizeMarkers(String(text || '').replace(RANK_MASK_RE, '$1')) + ' ';
   s = s.replace(/(ตำบล|แขวง|อำเภอ|เขต|จังหวัด|ต\.|อ\.|จ\.)/g, ' $1 ');
-  const grab = (re) => {
-    const m = s.match(re);
-    if (!m) return '';
-    s = s.replace(m[0], ' ');
+  // มีคำนำหน้าซ้ำหลายจุด (เช่น "การไฟฟ้านครหลวง เขตวัดเลียบ ... แขวงวังบูรพาภิรมย์ เขตพระนคร")
+  // -> เลือกตัวที่เป็นชื่อจริงในฐานข้อมูล (ตัวท้ายสุด) ถ้าไม่มีตัวไหนตรง ใช้ตัวแรกเหมือนเดิม
+  const grab = (re, kind) => {
+    const all = Array.from(s.matchAll(new RegExp(re.source, 'g')));
+    if (!all.length) return '';
+    let m = all[0];
+    if (all.length > 1 && kind && typeof thaiAddrDb !== 'undefined' && thaiAddrDb) {
+      const valid = (v) => {
+        const c = compactTh(v);
+        return thaiAddrDb.some(r => kind === 'd' ? r.dn === c
+          : kind === 'a' ? (r.an === c || r.an === 'เมือง' + c || (c === 'เมือง' && r.an.startsWith('เมือง')))
+          : r.pn === c);
+      };
+      const ok = all.filter(x => valid(x[1]));
+      if (ok.length) m = ok[ok.length - 1];
+    }
+    s = s.slice(0, m.index) + ' ' + s.slice(m.index + m[0].length);
     return m[1].trim();
   };
-  let province = grab(/(?:จังหวัด|จ\.)\s*([^\s\d,]+)/);
-  const district = grab(/(?:ตำบล|แขวง|ต\.)\s*([^\s\d,]+)/);
-  const city = grab(/(?:อำเภอ|เขต|อ\.)\s*([^\s\d,]+)/);
+  let province = grab(/(?:จังหวัด|จ\.)\s*([^\s\d,]+)/, 'p');
+  const district = grab(/(?:ตำบล|แขวง|ต\.)\s*([^\s\d,]+)/, 'd');
+  const city = grab(/(?:อำเภอ|เขต|อ\.)\s*([^\s\d,]+)/, 'a');
   if (!province || /^(กรุงเทพ|กทม)/.test(province)) {
     if (/กรุงเทพ|กทม/.test(s) || /^(กรุงเทพ|กทม)/.test(province)) province = 'กรุงเทพมหานคร';
     s = s.replace(/กรุงเทพมหานคร|กรุงเทพฯ?|กทม\.?/g, ' ');
