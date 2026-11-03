@@ -3039,8 +3039,8 @@ app.get('/', (req, res) => {
                             <div class="mt-3 overflow-auto max-h-96">
                                 <div class="flex justify-end mb-2"><button type="button" onclick="loadSlipStatus()" class="px-3 py-1 text-xs font-medium bg-white border border-slate-300 rounded-lg hover:bg-slate-100">🔄 รีเฟรช</button></div>
                                 <table class="w-full text-xs">
-                                    <thead class="text-left text-slate-500 border-b border-slate-200"><tr><th class="py-1.5 pr-2">เวลา</th><th class="py-1.5 pr-2">ชื่อเฟส</th><th class="py-1.5 pr-2">ผล</th><th class="py-1.5 pr-2 text-right">ยอด</th><th class="py-1.5 pr-2">รหัส</th><th class="py-1.5 pr-2">รายละเอียด</th><th class="py-1.5 text-center whitespace-nowrap">รูปสลิป</th></tr></thead>
-                                    <tbody id="slip-history-body"><tr><td colspan="7" class="py-3 text-slate-400">ยังไม่มีประวัติ</td></tr></tbody>
+                                    <thead class="text-left text-slate-500 border-b border-slate-200"><tr><th class="py-1.5 pr-2">เวลา</th><th class="py-1.5 pr-2">ชื่อเฟส</th><th class="py-1.5 pr-2">ผล</th><th class="py-1.5 pr-2 text-right">ยอด</th><th class="py-1.5 pr-2">รหัส</th><th class="py-1.5">รายละเอียด</th></tr></thead>
+                                    <tbody id="slip-history-body"><tr><td colspan="6" class="py-3 text-slate-400">ยังไม่มีประวัติ</td></tr></tbody>
                                 </table>
                             </div>
                         </details>
@@ -4314,11 +4314,10 @@ app.get('/', (req, res) => {
                         + '<td class="py-1.5 pr-2 whitespace-nowrap font-semibold ' + m[1] + '">' + m[0] + '</td>'
                         + '<td class="py-1.5 pr-2 text-right">' + (a.amount !== undefined && a.amount !== null ? fmtMoney(a.amount) : '-') + '</td>'
                         + '<td class="py-1.5 pr-2 font-mono text-slate-500">' + escapeHtml(a.code || '') + '</td>'
-                        + '<td class="py-1.5 text-slate-600">' + escapeHtml(a.note || '') + (a.labelStatus ? '<div class="text-[11px] ' + (a.labelStatus.charAt(0) === '✅' ? 'text-pink-600' : 'text-rose-600') + '">🏷️ ' + escapeHtml(a.labelStatus) + '</div>' : '') + (a.replyStatus ? '<div class="text-[11px] ' + (a.replyStatus.charAt(0) === '💬' ? 'text-blue-600' : 'text-rose-600 font-semibold') + '">' + escapeHtml(a.replyStatus) + '</div>' : '') + '</td>'
-                        + '<td class="py-1.5 text-center">' + (a.hasImage ? '<button type="button" data-id="' + escapeHtml(a.id || '') + '" onclick="showSlipImage(this)" title="ดูรูปสลิป" class="w-8 h-8 inline-flex items-center justify-center rounded-full border-2 border-pink-500 text-pink-600 hover:bg-pink-50">👁️</button>' : '<span class="text-slate-300">-</span>') + '</td></tr>';
+                        + '<td class="py-1.5 text-slate-600">' + (a.hasImage ? '<button type="button" data-id="' + escapeHtml(a.id || '') + '" onclick="showSlipImage(this)" title="ดูรูปสลิป" class="mr-1.5 mb-0.5 px-2 py-0.5 text-[11px] font-semibold rounded-full border border-pink-400 text-pink-600 bg-white hover:bg-pink-50 whitespace-nowrap">🖼️ ดูรูปสลิป</button>' : '') + escapeHtml(a.note || '') + (a.labelStatus ? '<div class="text-[11px] ' + (a.labelStatus.charAt(0) === '✅' ? 'text-pink-600' : 'text-rose-600') + '">🏷️ ' + escapeHtml(a.labelStatus) + '</div>' : '') + (a.replyStatus ? '<div class="text-[11px] ' + (a.replyStatus.charAt(0) === '💬' ? 'text-blue-600' : 'text-rose-600 font-semibold') + '">' + escapeHtml(a.replyStatus) + '</div>' : '') + '</td></tr>';
                 });
                 const hb = document.getElementById('slip-history-body');
-                if (hb) hb.innerHTML = rows || '<tr><td colspan="7" class="py-3 text-slate-400">ยังไม่มีประวัติ</td></tr>';
+                if (hb) hb.innerHTML = rows || '<tr><td colspan="6" class="py-3 text-slate-400">ยังไม่มีประวัติ</td></tr>';
             } catch (e) { el.innerText = ''; }
         }
 
