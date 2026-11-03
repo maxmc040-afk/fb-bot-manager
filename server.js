@@ -965,6 +965,8 @@ const defaultPageConfig = {
   slipProvider: 'zwiz',    // ผู้ให้บริการตรวจสลิป: 'zwiz' (หลัก) หรือ 'easyslip'
   zwizApiKey: '',          // ZWIZ.AI Slip Verification API Key
   gvisionApiKey: '',       // Google Cloud Vision API Key (อ่านสลิปจากรูป · ไม่ได้ยืนยันกับธนาคาร)
+  ocrServerUrl: '',        // 🆓 เซิร์ฟเวอร์ OCR ของเราเอง (Render อีกตัว) เช่น https://slip-ocr.onrender.com
+  ocrServerKey: '',        // รหัสลับ (OCR_SECRET) ของเซิร์ฟเวอร์ OCR
   enableCommentBot: true,  // สวิตช์หลัก เปิด/ปิด บอตตอบกลับคอมเมนต์ (โพสต์ทั่วไป)
   
   matchType: 'contains',
@@ -1166,7 +1168,10 @@ async function verifySlipWithZwiz(imageUrl, cfg) {
 // =====================================================================
 const TH_MON_RE = '(?:ม\\.?ค\\.?|ก\\.?พ\\.?|มี\\.?ค\\.?|เม\\.?ย\\.?|พ\\.?ค\\.?|มิ\\.?ย\\.?|ก\\.?ค\\.?|ส\\.?ค\\.?|ก\\.?ย\\.?|ต\\.?ค\\.?|พ\\.?ย\\.?|ธ\\.?ค\\.?|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\.?';
 function parseThaiSlipText(text) {
-  const t = String(text || '').replace(/[๐-๙]/g, d => String('๐๑๒๓๔๕๖๗๘๙'.indexOf(d))).replace(/\r/g, '');
+  const t = String(text || '').replace(/[๐-๙]/g, d => String('๐๑๒๓๔๕๖๗๘๙'.indexOf(d))).replace(/\r/g, '')
+    .replace(/ํา/g, 'ำ').replace(/เเ/g, 'แ')                        // OCR อ่าน "ำ" เป็น ํ+า / "แ" เป็น เ+เ
+    .split('\n').map(l => ((l.match(/(?:^|\s)[\u0E00-\u0E7F](?=\s)/g) || []).length >= 3
+      ? l.replace(/([\u0E00-\u0E7F])\s(?=[\u0E00-\u0E7F])/g, '$1') : l)).join('\n'); // "จ ำ น ว น" (OCR เว้นทุกตัวอักษร) -> "จำนวน"
   const lines = t.split('\n').map(l => l.trim()).filter(Boolean);
   const all = lines.join('\n');
   // 💰 ยอดเงิน: ตัวเลขทศนิยม 2 ตำแหน่ง · เลือกตัวที่อยู่บรรทัด/บรรทัดถัดจากคำว่า "จำนวน" ก่อน ไม่เอาค่าธรรมเนียม/ยอดคงเหลือ
@@ -1262,8 +1267,64 @@ async function verifySlipWithGoogleVision(imageUrl, cfg) {
   };
 }
 
-// ตัวเลือกผู้ให้บริการ: ZWIZ (หลัก) หรือ EasySlip (สำรอง)
+// =====================================================================
+// 🆓 เซิร์ฟเวอร์ OCR ของเราเอง (Render อีกตัว · Tesseract · ฟรี)
+// บอตดาวน์โหลดรูปสลิป -> ส่งไปให้เซิร์ฟเวอร์ OCR อ่านข้อความ -> แยก ยอดเงิน/เลขที่รายการ/บัญชีผู้รับ เหมือน Google Vision
+// ⚠️ อ่านจากรูปอย่างเดียว ไม่ได้ยืนยันกับธนาคาร
+// =====================================================================
+function ocrServerBase(cfg) {
+  const u = String(cfg.ocrServerUrl || '').trim().replace(/\/+$/, '');
+  return /^https?:\/\//i.test(u) ? u : '';
+}
+async function callOcrServer(cfg, buf) {
+  const base = ocrServerBase(cfg), key = String(cfg.ocrServerKey || '').trim();
+  if (!base || !key) return { errCode: 'OCR_NOT_CONFIGURED' };
+  // Render แบบฟรีหลับเมื่อไม่มีคนใช้ 15 นาที -> ครั้งแรกอาจรอเซิร์ฟเวอร์ตื่น ~1 นาที
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const r = await axios.post(base + '/ocr', { image: buf.toString('base64') }, {
+        headers: { 'x-ocr-key': key }, timeout: 120000, maxBodyLength: Infinity, maxContentLength: 5 * 1024 * 1024
+      });
+      if (!r.data || !r.data.success) return { errCode: 'OCR_SERVER_ERROR', detail: String(r.data && r.data.error || '') };
+      return { text: String(r.data.text || ''), ms: r.data.ms, confidence: r.data.confidence };
+    } catch (e) {
+      const st = e.response && e.response.status;
+      const code = e.response && e.response.data && e.response.data.error;
+      if (st === 401) return { errCode: 'OCR_UNAUTHORIZED', detail: 'รหัสลับ OCR ไม่ตรงกับ OCR_SECRET ของเซิร์ฟเวอร์ OCR' };
+      if (st === 415) return { errCode: 'IMAGE_FORMAT_UNSUPPORTED' };
+      if (st === 413) return { errCode: 'FILE_TOO_LARGE' };
+      const retry = !st || st === 502 || st === 503 || st === 504; // เซิร์ฟเวอร์กำลังตื่น / คิวเต็ม
+      if (retry && attempt === 0) { await sleep(15000); continue; }
+      return { errCode: e.code === 'ECONNABORTED' ? 'OCR_TIMEOUT' : 'OCR_SERVER_ERROR', detail: (code || e.message || '').toString().slice(0, 160) };
+    }
+  }
+  return { errCode: 'OCR_SERVER_ERROR' };
+}
+async function verifySlipWithOcrServer(imageUrl, cfg) {
+  if (!ocrServerBase(cfg) || !String(cfg.ocrServerKey || '').trim()) return { slip: null, errCode: 'OCR_NOT_CONFIGURED' };
+  let buf;
+  try { buf = Buffer.from((await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 20000 })).data); }
+  catch (e) { return { slip: null, errCode: 'IMAGE_DOWNLOAD_FAILED' }; }
+  if (buf.length > 10 * 1024 * 1024) return { slip: null, errCode: 'FILE_TOO_LARGE' };
+  const o = await callOcrServer(cfg, buf);
+  if (o.errCode) { console.error('❌ [OCR Server]', o.errCode, o.detail || ''); return { slip: null, errCode: o.errCode, detail: o.detail || '' }; }
+  if (!o.text.trim()) return { slip: null, errCode: 'NO_TEXT' };
+  const p = parseThaiSlipText(o.text);
+  if (!p.looksSlip || !(p.amount > 0)) return { slip: null, errCode: 'NOT_A_SLIP', detail: 'อ่านรูปได้ แต่ไม่พบรูปแบบสลิปโอนเงิน/ยอดเงิน' };
+  const transRef = p.transRef || ('OCR-' + crypto.createHash('md5').update([p.amount, p.dateText, p.senderAccount, p.receiverAccounts.join(','), p.senderName].join('|')).digest('hex').slice(0, 16));
+  console.log('✅ [OCR Server] อ่านสลิป: ' + p.amount + ' บาท · ref ' + transRef + ' (' + (o.ms || '-') + ' ms)');
+  return {
+    slip: {
+      transRef, amount: p.amount, dateText: p.dateText,
+      receiverAccounts: p.receiverAccounts, receiverNameTh: p.receiverNameTh, receiverBank: '',
+      isDuplicate: false, matchResult: 'skipped', provider: 'ocr', unverified: true
+    }, errCode: ''
+  };
+}
+
+// ตัวเลือกผู้ให้บริการ: ZWIZ (หลัก) / EasySlip (สำรอง) / Google Vision / เซิร์ฟเวอร์ OCR ของเรา (ฟรี)
 async function verifySlip(imageUrl, cfg, pageData) {
+  if (cfg.slipProvider === 'ocr') return verifySlipWithOcrServer(imageUrl, cfg);
   if (cfg.slipProvider === 'gvision') return verifySlipWithGoogleVision(imageUrl, cfg);
   if ((cfg.slipProvider || 'zwiz') === 'zwiz') {
     const out = await verifySlipWithZwiz(imageUrl, cfg);
@@ -2728,7 +2789,25 @@ app.get('/', (req, res) => {
                                     <option value="zwiz">ZWIZ.AI (หลัก)</option>
                                     <option value="easyslip">EasySlip (สำรอง)</option>
                                     <option value="gvision">Google Vision (อ่านจากรูป)</option>
+                                    <option value="ocr">🆓 เซิร์ฟเวอร์ OCR ของเรา (ฟรี)</option>
                                 </select>
+                            </div>
+                            <div id="ocr-server-box" class="md:col-span-2 hidden space-y-2">
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                    <div>
+                                        <label class="text-xs font-semibold text-slate-600 block mb-1">URL เซิร์ฟเวอร์ OCR:</label>
+                                        <input type="text" id="ocr-server-url" autocomplete="off" class="w-full p-2.5 text-sm bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-rose-400" placeholder="https://slip-ocr-xxxx.onrender.com">
+                                    </div>
+                                    <div>
+                                        <label class="text-xs font-semibold text-slate-600 block mb-1">รหัสลับ (OCR_SECRET):</label>
+                                        <input type="password" id="ocr-server-key" autocomplete="new-password" class="w-full p-2.5 text-sm bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-rose-400" placeholder="รหัสเดียวกับที่ตั้งใน Render ของเซิร์ฟเวอร์ OCR">
+                                    </div>
+                                </div>
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <button type="button" onclick="testOcrServer(this)" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-800 text-white hover:bg-slate-900">🔌 ทดสอบการเชื่อมต่อ</button>
+                                    <span id="ocr-test-result" class="text-xs text-slate-600"></span>
+                                </div>
+                                <p class="text-[11px] text-amber-700">⚠️ อ่านตัวหนังสือจากรูปสลิปด้วยเซิร์ฟเวอร์ของเราเอง (ฟรี ไม่จำกัด) <b>ไม่ได้ยืนยันกับธนาคาร</b> · ระบบยังตรวจบัญชีผู้รับและกันสลิปซ้ำให้ · ควรตั้ง "เลขบัญชี" ด้านล่างให้ถูกต้อง · ถ้าเซิร์ฟเวอร์ OCR หลับ (Render ฟรี) สลิปแรกจะรอประมาณ 1 นาที</p>
                             </div>
                             <div id="zwiz-key-box" class="md:col-span-2">
                                 <label class="text-xs font-semibold text-slate-600 block mb-1">ZWIZ API Key (x-api-key):</label>
@@ -3767,6 +3846,9 @@ app.get('/', (req, res) => {
             document.getElementById('easyslip-api-key').value = currentConfig.easySlipApiKey || '';
             document.getElementById('zwiz-api-key').value = currentConfig.zwizApiKey || '';
             document.getElementById('gvision-api-key').value = currentConfig.gvisionApiKey || '';
+            document.getElementById('ocr-server-url').value = currentConfig.ocrServerUrl || '';
+            document.getElementById('ocr-server-key').value = currentConfig.ocrServerKey || '';
+            document.getElementById('ocr-test-result').innerText = '';
             document.getElementById('slip-provider').value = currentConfig.slipProvider || 'zwiz';
             toggleSlipProvider();
             loadSlipStatus();
@@ -3957,6 +4039,8 @@ app.get('/', (req, res) => {
             currentConfig.easySlipApiKey = document.getElementById('easyslip-api-key').value.trim();
             currentConfig.zwizApiKey = document.getElementById('zwiz-api-key').value.trim();
             currentConfig.gvisionApiKey = document.getElementById('gvision-api-key').value.trim();
+            currentConfig.ocrServerUrl = document.getElementById('ocr-server-url').value.trim().replace(/[/]+$/, '');
+            currentConfig.ocrServerKey = document.getElementById('ocr-server-key').value.trim();
             currentConfig.slipProvider = document.getElementById('slip-provider').value;
             currentConfig.merchantBank = document.getElementById('merchant-bank').value;
             currentConfig.merchantAccount = document.getElementById('merchant-account').value;
@@ -4065,6 +4149,28 @@ app.get('/', (req, res) => {
             document.getElementById('zwiz-key-box').classList.toggle('hidden', v !== 'zwiz');
             document.getElementById('easyslip-key-box').classList.toggle('hidden', v !== 'easyslip');
             document.getElementById('gvision-key-box').classList.toggle('hidden', v !== 'gvision');
+            document.getElementById('ocr-server-box').classList.toggle('hidden', v !== 'ocr');
+        }
+
+        async function testOcrServer(btn) {
+            const out = document.getElementById('ocr-test-result');
+            btn.disabled = true;
+            out.className = 'text-xs text-slate-600';
+            out.innerText = '⏳ กำลังเชื่อมต่อ... (ถ้าเซิร์ฟเวอร์หลับอยู่ อาจรอประมาณ 1 นาที)';
+            try {
+                const r = await (await fetch('/api/slip/ocr-test?token=' + authToken + '&pageId=' + currentActivePageId, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url: document.getElementById('ocr-server-url').value.trim(), key: document.getElementById('ocr-server-key').value.trim() })
+                })).json();
+                if (r.success) {
+                    out.className = 'text-xs text-emerald-700 font-semibold';
+                    out.innerText = '✅ เชื่อมต่อได้ · ' + (r.ready ? 'พร้อมอ่านสลิป' : 'กำลังโหลดภาษา (รอสักครู่)') + ' · ภาษา ' + (r.langs || []).join('+') + ' · แรม ' + r.memMB + ' MB · ' + r.ms + ' ms';
+                } else {
+                    out.className = 'text-xs text-rose-600 font-semibold';
+                    out.innerText = '❌ ' + r.error;
+                }
+            } catch (e) { out.className = 'text-xs text-rose-600 font-semibold'; out.innerText = '❌ ' + e.message; }
+            finally { btn.disabled = false; }
         }
 
         async function loadSlipStatus() {
@@ -6813,6 +6919,24 @@ async function nameForPsid(pageData, psid) {
   } catch (e) { return ''; }
 }
 
+// 🆓 ทดสอบการเชื่อมต่อเซิร์ฟเวอร์ OCR (ใช้ URL/รหัสที่กรอกในหน้าตั้งค่า ยังไม่ต้องบันทึก)
+app.post('/api/slip/ocr-test', checkAuth, async (req, res) => {
+  const pageData = usersDB[req.userId]?.pages[req.query.pageId];
+  if (!pageData) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
+  const cfg = { ocrServerUrl: String((req.body || {}).url || pageData.config.ocrServerUrl || ''), ocrServerKey: String((req.body || {}).key || pageData.config.ocrServerKey || '') };
+  const base = ocrServerBase(cfg);
+  if (!base) return res.json({ success: false, error: 'กรุณาใส่ URL ของเซิร์ฟเวอร์ OCR (ขึ้นต้นด้วย https://)' });
+  if (!cfg.ocrServerKey.trim()) return res.json({ success: false, error: 'กรุณาใส่รหัสลับ (OCR_SECRET)' });
+  const t0 = Date.now();
+  try {
+    const r = await axios.get(base + '/status', { headers: { 'x-ocr-key': cfg.ocrServerKey.trim() }, timeout: 90000 });
+    res.json({ success: true, ms: Date.now() - t0, ...r.data });
+  } catch (e) {
+    const st = e.response && e.response.status;
+    res.json({ success: false, error: st === 401 ? 'รหัสลับไม่ตรงกับ OCR_SECRET ของเซิร์ฟเวอร์ OCR' : st === 404 ? 'URL ไม่ถูกต้อง (ไม่พบเซิร์ฟเวอร์ OCR ที่ URL นี้)' : 'เชื่อมต่อไม่ได้: ' + (st ? 'HTTP ' + st : e.message) });
+  }
+});
+
 app.get('/api/slip/status', checkAuth, async (req, res) => {
   const pageData = usersDB[req.userId]?.pages[req.query.pageId];
   if (!pageData) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
@@ -8901,7 +9025,7 @@ async function processSlipImage(targetRecord, pageId, senderId, imageUrl, attemp
       return;
     }
     // ปัญหาฝั่งระบบ (key / โควตา / เซิร์ฟเวอร์ EasySlip) ไม่ใช่ความผิดลูกค้า -> ไม่แจ้งลูกค้า
-    const systemErr = ['MISSING_API_KEY', 'INVALID_API_KEY', 'QUOTA_EXCEEDED', 'INSUFFICIENT_QUOTA', 'IP_NOT_ALLOWED', 'BRANCH_INACTIVE', 'SERVICE_BANNED', 'SERVICE_DELETED', 'USER_BANNED', 'RATE_LIMIT_EXCEEDED', 'API_SERVER_ERROR', 'INTERNAL_SERVER_ERROR', 'INTERNAL_ERROR', 'IMAGE_DOWNLOAD_FAILED', 'NETWORK_ERROR', 'HTTP_500', 'HTTP_502', 'HTTP_503', 'HTTP_504', 'VISION_API_NOT_ENABLED', 'VISION_BILLING_DISABLED', 'HTTP_400', 'HTTP_401', 'HTTP_403'].includes(errCode);
+    const systemErr = ['MISSING_API_KEY', 'INVALID_API_KEY', 'QUOTA_EXCEEDED', 'INSUFFICIENT_QUOTA', 'IP_NOT_ALLOWED', 'BRANCH_INACTIVE', 'SERVICE_BANNED', 'SERVICE_DELETED', 'USER_BANNED', 'RATE_LIMIT_EXCEEDED', 'API_SERVER_ERROR', 'INTERNAL_SERVER_ERROR', 'INTERNAL_ERROR', 'IMAGE_DOWNLOAD_FAILED', 'NETWORK_ERROR', 'HTTP_500', 'HTTP_502', 'HTTP_503', 'HTTP_504', 'VISION_API_NOT_ENABLED', 'VISION_BILLING_DISABLED', 'OCR_NOT_CONFIGURED', 'OCR_UNAUTHORIZED', 'OCR_SERVER_ERROR', 'OCR_TIMEOUT', 'HTTP_400', 'HTTP_401', 'HTTP_403'].includes(errCode);
     if (systemErr) targetRecord.pageData.lastSlipError = { code: errCode, at: Date.now() };
     const mode = configStore.slipUnreadableMode || 'smart';
     const payCtx = isPaymentContext(targetRecord.pageData, senderId);
@@ -8948,7 +9072,7 @@ async function processSlipImage(targetRecord, pageId, senderId, imageUrl, attemp
 
   usedSlips.add(slip.transRef);
   logSlipAttempt(pageData, { senderId, provider, result: 'valid', code: slip.transRef, amount: slip.amount, note: [attempt ? 'ผ่านหลังลองใหม่ ' + attempt + ' ครั้ง' : '',
-    slip.unverified ? '👁️ อ่านจากรูป (Google Vision) · ยังไม่ยืนยันกับธนาคาร' + (slip.receiverAccounts.length ? ' · บัญชีผู้รับ ' + slip.receiverAccounts.join(', ') : '') + (slip.receiverNameTh ? ' · ' + slip.receiverNameTh : '') : ''].filter(Boolean).join(' · ') });
+    slip.unverified ? (slip.provider === 'ocr' ? '🆓 อ่านจากรูป (เซิร์ฟเวอร์ OCR) · ยังไม่ยืนยันกับธนาคาร' : '👁️ อ่านจากรูป (Google Vision) · ยังไม่ยืนยันกับธนาคาร') + (slip.receiverAccounts.length ? ' · บัญชีผู้รับ ' + slip.receiverAccounts.join(', ') : '') + (slip.receiverNameTh ? ' · ' + slip.receiverNameTh : '') : ''].filter(Boolean).join(' · ') });
   labelSlipResult(targetRecord.pageData, senderId, 'valid');
   if (usedSlips.size > 50000) { let i = 0; for (const k of usedSlips) { usedSlips.delete(k); if (++i >= 5000) break; } }
 
