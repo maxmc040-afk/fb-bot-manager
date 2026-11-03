@@ -3062,6 +3062,7 @@ app.get('/', (req, res) => {
                                         <option value="matched">เฉพาะคนที่ตรงคำดัก</option>
                                         <option value="unpaid">ตรงคำดัก · ยังไม่โอน</option>
                                         <option value="paid">ตรงคำดัก · โอนแล้ว</option>
+                                        <option value="matchedNotBuyer">ตรงคำดัก · ยังไม่อยู่ในรายชื่อลูกค้า</option>
                                         <option value="paidNotBuyer">โอนแล้ว · ยังไม่อยู่ในรายชื่อลูกค้า</option>
                                         <option value="paidAny">💰 โอนแล้ว</option>
                                         <option value="short">💰 ยอดยังไม่ครบ (โอนขาด)</option>
@@ -4623,6 +4624,7 @@ app.get('/', (req, res) => {
                 if(!(c.matchedCount > 0)) return false;
                 if(f === 'paid') return c.paid;
                 if(f === 'paidNotBuyer') return c.paid && !c.inBuyers;
+                if(f === 'matchedNotBuyer') return !c.inBuyers; // ตรงคำดัก แต่ยังไม่ได้ดึงเข้ารายชื่อลูกค้า (โอนหรือไม่โอนก็ได้)
                 if(f === 'noDue') return !(due > 0);
                 if(f === 'unpaid') return !c.paid;
                 return true;
