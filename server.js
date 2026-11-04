@@ -1458,7 +1458,7 @@ async function callOcrServerNow(base, key, buf) {
         headers: { 'x-ocr-key': key }, timeout: 120000, maxBodyLength: Infinity, maxContentLength: 5 * 1024 * 1024
       });
       if (!r.data || !r.data.success) return { errCode: 'OCR_SERVER_ERROR', detail: String(r.data && r.data.error || '') };
-      return { text: String(r.data.text || ''), textEng: String(r.data.textEng || ''), qr: r.data.qr && r.data.qr.transRef ? r.data.qr : null, ms: r.data.ms, confidence: r.data.confidence };
+      return { text: String(r.data.text || ''), textEng: String(r.data.textEng || ''), qr: r.data.qr && r.data.qr.transRef ? r.data.qr : null, ms: r.data.ms, confidence: r.data.confidence, notSlip: !!r.data.notSlip };
     } catch (e) {
       const st = e.response && e.response.status;
       const code = e.response && e.response.data && e.response.data.error;
@@ -1574,7 +1574,8 @@ async function verifySlipWithOcrServer(imageUrl, cfg) {
   if (buf.length > 10 * 1024 * 1024) return { slip: null, errCode: 'FILE_TOO_LARGE' };
   const o = await callOcrServer(cfg, buf);
   if (o.errCode) { console.error('❌ [OCR Server]', o.errCode, o.detail || ''); return { slip: null, errCode: o.errCode, detail: o.detail || '' }; }
-  if (!o.text.trim() && !o.qr) return { slip: null, errCode: 'NO_TEXT' };
+  // เซิร์ฟเวอร์ OCR เช็กเร็วแล้วว่าไม่ใช่สลิป (ไม่มี QR + ไม่มีข้อความแบบสลิป) / รูปไม่มีตัวหนังสือเลย -> ไม่ใช่สลิป (เงียบ ไม่ลงประวัติ)
+  if (o.notSlip || (!o.text.trim() && !o.qr)) return { slip: null, errCode: 'NOT_A_SLIP', detail: o.notSlip ? 'ไม่ใช่รูปสลิป (ไม่มี QR และไม่มีข้อความแบบสลิป)' : 'รูปไม่มีตัวหนังสือ' };
   const p = parseThaiSlipText(o.text, o.textEng);
   if (!(p.looksSlip || o.qr) || !(p.amount > 0)) {
     // แยก "ไม่ใช่สลิปแน่ ๆ" (รูปสินค้า/รูปที่อยู่/รูปทั่วไป -> เงียบ) กับ "ดูเหมือนสลิปแต่อ่านไม่ออก" (เบลอ/ครอปขาด -> ขอรูปใหม่)
