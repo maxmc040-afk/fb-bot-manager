@@ -1379,6 +1379,51 @@ async function pingOcrServers() {
     catch (e) { ocrPingState.set(b, { at: Date.now(), ok: false, error: e.response ? 'HTTP ' + e.response.status : e.message }); console.error('⚠️ [OCR Ping] ' + b + ' ไม่ตอบ:', e.message); }
   }));
 }
+// ===== เทียบเลขที่รายการบนสลิปกับ QR แบบทนต่อ OCR อ่านเพี้ยน =====
+// OCR มักสับสนตัวที่หน้าตาคล้ายกัน: I l 1 | ) ( ] [ ! / ,  O 0 Q D,  S 5,  B 8,  Z 2,  G 6
+// และมักตัดเลขยาวเป็นหลายท่อน/ขึ้นบรรทัดใหม่ -> ทำ "โครงตัวอักษร" แล้วหาส่วนที่ตรงกันยาวที่สุด
+function refSkeleton(s, dropMarks) {
+  let x = String(s || '').replace(/b/g, '6').toUpperCase();
+  x = dropMarks ? x.replace(/[|)(\][!\/\\]/g, '') : x.replace(/[|)(\][!\/\\]/g, '1');
+  return x.replace(/[IL1]/g, '1').replace(/[O0QD]/g, '0').replace(/[S5]/g, '5')
+    .replace(/[B8]/g, '8').replace(/[Z2]/g, '2').replace(/[G6]/g, '6')
+    .replace(/[^0-9A-Z]/g, '');
+}
+// คืนค่า true ถ้าพบเลขที่รายการของ QR อยู่ในข้อความสลิป (ยอมให้อ่านผิด/ขาดได้เล็กน้อย)
+function slipRefFoundInText(qref, texts) {
+  const variants = [refSkeleton(qref, false), refSkeleton(qref, true)];
+  const q = variants[0];
+  if (q.length < 6) return true;
+  const need = Math.min(12, q.length);                       // ตรงกันติดกันอย่างน้อย 12 ตัว
+  const needTol = q.length >= 14 ? 12 : Math.max(8, q.length - 2); // หรือตรง 12 ตัว โดยผิดได้ไม่เกิน 2 ตัว
+  const K = 2;
+  for (const src of texts) {
+    if (!src) continue;
+    for (const drop of [false, true]) {
+      // แต่ละบรรทัดต่อกันเป็นสายเดียว (เลขที่ถูกตัดขึ้นบรรทัดใหม่จะต่อกันได้)
+      const t = refSkeleton(String(src).replace(/\s+/g, ''), drop);
+      const qq = drop ? variants[1] : variants[0];
+      if (!t || !qq) continue;
+      for (let d = -(qq.length - 1); d < t.length; d++) {
+        const i0 = Math.max(0, -d), i1 = Math.min(qq.length, t.length - d);
+        if (i1 - i0 < Math.min(need, needTol)) continue;
+        let lo = i0, mis = 0, match = 0, run = 0;
+        for (let i = i0; i < i1; i++) {
+          if (qq[i] === t[i + d]) {
+            match++; run++;
+            if (run >= need) return true;
+          } else {
+            run = 0; mis++;
+            while (mis > K) { if (qq[lo] !== t[lo + d]) mis--; else match--; lo++; }
+          }
+          if (match >= needTol) return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
 async function verifySlipWithOcrServer(imageUrl, cfg) {
   if (!ocrServerBase(cfg) || !String(cfg.ocrServerKey || '').trim()) return { slip: null, errCode: 'OCR_NOT_CONFIGURED' };
   let buf;
@@ -1411,8 +1456,10 @@ async function verifySlipWithOcrServer(imageUrl, cfg) {
       // เลขที่รายการยาว มักถูก OCR ตัดเป็นท่อน (เช่น ออมสิน 630808922618 | I000021B9790) -> ท่อนที่อ่านได้อยู่ใน QR ก็ถือว่าตรง
       const norm = (x) => x.replace(/[IL]/g, '1').replace(/O/g, '0');
       const partOk = toks.some(x => x.length >= 10 && (norm(qref).includes(norm(x)) || norm(x).includes(norm(qref))));
-      const best = Math.max(...toks.map(x => similarity(x, qref)));
-      if (!partOk && best < 0.6) qrIssue = 'เลขที่รายการในสลิปไม่ตรงกับ QR (QR ' + o.qr.transRef + ' · ในสลิป ' + toks[0] + ')';
+      const sims = toks.map(x => similarity(x, qref));
+      const best = Math.max(...sims);
+      const skelOk = !partOk && best < 0.6 ? slipRefFoundInText(qref, [o.text, o.textEng]) : true;
+      if (!partOk && best < 0.6 && !skelOk) qrIssue = 'เลขที่รายการในสลิปไม่ตรงกับ QR (QR ' + o.qr.transRef + ' · ในสลิป ' + toks[sims.indexOf(best)] + ')';
     }
   }
   // 📷 เลขที่รายการจาก QR บนสลิป แม่น 100% (กันสลิปซ้ำได้แน่นอน) · ไม่มี QR ค่อยใช้ที่อ่านจากตัวหนังสือ
