@@ -1186,14 +1186,19 @@ function parseThaiSlipText(text, engText) {
     .split('\n').map(l => ((l.match(/(?:^|\s)[\u0E00-\u0E7F](?=\s)/g) || []).length >= 3
       ? l.replace(/([\u0E00-\u0E7F])\s(?=[\u0E00-\u0E7F])/g, '$1') : l)).join('\n'); // "จ ำ น ว น" (OCR เว้นทุกตัวอักษร) -> "จำนวน"
   const lines = t.split('\n').map(l => l.trim()).filter(Boolean)
-    // OCR อ่านเลข 0 เป็นตัว O / เว้นวรรคในยอดเงิน / ใช้ , แทนจุดทศนิยม: "2.0O" "2 . 00" "2,00 บาท" -> "2.00"
-    .map(l => l.replace(/\d[\d,]*\s?[.,]\s?[\dOoD]{2}(?![\dA-Za-z])/g, m => m.replace(/[OoD]/g, '0').replace(/\s/g, '').replace(/,(\d{2})$/, '.$1')))
+    // OCR อ่านเลข 0 เป็นตัว O / เว้นวรรคในยอดเงิน: "2.0O" "2 . 00" -> "2.00"
+    // ใช้ , แทนจุดทศนิยม เฉพาะเมื่อตามด้วยคำว่า บาท/THB ("2,00 บาท") · ไม่แตะวันเวลา เช่น "69, 07:20" (ttb)
+    .map(l => l.replace(/\d[\d,]*\s?\.\s?[\dOoD]{2}(?![\dA-Za-z:])/g, m => m.replace(/[OoD]/g, '0').replace(/\s/g, ''))
+      .replace(/(\d),([\dOoD]{2})(?=\s*(?:บาท|THB|฿))/g, (m, a, b) => a + '.' + b.replace(/[OoD]/g, '0')))
     // ลูกน้ำคั่นหลักพันหาย/กลายเป็นช่องว่าง: "4 480.00" (ttb) -> "4480.00" (เฉพาะยอดที่ขึ้นต้นบรรทัด / หลัง ฿ / หลัง :)
     .map(l => l.replace(/(^|฿\s?|[:：]\s?)(\d{1,3}(?:[ ,]\d{3})+\.\d{2})(?!\d)/, (m, a, n) => a + n.replace(/ /g, ',')));
   const all = lines.join('\n');
   // 💰 ยอดเงิน: ตัวเลขทศนิยม 2 ตำแหน่ง · เลือกตัวที่อยู่บรรทัด/บรรทัดถัดจากคำว่า "จำนวน" ก่อน ไม่เอาค่าธรรมเนียม/ยอดคงเหลือ
   const money = [];
+  // บรรทัดวันที่/เวลา (เช่น "4 พ.ย. 69, 07:20 น.") ไม่ใช่ยอดเงิน (เว้นแต่มีคำว่า บาท/THB อยู่ในบรรทัด)
+  const isDateLine = (l) => !/บาท|THB|฿/i.test(l) && (/\d{1,2}:\d{2}/.test(l) || new RegExp('\\d\\s*' + TH_MON_RE).test(l));
   lines.forEach((l, i) => {
+    if (isDateLine(l)) return;
     const re = /(?<![\d.,])(\d{1,3}(?:,\d{3})+|\d+)\.(\d{2})(?!\d)/g;
     let m;
     while ((m = re.exec(l))) money.push({ v: parseFloat(m[1].replace(/,/g, '') + '.' + m[2]), i, line: l });
@@ -1205,14 +1210,15 @@ function parseThaiSlipText(text, engText) {
     const near = money.filter(x => (x.i === amtIdx || x.i === amtIdx + 1 || x.i === amtIdx + 2) && !isFeeLine(x.line) && x.v > 0);
     if (near.length) amount = near[0].v;
   }
-  if (!amount) {
-    const cand = money.filter(x => !isFeeLine(x.line) && x.v > 0);
-    if (cand.length) amount = Math.max(...cand.map(x => x.v));
-  }
   const eng = String(engText || '').replace(/\r/g, '');
-  if (!amount && eng) {
-    const em = (eng.match(/(?<![\d.,])(\d{1,3}(?:,\d{3})+|\d+)\.(\d{2})(?!\d)/g) || []).map(x => parseFloat(x.replace(/,/g, ''))).filter(v => v > 0);
-    if (em.length) amount = Math.max(...em);
+  if (!amount) {
+    // ไม่มีคำว่า "จำนวน" (เช่น ttb ยอดตัวใหญ่ไม่มีหัวข้อ) -> เอายอดที่มากที่สุด จากทั้งรอบภาษาไทยและรอบตัวเลข (ไม่นับค่าธรรมเนียม/วันเวลา)
+    const cand = money.filter(x => !isFeeLine(x.line) && x.v > 0).map(x => x.v);
+    for (const l of eng.split('\n')) {
+      if (isFeeLine(l) || isDateLine(l) || /ssu|sssu|fee/i.test(l)) continue; // รอบอังกฤษอ่าน "ค่าธรรมเนียม" เป็น A1sssullay
+      for (const m of l.replace(/(\d),\s(\d{3})/g, '$1,$2').match(/(?<![\d.,])(\d{1,3}(?:,\d{3})+|\d+)\.(\d{2})(?!\d)/g) || []) { const v = parseFloat(m.replace(/,/g, '')); if (v > 0) cand.push(v); }
+    }
+    if (cand.length) amount = Math.max(...cand);
   }
   // OCR อ่านจุดทศนิยมหาย: "2.00 บาท" -> "200 um" · ยอดในสลิปธนาคารมีทศนิยม 2 ตำแหน่งเสมอ
   // -> ตัวเลข (≥3 หลัก ไม่มีจุด) ที่อยู่หน้าคำว่า บาท (หรือที่ OCR อ่านเพี้ยน um/vm/ym…) = 2 หลักท้ายคือสตางค์
