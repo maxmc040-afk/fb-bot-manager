@@ -1566,6 +1566,17 @@ function slipDateFromRef(ref, now) {
   return null;
 }
 
+// ⏰ เวลาจากเลขที่รายการใน QR · กสิกร: 0xx + วันของปี + HHMMSS · กรุงเทพ: 20YYMMDD + HHMMSS · ttb: YYMMDD + HHMMSS
+function slipTimeFromRef(ref) {
+  const r = String(ref || '').trim();
+  const ok = (h, m) => (+h < 24 && +m < 60) ? h + ':' + m : null;
+  let m;
+  if ((m = r.match(/^0\d{2}\d{3}(\d{2})(\d{2})(\d{2})[A-Z]{3}/))) return ok(m[1], m[2]);
+  if ((m = r.match(/^20\d{6}(\d{2})(\d{2})(\d{2})\d/))) return ok(m[1], m[2]);
+  if ((m = r.match(/^\d{6}(\d{2})(\d{2})(\d{2})\d/))) return ok(m[1], m[2]);
+  return null;
+}
+
 async function verifySlipWithOcrServer(imageUrl, cfg) {
   if (!ocrServerBase(cfg) || !String(cfg.ocrServerKey || '').trim()) return { slip: null, errCode: 'OCR_NOT_CONFIGURED' };
   let buf;
@@ -1606,11 +1617,20 @@ async function verifySlipWithOcrServer(imageUrl, cfg) {
     }
   }
   // 📷 เลขที่รายการจาก QR บนสลิป แม่น 100% (กันสลิปซ้ำได้แน่นอน) · ไม่มี QR ค่อยใช้ที่อ่านจากตัวหนังสือ
-  // อ่านวันที่บนสลิปไม่ออก (ได้แต่เวลา) -> ใช้วันที่จากเลขที่รายการใน QR · ไม่ได้อีก -> วันนี้
-  if (!new RegExp(TH_MON_RE, 'i').test(p.dateText || '')) {
-    const d = (qrOk && slipDateFromRef(o.qr.transRef)) || new Date();
-    const ds = d.toLocaleDateString('th-TH', { timeZone: 'Asia/Bangkok', day: 'numeric', month: 'short', year: 'numeric' });
-    p.dateText = (ds + ' ' + (p.dateText || '')).trim();
+  // อ่านวันที่/เวลาบนสลิปไม่ออก -> ใช้จากเลขที่รายการใน QR · ไม่ได้อีก -> เวลาที่ได้รับสลิป
+  const hasDate = new RegExp(TH_MON_RE, 'i').test(p.dateText || '');
+  const hasTime = /\d{1,2}[:.]\d{2}/.test(p.dateText || '');
+  if (!hasDate || !hasTime) {
+    let ds = '', ts = '';
+    if (!hasDate) {
+      const d = (qrOk && slipDateFromRef(o.qr.transRef)) || new Date();
+      ds = d.toLocaleDateString('th-TH', { timeZone: 'Asia/Bangkok', day: 'numeric', month: 'short', year: 'numeric' });
+    }
+    if (!hasTime) {
+      ts = (qrOk && slipTimeFromRef(o.qr.transRef)) || new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', hour12: false });
+      ts += ' น.';
+    }
+    p.dateText = [ds, String(p.dateText || '').trim(), ts].filter(Boolean).join(' ');
   }
   const transRef = (qrOk && o.qr.transRef) || p.transRef || ('OCR-' + crypto.createHash('md5').update([p.amount, p.dateText, p.senderAccount, p.receiverAccounts.join(','), p.senderName].join('|')).digest('hex').slice(0, 16));
   console.log('✅ [OCR Server] อ่านสลิป: ' + p.amount + ' บาท · ref ' + transRef + (o.qr ? ' (QR)' : '') + ' (' + (o.ms || '-') + ' ms)');
