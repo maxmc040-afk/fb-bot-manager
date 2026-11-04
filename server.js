@@ -3954,6 +3954,23 @@ app.get('/', (req, res) => {
                     </div>
                 </div>
             </div>
+            <div id="slip-amt-editor" class="hidden fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4" onclick="if(event.target===this) closeSlipAmtEditor()">
+                <div class="bg-white rounded-2xl shadow-xl border border-slate-200 p-5 w-full max-w-sm space-y-3">
+                    <h3 class="text-base font-bold text-slate-800">✏️ แก้ยอดสลิป</h3>
+                    <div class="text-sm text-slate-600">ลูกค้า: <b id="slip-amt-name"></b></div>
+                    <div class="text-xs text-slate-500">เลขอ้างอิง: <span id="slip-amt-ref" class="font-mono"></span></div>
+                    <div id="slip-amt-current" class="text-xs text-slate-500"></div>
+                    <label class="block text-xs font-semibold text-slate-600">ยอดที่ถูกต้อง (บาท)
+                        <input type="number" id="slip-amt-input" min="0" step="0.01" class="mt-1 w-full p-2.5 text-lg border border-slate-300 rounded-xl focus:outline-none focus:border-emerald-500" placeholder="เช่น 420">
+                    </label>
+                    <div class="text-[11px] text-slate-400">ยอดรวมที่ลูกค้าโอนแล้ว และประวัติตรวจสลิปจะเปลี่ยนตาม · ไม่ส่งข้อความหาลูกค้า</div>
+                    <div id="slip-amt-msg" class="text-xs text-rose-600"></div>
+                    <div class="flex justify-end gap-2 pt-1">
+                        <button type="button" onclick="closeSlipAmtEditor()" class="px-4 py-2 text-sm rounded-xl border border-slate-300 bg-white hover:bg-slate-50">ยกเลิก</button>
+                        <button type="button" id="slip-amt-save" onclick="saveSlipAmtEditor()" class="px-4 py-2 text-sm font-semibold rounded-xl bg-emerald-600 text-white hover:bg-emerald-700">💾 บันทึกยอดใหม่</button>
+                    </div>
+                </div>
+            </div>
             <div id="due-editor" class="hidden fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4" onclick="if(event.target===this) closeDueEditor()">
                 <div class="bg-white rounded-2xl shadow-xl border border-slate-200 p-5 w-full max-w-sm space-y-3">
                     <h3 class="text-base font-bold text-slate-800">💰 ยอดที่ลูกค้าต้องจ่าย</h3>
@@ -5034,7 +5051,7 @@ app.get('/', (req, res) => {
                     + '<td class="py-1.5 pr-2 font-medium text-slate-700">' + escapeHtml(x.senderName || x.senderId) + '</td>'
                     + '<td class="py-1.5 pr-2 text-right text-emerald-600 font-semibold whitespace-nowrap">' + fmtMoney(x.amount)
                         + (x.origAmount !== undefined && x.origAmount !== x.amount ? '<div class="text-[10px] text-amber-600 font-normal" title="แก้ยอดโดย ' + escapeHtml(x.editedBy || '') + '">✏️ เดิม ' + fmtMoney(x.origAmount) + '</div>' : '') + '</td>'
-                    + '<td class="py-1.5 text-slate-500"><button type="button" class="mr-1.5 text-sky-600 hover:underline" data-ref="' + escapeHtml(x.transRef) + '" data-time="' + (x.time || 0) + '" data-amount="' + (x.amount || 0) + '" data-name="' + escapeHtml(x.senderName || x.senderId || '') + '" onclick="editSlipAmount(this)" title="แก้ยอด (ระบบอ่านยอดผิด)">✏️ แก้ยอด</button>' + (x.manual
+                    + '<td class="py-1.5 text-slate-500"><button type="button" class="w-6 h-6 mr-1 inline-flex items-center justify-center rounded-md text-xs opacity-40 hover:opacity-100 hover:bg-sky-50 align-middle" data-ref="' + escapeHtml(x.transRef) + '" data-time="' + (x.time || 0) + '" data-amount="' + (x.amount || 0) + '" data-orig="' + (x.origAmount !== undefined ? x.origAmount : '') + '" data-name="' + escapeHtml(x.senderName || x.senderId || '') + '" onclick="editSlipAmount(this)" title="แก้ยอด (ระบบอ่านยอดผิด)">✏️</button>' + (x.manual
                         ? '<span class="px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 font-semibold">✍️ แมนนวล</span>' + (x.note ? ' <span class="text-slate-400">' + escapeHtml(x.note) + '</span>' : '')
                           + ' <button type="button" class="ml-1 text-rose-500 hover:underline" data-ref="' + escapeHtml(x.transRef) + '" onclick="deleteManualPay(this)">🗑️ ลบ</button>'
                         : escapeHtml(x.transRef)) + '</td></tr>';
@@ -5077,20 +5094,49 @@ app.get('/', (req, res) => {
             } catch (e) { msg.innerText = '❌ ' + e.message; }
             finally { btn.disabled = false; }
         }
-        async function editSlipAmount(btn) {
+        // ===== ✏️ แก้ยอดสลิปที่ระบบอ่านผิด =====
+        let slipAmtEdit = null;
+        function editSlipAmount(btn) {
             if (!currentLiveId) return;
-            const NL = String.fromCharCode(10);
             const cur = btn.getAttribute('data-amount');
-            const v = prompt('แก้ยอดสลิปของ ' + btn.getAttribute('data-name') + NL + 'ยอดที่ระบบอ่านได้: ' + cur + ' บาท' + NL + NL + 'ยอดที่ถูกต้อง (บาท):', cur);
-            if (v === null) return;
-            if (!(parseFloat(String(v).replace(/,/g, '')) > 0)) return alert('กรุณากรอกยอดเงินให้ถูกต้อง');
-            const r = await (await fetch(liveUrl('/api/live/slip/edit', '&sid=' + currentLiveId), {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ transRef: btn.getAttribute('data-ref'), time: Number(btn.getAttribute('data-time')), amount: v })
-            })).json();
-            if (!r.success) return alert('❌ ' + r.error);
-            loadLiveDetail(false);
+            const orig = btn.getAttribute('data-orig');
+            slipAmtEdit = { ref: btn.getAttribute('data-ref'), time: Number(btn.getAttribute('data-time')) };
+            document.getElementById('slip-amt-name').innerText = btn.getAttribute('data-name') || '-';
+            document.getElementById('slip-amt-ref').innerText = slipAmtEdit.ref || '-';
+            document.getElementById('slip-amt-current').innerText = 'ตอนนี้: ' + fmtMoney(Number(cur)) + ' ฿' + (orig !== '' && orig !== null && Number(orig) !== Number(cur) ? ' (ยอดที่ระบบอ่านจากสลิป ' + fmtMoney(Number(orig)) + ' ฿)' : '');
+            const inp = document.getElementById('slip-amt-input');
+            inp.value = cur;
+            document.getElementById('slip-amt-msg').innerText = '';
+            document.getElementById('slip-amt-editor').classList.remove('hidden');
+            setTimeout(function() { inp.focus(); inp.select(); }, 50);
         }
+        function closeSlipAmtEditor() {
+            document.getElementById('slip-amt-editor').classList.add('hidden');
+            slipAmtEdit = null;
+        }
+        async function saveSlipAmtEditor() {
+            if (!slipAmtEdit || !currentLiveId) return;
+            const v = document.getElementById('slip-amt-input').value;
+            const msg = document.getElementById('slip-amt-msg');
+            if (!(parseFloat(v) > 0)) { msg.innerText = 'กรุณากรอกยอดเงินให้ถูกต้อง'; return; }
+            const btn = document.getElementById('slip-amt-save');
+            btn.disabled = true;
+            try {
+                const r = await (await fetch(liveUrl('/api/live/slip/edit', '&sid=' + currentLiveId), {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ transRef: slipAmtEdit.ref, time: slipAmtEdit.time, amount: v })
+                })).json();
+                if (!r.success) { msg.innerText = '❌ ' + r.error; return; }
+                closeSlipAmtEditor();
+                loadLiveDetail(false);
+            } catch (e) { msg.innerText = '❌ ' + e.message; }
+            finally { btn.disabled = false; }
+        }
+        document.addEventListener('keydown', function(e) {
+            if (!slipAmtEdit) return;
+            if (e.key === 'Escape') closeSlipAmtEditor();
+            if (e.key === 'Enter' && e.target && e.target.id === 'slip-amt-input') saveSlipAmtEditor();
+        });
         async function deleteManualPay(btn) {
             if (!currentLiveId) return;
             if (!confirm('ลบรายการโอนแบบแมนนวลนี้?')) return;
