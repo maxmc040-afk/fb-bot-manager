@@ -5049,7 +5049,7 @@ app.get('/', (req, res) => {
             pageSlice('slips', slipsList).forEach(function(x) {
                 sh += '<tr class="border-b border-slate-100"><td class="py-1.5 pr-2 text-slate-500">' + fmtTime(x.time) + '</td>'
                     + '<td class="py-1.5 pr-2 font-medium text-slate-700">' + escapeHtml(x.senderName || x.senderId) + '</td>'
-                    + '<td class="py-1.5 pr-2 text-right text-emerald-600 font-semibold whitespace-nowrap">' + fmtMoney(x.amount)
+                    + '<td class="py-1.5 pr-2 text-right whitespace-nowrap"><span class="inline-block px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-semibold whitespace-nowrap">✅ ' + fmtMoney(x.amount) + ' ฿</span>'
                         + (x.origAmount !== undefined && x.origAmount !== x.amount ? '<div class="text-[10px] text-amber-600 font-normal" title="แก้ยอดโดย ' + escapeHtml(x.editedBy || '') + '">✏️ เดิม ' + fmtMoney(x.origAmount) + '</div>' : '') + '</td>'
                     + '<td class="py-1.5 text-slate-500"><button type="button" class="w-6 h-6 mr-1 inline-flex items-center justify-center rounded-md text-xs opacity-40 hover:opacity-100 hover:bg-sky-50 align-middle" data-ref="' + escapeHtml(x.transRef) + '" data-time="' + (x.time || 0) + '" data-amount="' + (x.amount || 0) + '" data-orig="' + (x.origAmount !== undefined ? x.origAmount : '') + '" data-name="' + escapeHtml(x.senderName || x.senderId || '') + '" onclick="editSlipAmount(this)" title="แก้ยอด (ระบบอ่านยอดผิด)">✏️</button>' + (x.manual
                         ? '<span class="px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 font-semibold">✍️ แมนนวล</span>' + (x.note ? ' <span class="text-slate-400">' + escapeHtml(x.note) + '</span>' : '')
