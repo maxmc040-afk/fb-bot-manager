@@ -1253,11 +1253,14 @@ function parseThaiSlipText(text, engText) {
   // 🏦 บัญชี (มักปิดบางหลัก เช่น xxx-x-x4664-x) · ลำดับในสลิป: ผู้โอนก่อน แล้วผู้รับ
   // OCR มักอ่าน x เป็น % / × -> นับเป็นตัวปิดเลขด้วย
   const accList = (str) => Array.from(new Set((String(str || '').match(/(?<![A-Za-z0-9])[xX*%×\d](?:[xX*%×\d\- ]{5,20})[xX*%×\d](?![A-Za-z0-9])/g) || [])
-    .map(x => x.trim().replace(/[%×]/g, 'x')).filter(x => (x.match(/\d/g) || []).length >= 3 && /[xX*\-]/.test(x) && (x.replace(/[^0-9xX*]/g, '').length >= 9) && x.replace(/\D/g, '').length <= 15)));
+    .map(x => x.trim().replace(/[%×]/g, 'x'))
+    // ไม่เอาวันที่แบบมีขีด เช่น "04-11-2026 19:40" / "2026-11-04 19:55" (ICBC / Bank of China) มาเป็นเลขบัญชี
+    .filter(x => !/^(\d{1,2}-\d{1,2}-(\d{4}|\d{2})|\d{4}-\d{1,2}-\d{1,2})(?!\d|-\d)/.test(x))
+    .filter(x => (x.match(/\d/g) || []).length >= 3 && /[xX*\-]/.test(x) && (x.replace(/[^0-9xX*]/g, '').length >= 9) && x.replace(/\D/g, '').length <= 15)));
   const accTha = accList(all), accEng = accList(eng);
   // สลิปที่มีหัวข้อ "จาก ... ไปยัง/ไปที่" (SCB / กรุงไทย / กรุงเทพ / ธ.ก.ส.) -> บัญชีหลังคำว่า ไปยัง = บัญชีผู้รับ
   // รวมเลขแบบสั้นของ SCB เช่น "x-0129" / "x-6640"
-  const toIdx = lines.findIndex(l => { const x = l.replace(/^[^\u0E00-\u0E7FA-Za-z]+/, ''); return /^(ไปยัง|ไปที่)(?=\s|[:：]|$)/.test(x) || /^(ถึง|ผู้รับ|to)\s*[:：]?\s*$/i.test(x); });
+  const toIdx = lines.findIndex(l => { const x = l.replace(/^[^\u0E00-\u0E7FA-Za-z]+/, ''); return /^(ไปยัง|ไปที่|บัญชีปลายทาง|ปลายทาง|ผู้รับเงิน|payee|to account)(?=\s|[:：]|$)/i.test(x) || /^(ถึง|ผู้รับ|to)\s*[:：]?\s*$/i.test(x); });
   let accAfterTo = [];
   if (toIdx >= 0) {
     const after = lines.slice(toIdx).join('\n');
@@ -3063,6 +3066,13 @@ app.get('/', (req, res) => {
                                         <option value="KTB">ธนาคารกรุงไทย (KTB)</option>
                                         <option value="TTB">ธนาคารทหารไทยธนชาต (TTB)</option>
                                         <option value="GSB">ธนาคารออมสิน (GSB)</option>
+                                        <option value="BAAC">ธนาคารเพื่อการเกษตรฯ (ธ.ก.ส.)</option>
+                                        <option value="GHB">ธนาคารอาคารสงเคราะห์ (ธอส.)</option>
+                                        <option value="UOB">ธนาคารยูโอบี (UOB)</option>
+                                        <option value="CIMB">ธนาคารซีไอเอ็มบี ไทย (CIMB)</option>
+                                        <option value="KKP">ธนาคารเกียรตินาคินภัทร (KKP)</option>
+                                        <option value="TISCO">ธนาคารทิสโก้ (TISCO)</option>
+                                        <option value="LHB">ธนาคารแลนด์ แอนด์ เฮ้าส์ (LH Bank)</option>
                                         <option value="PROMPTPAY">พร้อมเพย์ (PromptPay)</option>
                                     </select>
                                 </div>
@@ -9498,7 +9508,8 @@ function markNewCustomerSent(pageData, uid) {
   if (pageData.newCustomerSent.size > 100000) { let i = 0; for (const k of pageData.newCustomerSent) { pageData.newCustomerSent.delete(k); if (++i >= 10000) break; } }
 }
 
-const BANK_CODE_NAMES = { '002': 'กรุงเทพ', '004': 'กสิกรไทย', '006': 'กรุงไทย', '011': 'ทีทีบี', '014': 'ไทยพาณิชย์', '022': 'ซีไอเอ็มบี', '024': 'ยูโอบี', '025': 'กรุงศรี', '030': 'ออมสิน', '033': 'อาคารสงเคราะห์', '034': 'ธ.ก.ส.', '067': 'ทิสโก้', '069': 'เกียรตินาคิน', '073': 'แลนด์แอนด์เฮ้าส์' };
+const BANK_CODE_NAMES = { '002': 'กรุงเทพ', '004': 'กสิกรไทย', '006': 'กรุงไทย', '011': 'ทีทีบี', '014': 'ไทยพาณิชย์', '022': 'ซีไอเอ็มบี', '024': 'ยูโอบี', '025': 'กรุงศรี', '030': 'ออมสิน', '033': 'อาคารสงเคราะห์', '034': 'ธ.ก.ส.', '067': 'ทิสโก้', '069': 'เกียรตินาคินภัทร', '073': 'แลนด์ แอนด์ เฮ้าส์',
+  '017': 'ซิตี้แบงก์', '020': 'สแตนดาร์ดชาร์เตอร์ด', '031': 'HSBC', '035': 'EXIM', '052': 'แห่งประเทศจีน', '066': 'อิสลามแห่งประเทศไทย', '070': 'ไอซีบีซี', '071': 'ไทยเครดิต', '080': 'ซูมิโตโม มิตซุย ทรัสต์', '098': 'SME D Bank' };
 function bankNameFromCode(c) { return BANK_CODE_NAMES[String(c)] || String(c); }
 
 app.post('/webhook', async (req, res) => {
