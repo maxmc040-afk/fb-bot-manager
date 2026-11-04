@@ -5032,8 +5032,9 @@ app.get('/', (req, res) => {
             pageSlice('slips', slipsList).forEach(function(x) {
                 sh += '<tr class="border-b border-slate-100"><td class="py-1.5 pr-2 text-slate-500">' + fmtTime(x.time) + '</td>'
                     + '<td class="py-1.5 pr-2 font-medium text-slate-700">' + escapeHtml(x.senderName || x.senderId) + '</td>'
-                    + '<td class="py-1.5 pr-2 text-right text-emerald-600 font-semibold">' + fmtMoney(x.amount) + '</td>'
-                    + '<td class="py-1.5 text-slate-500">' + (x.manual
+                    + '<td class="py-1.5 pr-2 text-right text-emerald-600 font-semibold whitespace-nowrap">' + fmtMoney(x.amount)
+                        + (x.origAmount !== undefined && x.origAmount !== x.amount ? '<div class="text-[10px] text-amber-600 font-normal" title="แก้ยอดโดย ' + escapeHtml(x.editedBy || '') + '">✏️ เดิม ' + fmtMoney(x.origAmount) + '</div>' : '') + '</td>'
+                    + '<td class="py-1.5 text-slate-500"><button type="button" class="mr-1.5 text-sky-600 hover:underline" data-ref="' + escapeHtml(x.transRef) + '" data-time="' + (x.time || 0) + '" data-amount="' + (x.amount || 0) + '" data-name="' + escapeHtml(x.senderName || x.senderId || '') + '" onclick="editSlipAmount(this)" title="แก้ยอด (ระบบอ่านยอดผิด)">✏️ แก้ยอด</button>' + (x.manual
                         ? '<span class="px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 font-semibold">✍️ แมนนวล</span>' + (x.note ? ' <span class="text-slate-400">' + escapeHtml(x.note) + '</span>' : '')
                           + ' <button type="button" class="ml-1 text-rose-500 hover:underline" data-ref="' + escapeHtml(x.transRef) + '" onclick="deleteManualPay(this)">🗑️ ลบ</button>'
                         : escapeHtml(x.transRef)) + '</td></tr>';
@@ -5075,6 +5076,20 @@ app.get('/', (req, res) => {
                 loadLiveDetail(false);
             } catch (e) { msg.innerText = '❌ ' + e.message; }
             finally { btn.disabled = false; }
+        }
+        async function editSlipAmount(btn) {
+            if (!currentLiveId) return;
+            const NL = String.fromCharCode(10);
+            const cur = btn.getAttribute('data-amount');
+            const v = prompt('แก้ยอดสลิปของ ' + btn.getAttribute('data-name') + NL + 'ยอดที่ระบบอ่านได้: ' + cur + ' บาท' + NL + NL + 'ยอดที่ถูกต้อง (บาท):', cur);
+            if (v === null) return;
+            if (!(parseFloat(String(v).replace(/,/g, '')) > 0)) return alert('กรุณากรอกยอดเงินให้ถูกต้อง');
+            const r = await (await fetch(liveUrl('/api/live/slip/edit', '&sid=' + currentLiveId), {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ transRef: btn.getAttribute('data-ref'), time: Number(btn.getAttribute('data-time')), amount: v })
+            })).json();
+            if (!r.success) return alert('❌ ' + r.error);
+            loadLiveDetail(false);
         }
         async function deleteManualPay(btn) {
             if (!currentLiveId) return;
@@ -8326,6 +8341,32 @@ app.post('/api/live/manual-payment/delete', checkAuth, (req, res) => {
   const i = s.slips.findIndex(x => x.transRef === ref && x.manual);
   if (i < 0) return res.json({ success: false, error: 'ลบได้เฉพาะรายการที่บันทึกแบบแมนนวล' });
   s.slips.splice(i, 1);
+  res.json({ success: true });
+});
+
+// ✏️ แก้ยอดสลิปที่ระบบอ่านผิด (เช่น 420 อ่านเป็น 4.2) · เก็บยอดเดิมไว้ดูย้อนหลัง
+app.post('/api/live/slip/edit', checkAuth, (req, res) => {
+  const ctx = getLiveContext(req, res);
+  if (!ctx) return;
+  const s = ctx.live;
+  if (!s) return res.json({ success: false, error: 'ไม่พบ session นี้' });
+  const ref = String(req.body.transRef || ''), t = Number(req.body.time) || 0;
+  const x = s.slips.find(y => y.transRef === ref && (!t || y.time === t)) || s.slips.find(y => y.transRef === ref);
+  if (!x) return res.json({ success: false, error: 'ไม่พบรายการนี้' });
+  const amount = Math.round((parseFloat(String(req.body.amount || '').replace(/[^0-9.]/g, '')) || 0) * 100) / 100;
+  if (!(amount > 0)) return res.json({ success: false, error: 'กรุณากรอกยอดเงินให้ถูกต้อง' });
+  if (amount === x.amount) return res.json({ success: true, unchanged: true });
+  if (x.origAmount === undefined) x.origAmount = x.amount;
+  const old = x.amount;
+  x.amount = amount;
+  x.editedAt = Date.now();
+  x.editedBy = req.userId || 'admin';
+  // ยอดในประวัติสลิปของเพจ (ใช้ดูสถานะ "โอนแล้ว") + ประวัติตรวจสลิป ให้ตรงกัน
+  for (const l of (ctx.pageData.slipLog || [])) if (l.transRef === ref && l.senderId === x.senderId) l.amount = amount;
+  for (const a of (ctx.pageData.slipAttempts || [])) {
+    if (a.code === ref && a.senderId === x.senderId && a.result === 'valid') { a.amount = amount; a.note = '✏️ แก้ยอดจาก ' + old + ' เป็น ' + amount + ' (' + (req.userId || 'admin') + ') · ' + (a.note || ''); }
+  }
+  console.log('✏️ [Live] แก้ยอดสลิป ' + ref + ': ' + old + ' -> ' + amount + ' โดย ' + (req.userId || 'admin'));
   res.json({ success: true });
 });
 
