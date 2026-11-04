@@ -1516,6 +1516,41 @@ function ocrReceiverLooseMatch(cfg, slip) {
   return '';
 }
 
+// ❌ OCR อ่านเลขบัญชีผู้รับได้ชัด แต่เป็นบัญชีอื่น (เลขที่เห็นต่างจากบัญชีร้านหลายหลัก + ชื่อไม่ใช่ร้าน) -> สลิปไม่ถูกต้อง
+// คืนข้อความเหตุผล หรือ '' ถ้ายังไม่แน่ใจ (ให้แอดมินตรวจเหมือนเดิม)
+function ocrReceiverClearMismatch(cfg, slip) {
+  const merchant = String(cfg.merchantAccount || '').replace(/\D/g, '');
+  const accs = (slip.receiverAccounts || []).map(String).filter(Boolean);
+  if (merchant.length < 6 || !accs.length) return '';
+  const ham = (a, b) => { let d = 0; for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) d++; return d; };
+  let minScore = Infinity;
+  for (const acc of accs) {
+    const chars = acc.replace(/[\s\-.]/g, '').replace(/[%×*#]/g, 'x');
+    const runs = chars.split(/[^0-9]+/).filter(r => r.length >= 3);
+    if (!runs.length) return ''; // เห็นตัวเลขน้อยเกินไป ตัดสินไม่ได้
+    let score;
+    if (chars.length === merchant.length) {
+      score = 0;
+      for (let i = 0; i < chars.length; i++) if (/[0-9]/.test(chars[i]) && chars[i] !== merchant[i]) score++;
+    } else {
+      score = Infinity;
+      for (const r of runs) {
+        let m = Infinity;
+        for (let off = 0; off + r.length <= merchant.length; off++) m = Math.min(m, ham(r, merchant.substr(off, r.length)));
+        score = Math.min(score, m);
+      }
+    }
+    minScore = Math.min(minScore, score);
+  }
+  if (!isFinite(minScore) || minScore < 2) return ''; // ต่างแค่ 0-1 หลัก อาจเป็น OCR อ่านเพี้ยน
+  const clean = (v) => String(v || '').replace(/(นางสาว|น\.ส\.|นาย|นาง|MISS|MRS|MR|MS)\.?/gi, '').replace(/[^\u0E00-\u0E7Fa-zA-Z]/g, '').toLowerCase();
+  const want = clean(cfg.merchantName), got = clean(slip.receiverNameTh);
+  const nameRead = want.length >= 4 && got.length >= 4;
+  if (nameRead && similarity(got, want) >= 0.5) return ''; // ชื่อคล้ายร้าน -> ไม่แน่ใจ
+  if (!nameRead && minScore < 3) return '';                 // ไม่มีชื่อช่วยยืนยัน ต้องต่างกันชัดกว่านี้
+  return 'บัญชีผู้รับในสลิป ' + accs.join(', ') + (slip.receiverNameTh ? ' (' + slip.receiverNameTh + ')' : '') + ' ไม่ใช่บัญชีร้าน';
+}
+
 // 🔧 เช็คเลขบัญชีผู้รับ (สลิปจะปิดเลขบางส่วน เช่น xxx-x-x9857-x) เทียบกับเลขบัญชีร้านค้า
 function accountMatches(merchantAcc, slipAccounts) {
   const merchant = String(merchantAcc || '').replace(/[^0-9]/g, '');
@@ -9365,7 +9400,9 @@ async function processSlipImageInner(targetRecord, pageId, senderId, imageUrl, a
     return;
   }
   const looseHit = !receiverOk && slip.unverified ? ocrReceiverLooseMatch(configStore, slip) : '';
-  if (!receiverOk && slip.unverified && !looseHit) {
+  // อ่านผู้รับได้ชัดว่าเป็นบัญชีอื่น -> ตอบ "สลิปไม่ถูกต้อง" ทันที (ไม่ต้องรอแอดมิน)
+  const clearWrong = !receiverOk && slip.unverified && !looseHit ? ocrReceiverClearMismatch(configStore, slip) : '';
+  if (!receiverOk && slip.unverified && !looseHit && !clearWrong) {
     // OCR อ่านบัญชี/ชื่อผู้รับไม่ชัด -> ไม่ตัดสินว่าสลิปผิด (กันลูกค้าที่โอนถูกได้ข้อความ "สลิปไม่ถูกต้อง") ให้แอดมินตรวจเอง
     console.log(`🔎 [Page: ${pageId}] อ่านผู้รับจากรูปไม่ชัด รอแอดมินตรวจ`, slip.receiverAccounts, slip.receiverNameTh);
     logSlipAttempt(pageData, { senderId, provider, result: 'review', code: slip.transRef, amount: slip.amount,
@@ -9376,7 +9413,7 @@ async function processSlipImageInner(targetRecord, pageId, senderId, imageUrl, a
   if (!receiverOk && !looseHit) {
     console.log(`❌ [Page: ${pageId}] เลขบัญชีผู้รับไม่ตรงกับร้านค้า`, slip.receiverAccounts, slip.receiverNameTh);
     logSlipAttempt(pageData, { senderId, provider, result: 'invalid', code: slip.matchResult || 'account', amount: slip.amount,
-      note: 'ปลายทางในสลิป: ' + (slip.receiverBank ? 'ธนาคาร ' + bankNameFromCode(slip.receiverBank) + ' ' : '') + (slip.receiverAccounts.join(', ') || '-') + (slip.receiverNameTh ? ' (' + slip.receiverNameTh + ')' : '')
+      note: (clearWrong ? '👁️ อ่านจากรูป: ' : '') + 'ปลายทางในสลิป: ' + (slip.receiverBank ? 'ธนาคาร ' + bankNameFromCode(slip.receiverBank) + ' ' : '') + (slip.receiverAccounts.join(', ') || '-') + (slip.receiverNameTh ? ' (' + slip.receiverNameTh + ')' : '')
         + ' · ที่ตั้งไว้: ' + (configStore.merchantBank || '-') + ' ' + (configStore.merchantAccount || '-') });
     labelSlipResult(targetRecord.pageData, senderId, 'invalid');
     await sendSlipReply(configStore.msgSlipInvalid);
