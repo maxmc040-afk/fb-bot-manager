@@ -1408,8 +1408,11 @@ async function verifySlipWithOcrServer(imageUrl, cfg) {
     const toks = Array.from(new Set((String(o.text) + '\n' + String(o.textEng || '')).match(/[A-Za-z0-9]{12,}/g) || []))
       .filter(x => /\d{6,}/.test(x)).map(x => x.toUpperCase());
     if (toks.length) {
+      // เลขที่รายการยาว มักถูก OCR ตัดเป็นท่อน (เช่น ออมสิน 630808922618 | I000021B9790) -> ท่อนที่อ่านได้อยู่ใน QR ก็ถือว่าตรง
+      const norm = (x) => x.replace(/[IL]/g, '1').replace(/O/g, '0');
+      const partOk = toks.some(x => x.length >= 10 && (norm(qref).includes(norm(x)) || norm(x).includes(norm(qref))));
       const best = Math.max(...toks.map(x => similarity(x, qref)));
-      if (best < 0.6) qrIssue = 'เลขที่รายการในสลิปไม่ตรงกับ QR (QR ' + o.qr.transRef + ' · ในสลิป ' + toks[0] + ')';
+      if (!partOk && best < 0.6) qrIssue = 'เลขที่รายการในสลิปไม่ตรงกับ QR (QR ' + o.qr.transRef + ' · ในสลิป ' + toks[0] + ')';
     }
   }
   // 📷 เลขที่รายการจาก QR บนสลิป แม่น 100% (กันสลิปซ้ำได้แน่นอน) · ไม่มี QR ค่อยใช้ที่อ่านจากตัวหนังสือ
