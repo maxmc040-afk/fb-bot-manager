@@ -763,6 +763,7 @@ const DB_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
 const DB_PREFIX = (process.env.DB_PREFIX || 'fbbot') + ':';
 const DB_ENABLED = !!(DB_URL && DB_TOKEN);
 const dbState = { enabled: DB_ENABLED, loaded: false, saving: false, lastSave: 0, lastError: '', lastErrorAt: 0, keys: 0, bytes: 0, cycle: 0 };
+const DB_BOOT_AT = Date.now();
 const dbHashes = new Map(); // key -> hash ของข้อมูลที่บันทึกล่าสุด (บันทึกเฉพาะส่วนที่เปลี่ยน)
 
 async function redisPipeline(cmds) {
@@ -829,6 +830,9 @@ async function saveDb(force) {
   if (!DB_ENABLED || !dbState.loaded || dbState.saving) return;
   dbState.saving = true;
   try {
+    // 🔄 8 นาทีแรกหลังเปิดเครื่อง (ช่วง deploy ที่เครื่องเก่ายังทำงาน/บันทึกครั้งสุดท้าย) -> รวมสลิป/ยอดโอนจากเครื่องเก่าก่อนบันทึกทุกครั้ง
+    // (ต้องดึงทุกรอบก่อนบันทึก ถ้าเว้นรอบ เครื่องนี้อาจบันทึกทับข้อมูลที่เครื่องเก่าเพิ่งบันทึกไปก่อนจะได้รวม)
+    if (Date.now() - DB_BOOT_AT < 8 * 60000) await mergeRemoteMoneyData('deploy');
     dbState.cycle++;
     const includeInbox = force || dbState.cycle % 4 === 0; // แชทบันทึกทุก ~1 นาที ส่วนอื่นทุก 15 วิ
     const parts = buildDbParts(includeInbox);
@@ -943,6 +947,13 @@ async function loadDb() {
   const parts = buildDbParts(true);
   for (const [k, v] of parts) dbHashes.set(k, crypto.createHash('md5').update(JSON.stringify(v, dbReplacer)).digest('hex'));
   for (const k of keys) if (!dbHashes.has(k)) dbHashes.set(k, 'loaded');
+  // จำรายการสลิป/ยอดโอนที่โหลดมา (กันดึงรายการที่ถูกลบแล้วกลับมาตอนรวมข้อมูลช่วง deploy)
+  for (const [username, u] of Object.entries(usersDB)) for (const [pid, pd] of Object.entries(u.pages || {})) {
+    const pk = 'page:' + dbKeyPart(username) + ':' + dbKeyPart(pid);
+    mergeRecent(pk + ':a', pd.slipAttempts, null, x => x.id || (x.time + '|' + x.senderId), 0);
+    mergeRecent(pk + ':l', pd.slipLog, null, x => x.transRef + '|' + x.senderId, 0);
+    for (const [sid, ls] of Object.entries(pd.liveSessions || {})) mergeRecent('live:' + dbKeyPart(username) + ':' + dbKeyPart(pid) + ':' + dbKeyPart(sid), ls.slips, null, x => (x.transRef || '') + '|' + x.senderId + '|' + (x.manual ? x.time : ''), 0);
+  }
   dbState.keys = keys.length;
   console.log('💾 [DB] โหลดข้อมูลสำเร็จ: ผู้ใช้ ' + Object.keys(usersDB).length + ' · เพจ ' + pageCount + ' · ไลฟ์ ' + liveCount);
 }
@@ -963,6 +974,73 @@ async function initDb() {
     }
   }
   console.error('🛑 [DB] โหลดไม่สำเร็จ ปิดการบันทึกไว้ก่อน เพื่อไม่ให้ทับข้อมูลเดิมในฐานข้อมูล');
+}
+
+// 🔄 ช่วง deploy บน Render เครื่องเก่ายังรับสลิปต่ออีกครู่หนึ่ง แล้วบันทึกตอนปิด (หลังจากเครื่องใหม่โหลดข้อมูลไปแล้ว)
+// เดิม: เครื่องใหม่บันทึกทับ -> สลิป/ยอดโอนช่วงนั้นหายจากประวัติ (ลูกค้าได้ข้อความ "ตรวจสอบถูกต้อง" แต่ไม่มีในประวัติ)
+// ตอนนี้: หลังเปิดเครื่องใหม่ ดึงข้อมูลล่าสุดจาก Upstash มารวมเฉพาะรายการเงิน/สลิปที่เกิดใกล้ ๆ ช่วง deploy
+// จำทุกรายการที่เครื่องนี้เคยเห็น -> รายการที่แอดมินลบไปแล้วจะไม่ถูกดึงกลับมา
+const dbSeenMoney = new Set();
+function mergeRecent(scope, arr, remoteArr, keyFn, since) {
+  const added = [];
+  if (!Array.isArray(arr)) return added;
+  for (const x of arr) if (x) dbSeenMoney.add(scope + '#' + keyFn(x));
+  if (!Array.isArray(remoteArr)) return added;
+  for (const x of remoteArr) {
+    if (!x || (x.time || 0) < since) continue;
+    const k = scope + '#' + keyFn(x);
+    if (dbSeenMoney.has(k)) continue;
+    dbSeenMoney.add(k); arr.push(x); added.push(x);
+  }
+  return added;
+}
+async function mergeRemoteMoneyData(tag) {
+  if (!DB_ENABLED || !dbState.loaded) return;
+  const since = DB_BOOT_AT - 10 * 60000; // เฉพาะรายการ 10 นาทีก่อนเปิดเครื่องใหม่เป็นต้นไป (ไม่ดึงรายการเก่าที่ถูกลบไปแล้วกลับมา)
+  try {
+    const targets = [];
+    for (const [username, u] of Object.entries(usersDB)) {
+      const uk = dbKeyPart(username);
+      for (const [pid, pd] of Object.entries(u.pages || {})) {
+        const pk = uk + ':' + dbKeyPart(pid);
+        targets.push(['page:' + pk, pd]);
+        // เฉพาะไลฟ์ที่ยังเปิด หรือเพิ่งปิดไม่เกิน 2 วัน (ไลฟ์เก่าไม่มีสลิปใหม่ ไม่ต้องดึงมาให้เปลือง)
+        for (const [sid, ls] of Object.entries(pd.liveSessions || {})) {
+          if (ls && (ls.status === 'active' || !ls.endedAt || Date.now() - ls.endedAt < 2 * 86400000)) targets.push(['live:' + pk + ':' + dbKeyPart(sid), ls]);
+        }
+      }
+    }
+    let added = 0;
+    for (let i = 0; i < targets.length; i += 50) {
+      const chunk = targets.slice(i, i + 50);
+      const vals = (await redisPipeline([['MGET', ...chunk.map(x => DB_PREFIX + x[0])]]))[0] || [];
+      chunk.forEach(([k, local], j) => {
+        if (!vals[j]) return;
+        let remote; try { remote = dbDec(vals[j]); } catch (e) { return; }
+        if (!remote) return;
+        if (k.startsWith('page:')) {
+          if (!Array.isArray(local.slipAttempts)) local.slipAttempts = [];
+          const a = mergeRecent(k + ':a', local.slipAttempts, remote.slipAttempts, x => x.id || (x.time + '|' + x.senderId), since);
+          if (a.length) { local.slipAttempts.sort((x, y) => (y.time || 0) - (x.time || 0)); if (local.slipAttempts.length > 50) local.slipAttempts.length = 50; }
+          if (!Array.isArray(local.slipLog)) local.slipLog = [];
+          const b = mergeRecent(k + ':l', local.slipLog, remote.slipLog, x => x.transRef + '|' + x.senderId, since);
+          if (b.length) local.slipLog.sort((x, y) => (x.time || 0) - (y.time || 0));
+          // สลิปที่เครื่องเก่าตรวจผ่าน -> กันใช้ซ้ำด้วย
+          if (remote.usedSlips instanceof Set) {
+            if (!(local.usedSlips instanceof Set)) local.usedSlips = new Set();
+            const refs = new Set(b.map(x => x.transRef).concat(a.filter(x => x.result === 'valid' || x.result === 'duplicate').map(x => x.code)));
+            for (const r of refs) if (r && remote.usedSlips.has(r)) local.usedSlips.add(r);
+          }
+          added += a.length + b.length;
+        } else if (Array.isArray(local.slips)) {
+          const c = mergeRecent(k, local.slips, remote.slips, x => (x.transRef || '') + '|' + x.senderId + '|' + (x.manual ? x.time : ''), since);
+          if (c.length) local.slips.sort((x, y) => (x.time || 0) - (y.time || 0));
+          added += c.length;
+        }
+      });
+    }
+    if (added) console.log('🔄 [DB] รวมสลิป/ยอดโอนจากเครื่องก่อน deploy ' + added + ' รายการ (' + tag + ')');
+  } catch (e) { console.error('⚠️ [DB] รวมข้อมูลหลัง deploy ไม่สำเร็จ:', e.response?.data?.error || e.message); }
 }
 
 const defaultPageConfig = {
