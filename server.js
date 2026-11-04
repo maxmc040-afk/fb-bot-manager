@@ -1423,9 +1423,26 @@ function ocrServerBase(cfg) {
   const u = String(cfg.ocrServerUrl || '').trim().replace(/\/+$/, '');
   return /^https?:\/\//i.test(u) ? u : '';
 }
+// 🚦 ส่งรูปให้เซิร์ฟเวอร์ OCR ทีละรูป (ต่อ 1 เซิร์ฟเวอร์)
+// เดิม: ตอนลูกค้าส่งสลิปพร้อมกันหลายคน รูปไปกองคิวที่เซิร์ฟเวอร์ OCR (CPU น้อย) จนรอเกิน 2 นาที -> OCR_TIMEOUT
+// และการส่งซ้ำตอนหมดเวลายิ่งทำให้คิวยาวขึ้น · ตอนนี้: รอคิวที่บอท (ไม่นับเวลา) แล้วส่งทีละรูป
+const ocrQueues = new Map(); // base -> { tail: Promise, waiting: n }
+function ocrEnqueue(base, fn) {
+  const q = ocrQueues.get(base) || { tail: Promise.resolve(), waiting: 0 };
+  ocrQueues.set(base, q);
+  q.waiting++;
+  const run = q.tail.then(() => fn());
+  q.tail = run.catch(() => {}).then(() => { q.waiting--; });
+  return run;
+}
 async function callOcrServer(cfg, buf) {
   const base = ocrServerBase(cfg), key = String(cfg.ocrServerKey || '').trim();
   if (!base || !key) return { errCode: 'OCR_NOT_CONFIGURED' };
+  const q = ocrQueues.get(base);
+  if (q && q.waiting) console.log('🚦 [OCR] รอคิวอ่านสลิป ' + q.waiting + ' รูปก่อนหน้า');
+  return ocrEnqueue(base, () => callOcrServerNow(base, key, buf));
+}
+async function callOcrServerNow(base, key, buf) {
   // Render แบบฟรีหลับเมื่อไม่มีคนใช้ 15 นาที -> ครั้งแรกอาจรอเซิร์ฟเวอร์ตื่น ~1 นาที
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -1440,7 +1457,8 @@ async function callOcrServer(cfg, buf) {
       if (st === 401) return { errCode: 'OCR_UNAUTHORIZED', detail: 'รหัสลับ OCR ไม่ตรงกับ OCR_SECRET ของเซิร์ฟเวอร์ OCR' };
       if (st === 415) return { errCode: 'IMAGE_FORMAT_UNSUPPORTED' };
       if (st === 413) return { errCode: 'FILE_TOO_LARGE' };
-      const retry = !st || st === 502 || st === 503 || st === 504; // เซิร์ฟเวอร์กำลังตื่น / คิวเต็ม
+      // เซิร์ฟเวอร์กำลังตื่น / คิวเต็ม -> รอแล้วส่งใหม่ · หมดเวลา (ECONNABORTED) ไม่ส่งซ้ำทันที (เซิร์ฟเวอร์ยังทำรูปเดิมอยู่ ส่งซ้ำยิ่งช้า) -> ให้ระบบลองใหม่ภายหลัง
+      const retry = (!st && e.code !== 'ECONNABORTED') || st === 502 || st === 503 || st === 504;
       if (retry && attempt === 0) { await sleep(15000); continue; }
       return { errCode: e.code === 'ECONNABORTED' ? 'OCR_TIMEOUT' : 'OCR_SERVER_ERROR', detail: (code || e.message || '').toString().slice(0, 160) };
     }
@@ -1466,7 +1484,7 @@ async function pingOcrServers() {
 // OCR มักสับสนตัวที่หน้าตาคล้ายกัน: I l 1 | ) ( ] [ ! / ,  O 0 Q D,  S 5,  B 8,  Z 2,  G 6
 // และมักตัดเลขยาวเป็นหลายท่อน/ขึ้นบรรทัดใหม่ -> ทำ "โครงตัวอักษร" แล้วหาส่วนที่ตรงกันยาวที่สุด
 function refSkeleton(s, dropMarks) {
-  let x = String(s || '').replace(/b/g, '6').toUpperCase();
+  let x = String(s || '').replace(/[๐-๙]/g, d => String('๐๑๒๓๔๕๖๗๘๙'.indexOf(d))).replace(/b/g, '6').toUpperCase();
   x = dropMarks ? x.replace(/[|)(\][!\/\\]/g, '') : x.replace(/[|)(\][!\/\\]/g, '1');
   return x.replace(/[IL1]/g, '1').replace(/[O0QD]/g, '0').replace(/[S5]/g, '5')
     .replace(/[B8]/g, '8').replace(/[Z2]/g, '2').replace(/[G6]/g, '6')
@@ -1505,6 +1523,22 @@ function slipRefFoundInText(qref, texts) {
     }
   }
   return false;
+}
+
+// 🔄 สลิปซ้ำแบบอ่าน QR ไม่ได้ (เช่น ลูกค้าส่งรูปเดิมซ้ำแต่รูปเล็ก/เบลอกว่าเดิม): ยอดเท่ากัน + เลขที่รายการในข้อความตรงกับสลิปที่ใช้แล้ว
+function findFuzzyUsedSlip(pageData, slip) {
+  if (!slip || slip.provider !== 'ocr' || slip.qrRef) return null;
+  const amt = Number(slip.amount) || 0;
+  if (!amt) return null;
+  const since = Date.now() - 7 * 86400000;
+  const log = pageData.slipLog || [];
+  for (let i = log.length - 1, n = 0; i >= 0 && n < 5000; i--, n++) {
+    const x = log[i];
+    if (!x || (x.time || 0) < since) break;
+    if (Math.abs((Number(x.amount) || 0) - amt) > 0.009 || !x.transRef || String(x.transRef).length < 10) continue;
+    if (slipRefFoundInText(x.transRef, [slip.ocrText])) return x;
+  }
+  return null;
 }
 
 async function verifySlipWithOcrServer(imageUrl, cfg) {
@@ -4497,7 +4531,7 @@ app.get('/', (req, res) => {
                 if (r.quota && r.quota.remaining !== undefined && r.quota.remaining !== null) t += '📊 โควตาตรวจสลิปคงเหลือ ' + r.quota.remaining + ' ครั้ง';
                 if (r.lastError && Date.now() - r.lastError.at < 6 * 3600000) t += (t ? ' · ' : '') + '⚠️ ตรวจสลิปผิดพลาดล่าสุด: ' + r.lastError.code + ' (' + new Date(r.lastError.at).toLocaleTimeString('th-TH') + ')';
                 el.innerText = t;
-                const RES = { valid: ['✅ ผ่าน', 'text-emerald-700'], invalid: ['❌ บัญชีไม่ตรง', 'text-rose-700'], duplicate: ['🔄 สลิปซ้ำ', 'text-slate-600'], retry: ['⏳ รอธนาคาร', 'text-amber-700'], unreadable: ['⚠️ ตรวจไม่ได้', 'text-amber-700'], system: ['🛠️ ปัญหาระบบ', 'text-rose-700'], review: ['🔎 รอแอดมินตรวจ', 'text-sky-700'], notslip: ['🖼️ ไม่ใช่สลิป', 'text-slate-500'], noimage: ['📎 ไม่พบรูป', 'text-slate-500'] };
+                const RES = { valid: ['✅ ผ่าน', 'text-emerald-700'], invalid: ['❌ บัญชีไม่ตรง', 'text-rose-700'], duplicate: ['🔄 สลิปซ้ำ', 'text-slate-600'], retry: ['⏳ รอลองใหม่', 'text-amber-700'], unreadable: ['⚠️ ตรวจไม่ได้', 'text-amber-700'], system: ['🛠️ ปัญหาระบบ', 'text-rose-700'], review: ['🔎 รอแอดมินตรวจ', 'text-sky-700'], notslip: ['🖼️ ไม่ใช่สลิป', 'text-slate-500'], noimage: ['📎 ไม่พบรูป', 'text-slate-500'] };
                 let rows = '';
                 (r.attempts || []).forEach(function(a) {
                     const m = RES[a.result] || [a.result, ''];
@@ -5473,7 +5507,7 @@ app.get('/', (req, res) => {
                     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: btn.getAttribute('data-url') })
                 })).json();
                 if(!r.success) { btn.innerText = '❌ ' + (r.error || 'ตรวจไม่สำเร็จ'); return; }
-                const RES = { valid: '✅ สลิปถูกต้อง', invalid: '❌ บัญชีไม่ตรง', duplicate: '🔄 สลิปซ้ำ (ใช้ไปแล้ว)', retry: '⏳ ธนาคารยังยืนยันไม่ได้ จะลองใหม่', unreadable: '⚠️ อ่านสลิปไม่ได้', system: '🛠️ ระบบตรวจสลิปมีปัญหา', review: '🔎 รอแอดมินตรวจ', notslip: '🖼️ ไม่ใช่สลิป' };
+                const RES = { valid: '✅ สลิปถูกต้อง', invalid: '❌ บัญชีไม่ตรง', duplicate: '🔄 สลิปซ้ำ (ใช้ไปแล้ว)', retry: '⏳ กำลังรอลองใหม่อัตโนมัติ', unreadable: '⚠️ อ่านสลิปไม่ได้', system: '🛠️ ระบบตรวจสลิปมีปัญหา', review: '🔎 รอแอดมินตรวจ', notslip: '🖼️ ไม่ใช่สลิป' };
                 btn.innerText = (RES[r.result] || r.result || 'ตรวจแล้ว') + (r.amount ? ' ' + fmtMoney(r.amount) + ' ฿' : '');
                 btn.className = 'mt-1 px-2 py-0.5 text-[11px] font-semibold rounded-md ' + (r.result === 'valid' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800');
                 if(r.result === 'valid' && currentLiveId) loadLiveDetail(false);
@@ -9368,14 +9402,20 @@ app.get('/webhook', (req, res) => {
 // 🧾 ตรวจสลิป 1 รูป (เรียกซ้ำได้ เมื่อธนาคารยังยืนยันไม่ได้)
 async function processSlipImage(targetRecord, pageId, senderId, imageUrl, attempt = 0) {
   const t0 = Date.now();
+  const url = String(imageUrl || '').slice(0, 2000);
+  // แถว "รอลองใหม่" เดิมของรูปนี้ (ลบทิ้งเมื่อลองใหม่เสร็จ เหลือแค่ผลล่าสุด)
+  const oldRetry = attempt > 0 ? new Set((targetRecord.pageData.slipAttempts || []).filter(a => a.result === 'retry' && a.senderId === senderId && a.imageUrl === url).map(a => a.id)) : null;
   try {
     return await processSlipImageInner(targetRecord, pageId, senderId, imageUrl, attempt);
   } finally {
     // ผูกลิงก์รูปกับผลตรวจของรูปนี้ (กดดูรูปสลิปได้ในประวัติ)
-    for (const a of (targetRecord.pageData.slipAttempts || [])) {
+    const pd = targetRecord.pageData;
+    for (const a of (pd.slipAttempts || [])) {
       if (a.time < t0) break;
-      if (a.senderId === senderId && !a.imageUrl && a.result !== 'noimage') a.imageUrl = String(imageUrl || '').slice(0, 2000);
+      if (a.senderId === senderId && !a.imageUrl && a.result !== 'noimage') a.imageUrl = url;
     }
+    // ลองใหม่ -> เก็บแค่ผลล่าสุดของรูปนี้ (ลบแถว "รอลองใหม่" เดิม ไม่ให้ประวัติรก)
+    if (oldRetry && oldRetry.size && Array.isArray(pd.slipAttempts)) pd.slipAttempts = pd.slipAttempts.filter(a => !oldRetry.has(a.id));
   }
 }
 async function processSlipImageInner(targetRecord, pageId, senderId, imageUrl, attempt = 0) {
@@ -9429,6 +9469,15 @@ async function processSlipImageInner(targetRecord, pageId, senderId, imageUrl, a
       await sendSlipReply(configStore.msgSlipUnreadable);
       return;
     }
+    // 🔁 ปัญหาชั่วคราวฝั่งระบบ (เซิร์ฟเวอร์ OCR ไม่ว่าง/หมดเวลา, โหลดรูปจาก Facebook ไม่ได้, เซิร์ฟเวอร์ตรวจสลิปล่ม) -> ลองใหม่อัตโนมัติ
+    const TRANSIENT = ['OCR_TIMEOUT', 'OCR_SERVER_ERROR', 'NETWORK_ERROR', 'IMAGE_DOWNLOAD_FAILED', 'API_SERVER_ERROR', 'INTERNAL_SERVER_ERROR', 'INTERNAL_ERROR', 'RATE_LIMIT_EXCEEDED', 'HTTP_500', 'HTTP_502', 'HTTP_503', 'HTTP_504'];
+    const sysDelays = [1, 3, 6]; // นาที
+    if (TRANSIENT.includes(errCode) && attempt < sysDelays.length) {
+      logSlipAttempt(pageData, { senderId, provider, result: 'retry', code: errCode, note: 'ระบบตรวจสลิปไม่ว่าง/ขัดข้องชั่วคราว จะลองใหม่อัตโนมัติใน ' + sysDelays[attempt] + ' นาที (ครั้งที่ ' + (attempt + 1) + '/' + sysDelays.length + ')' + (slipResult.detail ? ' · ' + String(slipResult.detail).slice(0, 80) : '') });
+      console.log(`🔁 [Page: ${pageId}] ${errCode} -> ลองใหม่ใน ${sysDelays[attempt]} นาที`);
+      setTimeout(() => runTask(() => processSlipImage(targetRecord, pageId, senderId, imageUrl, attempt + 1), 'slip-retry'), sysDelays[attempt] * 60 * 1000);
+      return;
+    }
     // ปัญหาฝั่งระบบ (key / โควตา / เซิร์ฟเวอร์ EasySlip) ไม่ใช่ความผิดลูกค้า -> ไม่แจ้งลูกค้า
     const systemErr = ['MISSING_API_KEY', 'INVALID_API_KEY', 'QUOTA_EXCEEDED', 'INSUFFICIENT_QUOTA', 'IP_NOT_ALLOWED', 'BRANCH_INACTIVE', 'SERVICE_BANNED', 'SERVICE_DELETED', 'USER_BANNED', 'RATE_LIMIT_EXCEEDED', 'API_SERVER_ERROR', 'INTERNAL_SERVER_ERROR', 'INTERNAL_ERROR', 'IMAGE_DOWNLOAD_FAILED', 'NETWORK_ERROR', 'HTTP_500', 'HTTP_502', 'HTTP_503', 'HTTP_504', 'VISION_API_NOT_ENABLED', 'VISION_BILLING_DISABLED', 'OCR_NOT_CONFIGURED', 'OCR_UNAUTHORIZED', 'OCR_SERVER_ERROR', 'OCR_TIMEOUT', 'HTTP_400', 'HTTP_401', 'HTTP_403'].includes(errCode);
     if (systemErr) targetRecord.pageData.lastSlipError = { code: errCode, at: Date.now() };
@@ -9444,7 +9493,10 @@ async function processSlipImageInner(targetRecord, pageId, senderId, imageUrl, a
       console.log(`🖼️ [Page: ${pageId}] รูปจาก ${senderId} ไม่ใช่สลิป -> ข้าม`);
       return 'notslip';
     }
-    logSlipAttempt(pageData, { senderId, provider, result: systemErr ? 'system' : (notSlipSure ? 'notslip' : 'unreadable'), code: errCode || 'ไม่ทราบสาเหตุ', note: systemErr ? 'ปัญหาฝั่งระบบตรวจสลิป (ไม่แจ้งลูกค้า)' : ((slipResult.detail ? slipResult.detail + ' · ' : '') + (notify ? 'แจ้งลูกค้าให้ส่งใหม่' : 'ไม่ตอบ')) });
+    // ลองใหม่ครบแล้วยังไม่ได้ และลูกค้ากำลังจ่ายเงิน -> บอกลูกค้าว่าได้รับสลิปแล้ว ให้แอดมินตรวจ (ไม่ปล่อยลูกค้ารอเงียบ)
+    const gaveUp = systemErr && TRANSIENT.includes(errCode) && attempt >= sysDelays.length;
+    logSlipAttempt(pageData, { senderId, provider, result: systemErr ? 'system' : (notSlipSure ? 'notslip' : 'unreadable'), code: errCode || 'ไม่ทราบสาเหตุ', note: systemErr ? (gaveUp ? 'ลองใหม่ ' + attempt + ' ครั้งแล้วยังไม่สำเร็จ · ' + (payCtx ? 'แจ้งลูกค้าว่าแอดมินจะตรวจให้' : 'ไม่แจ้งลูกค้า') + ' · แอดมินตรวจรูปนี้เอง' : 'ปัญหาฝั่งระบบตรวจสลิป (ไม่แจ้งลูกค้า)') : ((slipResult.detail ? slipResult.detail + ' · ' : '') + (notify ? 'แจ้งลูกค้าให้ส่งใหม่' : 'ไม่ตอบ')) });
+    if (gaveUp && payCtx) await sendSlipReply(configStore.msgSlipReview || '✅ ได้รับสลิปแล้วค่ะ แอดมินกำลังตรวจสอบยอด จะแจ้งให้ทราบอีกครั้งนะคะ 🙏');
     if (notify) {
       labelSlipResult(targetRecord.pageData, senderId, 'unreadable');
       await sendSlipReply(configStore.msgSlipUnreadable);
@@ -9457,6 +9509,17 @@ async function processSlipImageInner(targetRecord, pageId, senderId, imageUrl, a
   // สลิปใบเดิมจากลูกค้าคนเดิมภายใน 10 นาที (เช่น รูป + การ์ดสลิปของ Messenger มาคู่กัน) -> ข้ามเงียบ ๆ ไม่ตอบว่าซ้ำ
   if (usedSlips.has(slip.transRef) && (pageData.slipLog || []).some(x => x.transRef === slip.transRef && x.senderId === senderId && Date.now() - x.time < 10 * 60000)) {
     console.log(`🔁 [Page: ${pageId}] สลิปเดิมจาก ${senderId} ส่งเข้ามาซ้ำในไม่กี่นาที ข้าม`);
+    return;
+  }
+  // อ่าน QR ไม่ได้ แต่ยอด + เลขที่รายการตรงกับสลิปที่ใช้ไปแล้ว -> สลิปซ้ำ (ไม่ใช่ "รอแอดมินตรวจ")
+  const fuzzyDup = !usedSlips.has(slip.transRef) && !slip.isDuplicate ? findFuzzyUsedSlip(pageData, slip) : null;
+  if (fuzzyDup) {
+    if (fuzzyDup.senderId === senderId && Date.now() - fuzzyDup.time < 2 * 60000) { console.log(`🔁 [Page: ${pageId}] สลิปเดิม (อ่าน QR ไม่ได้) จาก ${senderId} ส่งซ้ำทันที ข้าม`); return; }
+    console.log(`🔄 [Page: ${pageId}] สลิปซ้ำ (อ่าน QR ไม่ได้ แต่ตรงกับ ${fuzzyDup.transRef})`);
+    logSlipAttempt(pageData, { senderId, provider, result: 'duplicate', code: fuzzyDup.transRef, amount: slip.amount,
+      note: 'สลิปซ้ำ · อ่าน QR จากรูปนี้ไม่ได้ แต่ยอดและเลขที่รายการตรงกับสลิปที่ใช้ไปแล้ว' + (fuzzyDup.senderId === senderId ? ' (ลูกค้าคนเดิมส่งซ้ำ)' : ' (คนละลูกค้า)') });
+    labelSlipResult(targetRecord.pageData, senderId, 'duplicate');
+    await sendSlipReply(configStore.msgSlipDuplicate);
     return;
   }
   if (usedSlips.has(slip.transRef) || slip.isDuplicate) {
