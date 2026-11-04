@@ -1300,16 +1300,24 @@ function parseThaiSlipText(text, engText) {
     }
     if (cand.length) amount = Math.max(...cand);
   }
-  // OCR อ่านจุดทศนิยมหาย: "2.00 บาท" -> "200 um" · ยอดในสลิปธนาคารมีทศนิยม 2 ตำแหน่งเสมอ
-  // -> ตัวเลข (≥3 หลัก ไม่มีจุด) ที่อยู่หน้าคำว่า บาท (หรือที่ OCR อ่านเพี้ยน um/vm/ym…) = 2 หลักท้ายคือสตางค์
+  // ยอดไม่มีทศนิยม: "420 บาท"
+  // - แอปที่แสดงยอดเป็นจำนวนเต็ม (เป๋าตัง / G Wallet / TrueMoney…) หรือค่าธรรมเนียมเขียน "0 บาท" -> ใช้ตามที่เห็น (420)
+  // - สลิปธนาคารปกติมีทศนิยมเสมอ -> OCR อ่านจุดหาย: "2.00 บาท" -> "200 um" -> 2 หลักท้ายคือสตางค์ (2.00)
   if (!amount) {
-    const BAHT = '(?:บาท|um|vm|ym|uw|wm|un|wn|nm|vn|THB)';
-    const dropRe = new RegExp('(?<![\\d.,:/])(\\d{1,3}(?:,\\d{3})*\\d{2}|\\d{3,})(?![\\d.,:/])\\s*' + BAHT, 'i');
+    const BAHT = '(บาท|um|vm|ym|uw|wm|un|wn|nm|vn|THB)';
+    const intStyle = /เป๋าตัง|เปาตัง|เป๋าตั|[g6]\s*-?\s*wallet|paotang|truemoney|ทรูมันนี่|shopee\s*pay|line\s*pay/i.test(all + '\n' + eng)
+      || /(ค่าธรรมเนียม|fee)[^\n\d]{0,40}(?<![\d.,])0\s*(บาท|THB)(?![\d.])/i.test(all);
+    const hasDec = money.length > 0; // มียอดแบบ x.xx ที่อื่นในสลิป (เช่น ค่าธรรมเนียม 0.00) = สลิปแบบมีทศนิยม
+    const re = new RegExp('(?<![\\d.,:/])(\\d{1,3}(?:,\\d{3})+|\\d+)(?![\\d.,:/])\\s*' + BAHT, 'i');
     const pick = (ls) => {
       for (const l of ls) {
         if (isFeeLine(l)) continue;
-        const m = l.match(dropRe);
-        if (m) { const v = parseInt(m[1].replace(/,/g, ''), 10) / 100; if (v > 0) return v; }
+        const m = l.match(re);
+        if (!m) continue;
+        const n = parseInt(m[1].replace(/,/g, ''), 10);
+        const cleanUnit = /^(บาท|THB)$/i.test(m[2]);
+        if (intStyle || (cleanUnit && !hasDec)) { if (n > 0) return n; continue; }
+        if (m[1].replace(/\D/g, '').length >= 3) { const v = n / 100; if (v > 0) return v; }
       }
       return 0;
     };
