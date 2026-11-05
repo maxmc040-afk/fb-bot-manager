@@ -1427,30 +1427,89 @@ async function verifySlipWithGoogleVision(imageUrl, cfg) {
 // บอตดาวน์โหลดรูปสลิป -> ส่งไปให้เซิร์ฟเวอร์ OCR อ่านข้อความ -> แยก ยอดเงิน/เลขที่รายการ/บัญชีผู้รับ เหมือน Google Vision
 // ⚠️ อ่านจากรูปอย่างเดียว ไม่ได้ยืนยันกับธนาคาร
 // =====================================================================
-function ocrServerBase(cfg) {
-  const u = String(cfg.ocrServerUrl || '').trim().replace(/\/+$/, '');
-  return /^https?:\/\//i.test(u) ? u : '';
+// 🔀 ใส่ได้หลายเซิร์ฟเวอร์ (คั่นด้วย , หรือเว้นวรรค) · รหัสลับ: ใช้รหัสเดียวกันทุกตัว หรือใส่หลายรหัสคั่นด้วย , ตามลำดับ URL
+function ocrServerList(cfg) {
+  const urls = [];
+  for (const raw of String(cfg.ocrServerUrl || '').split(/[\s,]+/)) {
+    const u = raw.trim().replace(/\/+$/, '');
+    if (/^https?:\/\//i.test(u) && !urls.includes(u)) urls.push(u);
+  }
+  const key = String(cfg.ocrServerKey || '').trim();
+  const keys = key.split(',').map(s => s.trim());
+  const perUrl = urls.length > 1 && keys.length === urls.length && keys.every(Boolean);
+  return urls.map((base, i) => ({ base, key: perUrl ? keys[i] : key }));
 }
+function ocrServerBase(cfg) {
+  const l = ocrServerList(cfg);
+  return l.length ? l[0].base : '';
+}
+const ocrHostName = (base) => String(base || '').replace(/^https?:\/\//i, '');
 // 🚦 ส่งรูปให้เซิร์ฟเวอร์ OCR ทีละรูป (ต่อ 1 เซิร์ฟเวอร์)
 // เดิม: ตอนลูกค้าส่งสลิปพร้อมกันหลายคน รูปไปกองคิวที่เซิร์ฟเวอร์ OCR (CPU น้อย) จนรอเกิน 2 นาที -> OCR_TIMEOUT
 // และการส่งซ้ำตอนหมดเวลายิ่งทำให้คิวยาวขึ้น · ตอนนี้: รอคิวที่บอท (ไม่นับเวลา) แล้วส่งทีละรูป
-const ocrQueues = new Map(); // base -> { tail: Promise, waiting: n }
+const ocrQueues = new Map(); // base -> { tail: Promise, waiting: n, downUntil: ms }
+function ocrQueue(base) {
+  let q = ocrQueues.get(base);
+  if (!q) { q = { tail: Promise.resolve(), waiting: 0, downUntil: 0 }; ocrQueues.set(base, q); }
+  return q;
+}
 function ocrEnqueue(base, fn) {
-  const q = ocrQueues.get(base) || { tail: Promise.resolve(), waiting: 0 };
-  ocrQueues.set(base, q);
+  const q = ocrQueue(base);
   q.waiting++;
   const run = q.tail.then(() => fn());
   q.tail = run.catch(() => {}).then(() => { q.waiting--; });
   return run;
 }
-async function callOcrServer(cfg, buf) {
-  const base = ocrServerBase(cfg), key = String(cfg.ocrServerKey || '').trim();
-  if (!base || !key) return { errCode: 'OCR_NOT_CONFIGURED' };
-  const q = ocrQueues.get(base);
-  if (q && q.waiting) console.log('🚦 [OCR] รอคิวอ่านสลิป ' + q.waiting + ' รูปก่อนหน้า');
-  return ocrEnqueue(base, () => callOcrServerNow(base, key, buf));
+// หลายเซิร์ฟเวอร์: เลือกตัวที่คิวว่างที่สุด (เท่ากันเลือกตามลำดับที่ใส่) · ตัวที่เพิ่งล่ม/ไม่ตอบ พักไว้ 2 นาที (ถ้ายังมีตัวอื่น)
+const OCR_FAILOVER = new Set(['OCR_TIMEOUT', 'OCR_SERVER_ERROR', 'OCR_UNAUTHORIZED']);
+function pickOcrServer(list, tried) {
+  const now = Date.now();
+  const cand = list.filter(s => !tried.has(s.base));
+  const up = cand.filter(s => !(ocrQueue(s.base).downUntil > now));
+  const pool = up.length ? up : cand;
+  let best = pool[0];
+  for (const s of pool) if (ocrQueue(s.base).waiting < ocrQueue(best.base).waiting) best = s;
+  return best;
 }
-async function callOcrServerNow(base, key, buf) {
+async function callOcrServer(cfg, buf) {
+  const list = ocrServerList(cfg);
+  if (!list.length || !list[0].key) return { errCode: 'OCR_NOT_CONFIGURED' };
+  if (list.length === 1) {
+    const { base, key } = list[0];
+    const q = ocrQueues.get(base);
+    if (q && q.waiting) console.log('🚦 [OCR] รอคิวอ่านสลิป ' + q.waiting + ' รูปก่อนหน้า');
+    return ocrEnqueue(base, () => callOcrServerNow(base, key, buf));
+  }
+  // 🔀 หลายเซิร์ฟเวอร์: ลูกค้าส่งสลิปพร้อมกันหลายคน -> แบ่งไปอ่านพร้อมกันหลายตัว ไม่ต้องรอคิวเดียว
+  // ตัวไหนล่ม/ไม่ตอบ -> ส่งตัวถัดไปทันที · ทุกตัวใช้ไฟล์ slip-ocr เดียวกัน -> ผลอ่านเหมือนกันทุกตัวอักษร
+  const tried = new Set();
+  let last = { errCode: 'OCR_SERVER_ERROR' };
+  while (tried.size < list.length) {
+    const s = pickOcrServer(list, tried);
+    tried.add(s.base);
+    const q = ocrQueue(s.base);
+    if (q.waiting) console.log('🚦 [OCR] ' + ocrHostName(s.base) + ' รอคิว ' + q.waiting + ' รูปก่อนหน้า');
+    const more = tried.size < list.length;
+    const r = await ocrEnqueue(s.base, () => callOcrServerNow(s.base, s.key, buf, more));
+    if (!r.errCode) { q.downUntil = 0; return r; }
+    last = r;
+    if (!OCR_FAILOVER.has(r.errCode)) return r;
+    q.downUntil = Date.now() + 2 * 60000;
+    if (more) console.log('🔀 [OCR] ' + ocrHostName(s.base) + ' ' + r.errCode + ' -> ส่งให้เซิร์ฟเวอร์ OCR ตัวอื่น');
+  }
+  return last;
+}
+// ♻️ รูปเดียวกันกำลังส่งอ่านอยู่ (ลูกค้าส่งซ้ำรัว ๆ / ลองใหม่ซ้อนกัน) -> รอผลเดียวกัน ไม่ต้องเข้าคิวอ่านซ้ำ
+const ocrInflightReq = new Map();
+function callOcrServerShared(cfg, buf) {
+  const k = crypto.createHash('sha1').update(buf).update('|' + String(cfg.ocrServerUrl || '') + '|' + String(cfg.ocrServerKey || '')).digest('hex');
+  const hit = ocrInflightReq.get(k);
+  if (hit) { console.log('♻️ [OCR] รูปเดียวกันกำลังตรวจอยู่ -> ใช้ผลเดียวกัน (ไม่ส่งอ่านซ้ำ)'); return hit; }
+  const p = callOcrServer(cfg, buf).finally(() => ocrInflightReq.delete(k));
+  ocrInflightReq.set(k, p);
+  return p;
+}
+async function callOcrServerNow(base, key, buf, noWait) {
   // Render แบบฟรีหลับเมื่อไม่มีคนใช้ 15 นาที -> ครั้งแรกอาจรอเซิร์ฟเวอร์ตื่น ~1 นาที
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -1467,7 +1526,8 @@ async function callOcrServerNow(base, key, buf) {
       if (st === 413) return { errCode: 'FILE_TOO_LARGE' };
       // เซิร์ฟเวอร์กำลังตื่น / คิวเต็ม -> รอแล้วส่งใหม่ · หมดเวลา (ECONNABORTED) ไม่ส่งซ้ำทันที (เซิร์ฟเวอร์ยังทำรูปเดิมอยู่ ส่งซ้ำยิ่งช้า) -> ให้ระบบลองใหม่ภายหลัง
       const retry = (!st && e.code !== 'ECONNABORTED') || st === 502 || st === 503 || st === 504;
-      if (retry && attempt === 0) { await sleep(15000); continue; }
+      // มีเซิร์ฟเวอร์ตัวอื่นให้ลอง -> ไม่ต้องรอ 15 วิ ส่งตัวอื่นเลย
+      if (retry && attempt === 0 && !noWait) { await sleep(15000); continue; }
       return { errCode: e.code === 'ECONNABORTED' ? 'OCR_TIMEOUT' : 'OCR_SERVER_ERROR', detail: (code || e.message || '').toString().slice(0, 160) };
     }
   }
@@ -1480,12 +1540,16 @@ async function pingOcrServers() {
   for (const u of Object.values(usersDB)) {
     for (const pd of Object.values((u && u.pages) || {})) {
       const c = pd && pd.config;
-      if (c && c.slipProvider === 'ocr' && c.enableSlipVerify) { const b = ocrServerBase(c); if (b) bases.add(b); }
+      if (c && c.slipProvider === 'ocr' && c.enableSlipVerify) for (const s of ocrServerList(c)) bases.add(s.base);
     }
   }
   await Promise.all(Array.from(bases).map(async (b) => {
     try { await axios.get(b + '/healthz', { timeout: 90000 }); ocrPingState.set(b, { at: Date.now(), ok: true }); }
-    catch (e) { ocrPingState.set(b, { at: Date.now(), ok: false, error: e.response ? 'HTTP ' + e.response.status : e.message }); console.error('⚠️ [OCR Ping] ' + b + ' ไม่ตอบ:', e.message); }
+    catch (e) {
+      ocrPingState.set(b, { at: Date.now(), ok: false, error: e.response ? 'HTTP ' + e.response.status : e.message });
+      ocrQueue(b).downUntil = Date.now() + 2 * 60000; // หลายเซิร์ฟเวอร์: ส่งสลิปไปตัวอื่นก่อน
+      console.error('⚠️ [OCR Ping] ' + b + ' ไม่ตอบ:', e.message);
+    }
   }));
 }
 // ===== เทียบเลขที่รายการบนสลิปกับ QR แบบทนต่อ OCR อ่านเพี้ยน =====
@@ -1583,7 +1647,7 @@ async function verifySlipWithOcrServer(imageUrl, cfg) {
   try { buf = Buffer.from((await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 20000 })).data); }
   catch (e) { return { slip: null, errCode: 'IMAGE_DOWNLOAD_FAILED' }; }
   if (buf.length > 10 * 1024 * 1024) return { slip: null, errCode: 'FILE_TOO_LARGE' };
-  const o = await callOcrServer(cfg, buf);
+  const o = await callOcrServerShared(cfg, buf);
   if (o.errCode) { console.error('❌ [OCR Server]', o.errCode, o.detail || ''); return { slip: null, errCode: o.errCode, detail: o.detail || '' }; }
   // เซิร์ฟเวอร์ OCR เช็กเร็วแล้วว่าไม่ใช่สลิป (ไม่มี QR + ไม่มีข้อความแบบสลิป) / รูปไม่มีตัวหนังสือเลย -> ไม่ใช่สลิป (เงียบ ไม่ลงประวัติ)
   if (o.notSlip || (!o.text.trim() && !o.qr)) return { slip: null, errCode: 'NOT_A_SLIP', detail: o.notSlip ? 'ไม่ใช่รูปสลิป (ไม่มี QR และไม่มีข้อความแบบสลิป)' : 'รูปไม่มีตัวหนังสือ' };
@@ -3205,14 +3269,15 @@ app.get('/', (req, res) => {
                             <div id="ocr-server-box" class="md:col-span-2 hidden space-y-2">
                                 <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
                                     <div>
-                                        <label class="text-xs font-semibold text-slate-600 block mb-1">URL เซิร์ฟเวอร์ OCR:</label>
-                                        <input type="text" id="ocr-server-url" autocomplete="off" class="w-full p-2.5 text-sm bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-rose-400" placeholder="https://slip-ocr-xxxx.onrender.com">
+                                        <label class="text-xs font-semibold text-slate-600 block mb-1">URL เซิร์ฟเวอร์ OCR (หลายตัวคั่นด้วย ,):</label>
+                                        <input type="text" id="ocr-server-url" autocomplete="off" class="w-full p-2.5 text-sm bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-rose-400" placeholder="https://slip-ocr-xxxx.onrender.com, https://slip-ocr-yyyy.onrender.com">
                                     </div>
                                     <div>
                                         <label class="text-xs font-semibold text-slate-600 block mb-1">รหัสลับ (OCR_SECRET):</label>
                                         <input type="password" id="ocr-server-key" autocomplete="new-password" class="w-full p-2.5 text-sm bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-rose-400" placeholder="รหัสเดียวกับที่ตั้งใน Render ของเซิร์ฟเวอร์ OCR">
                                     </div>
                                 </div>
+                                <p class="text-[11px] text-slate-500">💡 ใส่ได้หลายตัว: ลูกค้าส่งสลิปพร้อมกันหลายคน ระบบแบ่งไปอ่านพร้อมกัน ไม่ต้องรอคิวเดียว · ตัวไหนล่มส่งตัวอื่นแทน · ทุกตัวต้อง Deploy ไฟล์ slip-ocr เดียวกัน · รหัสลับใช้รหัสเดียวกันทุกตัว (หรือใส่หลายรหัสคั่นด้วย , ตามลำดับ URL)</p>
                                 <div class="flex flex-wrap items-center gap-2">
                                     <button type="button" onclick="testOcrServer(this)" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-800 text-white hover:bg-slate-900">🔌 ทดสอบการเชื่อมต่อ</button>
                                     <span id="ocr-test-result" class="text-xs text-slate-600"></span>
@@ -4605,9 +4670,21 @@ app.get('/', (req, res) => {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ url: document.getElementById('ocr-server-url').value.trim(), key: document.getElementById('ocr-server-key').value.trim() })
                 })).json();
-                if (r.success) {
+                if (r.servers) {
+                    // หลายเซิร์ฟเวอร์: แสดงทีละตัว + เตือนถ้า Deploy ไม่ครบ (เวอร์ชันไม่ตรงกัน)
+                    const okN = r.servers.filter(function(s) { return s.success; }).length;
+                    let h = (okN === r.servers.length ? '✅' : '⚠️') + ' เชื่อมต่อได้ ' + okN + '/' + r.servers.length + ' เซิร์ฟเวอร์ (ระบบส่งสลิปไปตัวที่ว่าง)';
+                    r.servers.forEach(function(s) {
+                        h += '<br>' + (s.success ? '✅ ' : '❌ ') + escapeHtml(s.host || '') + ' · ' + (s.success
+                            ? (s.ready ? 'พร้อม' : 'กำลังโหลดภาษา') + ' · ' + (s.version ? 'เวอร์ชัน ' + escapeHtml(s.version) : 'เวอร์ชันเก่า') + ' · แรม ' + s.memMB + ' MB · ' + s.ms + ' ms'
+                            : escapeHtml(s.error || ''));
+                    });
+                    if (r.versionMismatch) h += '<br>⚠️ เวอร์ชันไม่ตรงกัน: Deploy ไฟล์ slip-ocr ล่าสุดให้ครบทุกตัว (ผลอ่านต้องเหมือนกันทุกตัว)';
+                    out.className = 'text-xs font-semibold ' + (okN === r.servers.length && !r.versionMismatch ? 'text-emerald-700' : 'text-amber-700');
+                    out.innerHTML = h;
+                } else if (r.success) {
                     out.className = 'text-xs text-emerald-700 font-semibold';
-                    out.innerText = '✅ เชื่อมต่อได้ · ' + (r.ready ? 'พร้อมอ่านสลิป' : 'กำลังโหลดภาษา (รอสักครู่)') + ' · ภาษา ' + (r.langs || []).join('+') + ' · แรม ' + r.memMB + ' MB · ' + r.ms + ' ms';
+                    out.innerText = '✅ เชื่อมต่อได้ · ' + (r.ready ? 'พร้อมอ่านสลิป' : 'กำลังโหลดภาษา (รอสักครู่)') + ' · ภาษา ' + (r.langs || []).join('+') + (r.version ? ' · เวอร์ชัน ' + r.version : '') + ' · แรม ' + r.memMB + ' MB · ' + r.ms + ' ms';
                 } else {
                     out.className = 'text-xs text-rose-600 font-semibold';
                     out.innerText = '❌ ' + r.error;
@@ -7557,17 +7634,24 @@ app.post('/api/slip/ocr-test', checkAuth, async (req, res) => {
   const pageData = usersDB[req.userId]?.pages[req.query.pageId];
   if (!pageData) return res.json({ success: false, error: 'ไม่พบข้อมูลเพจนี้' });
   const cfg = { ocrServerUrl: String((req.body || {}).url || pageData.config.ocrServerUrl || ''), ocrServerKey: String((req.body || {}).key || pageData.config.ocrServerKey || '') };
-  const base = ocrServerBase(cfg);
-  if (!base) return res.json({ success: false, error: 'กรุณาใส่ URL ของเซิร์ฟเวอร์ OCR (ขึ้นต้นด้วย https://)' });
-  if (!cfg.ocrServerKey.trim()) return res.json({ success: false, error: 'กรุณาใส่รหัสลับ (OCR_SECRET)' });
-  const t0 = Date.now();
-  try {
-    const r = await axios.get(base + '/status', { headers: { 'x-ocr-key': cfg.ocrServerKey.trim() }, timeout: 90000 });
-    res.json({ success: true, ms: Date.now() - t0, ...r.data });
-  } catch (e) {
-    const st = e.response && e.response.status;
-    res.json({ success: false, error: st === 401 ? 'รหัสลับไม่ตรงกับ OCR_SECRET ของเซิร์ฟเวอร์ OCR' : st === 404 ? 'URL ไม่ถูกต้อง (ไม่พบเซิร์ฟเวอร์ OCR ที่ URL นี้)' : 'เชื่อมต่อไม่ได้: ' + (st ? 'HTTP ' + st : e.message) });
-  }
+  const list = ocrServerList(cfg);
+  if (!list.length) return res.json({ success: false, error: 'กรุณาใส่ URL ของเซิร์ฟเวอร์ OCR (ขึ้นต้นด้วย https://)' });
+  if (!list[0].key) return res.json({ success: false, error: 'กรุณาใส่รหัสลับ (OCR_SECRET)' });
+  const one = async (s) => {
+    const t0 = Date.now();
+    try {
+      const r = await axios.get(s.base + '/status', { headers: { 'x-ocr-key': s.key }, timeout: 90000 });
+      return { ...r.data, success: true, host: ocrHostName(s.base), ms: Date.now() - t0 };
+    } catch (e) {
+      const st = e.response && e.response.status;
+      return { success: false, host: ocrHostName(s.base), error: st === 401 ? 'รหัสลับไม่ตรงกับ OCR_SECRET ของเซิร์ฟเวอร์ OCR' : st === 404 ? 'URL ไม่ถูกต้อง (ไม่พบเซิร์ฟเวอร์ OCR ที่ URL นี้)' : 'เชื่อมต่อไม่ได้: ' + (st ? 'HTTP ' + st : e.message) };
+    }
+  };
+  if (list.length === 1) return res.json(await one(list[0]));
+  // หลายเซิร์ฟเวอร์: ทดสอบทุกตัวพร้อมกัน + เช็กว่า Deploy ไฟล์ slip-ocr เวอร์ชันเดียวกันครบทุกตัว
+  const servers = await Promise.all(list.map(one));
+  const vers = new Set(servers.filter(x => x.success).map(x => x.version || '-'));
+  res.json({ success: servers.every(x => x.success), servers, versionMismatch: vers.size > 1 });
 });
 
 // 🖼️ ดูรูปสลิปจากประวัติตรวจสลิป (เฉพาะรูปที่อยู่ในประวัติของเพจตัวเอง · ไม่เก็บสำเนารูป)
@@ -9884,7 +9968,7 @@ async function processSlipImageInner(targetRecord, pageId, senderId, imageUrl, a
     // QR ถูกต้อง แต่ "ตัวหนังสือ" เลขที่รายการอ่านไม่ตรง -> ส่วนใหญ่เป็นเพราะรูปเล็ก/ถูกบีบอัด ตัวอ่านอ่านตัวอักษรเพี้ยน
     // ไม่ตอบลูกค้าว่าสลิปไม่ถูกต้องทันที (กันลูกค้าที่โอนจริงโดนปฏิเสธ) -> ให้แอดมินตรวจเสมอ
     if (qrMode === 'invalid' && !slip.refMismatch) {
-      logSlipAttempt(pageData, { senderId, provider, result: 'invalid', code: 'QR', ref: slip.transRef, amount: slip.amount, note: '📷 ' + slip.qrIssue });
+      logSlipAttempt(pageData, { senderId, provider, result: 'invalid', code: 'QR', ref: slip.transRef, amount: slip.amount, dateText: slip.dateText || '', note: '📷 ' + slip.qrIssue });
       labelSlipResult(targetRecord.pageData, senderId, 'invalid');
       await sendSlipReply(configStore.msgSlipInvalid);
     } else {
@@ -9906,7 +9990,7 @@ async function processSlipImageInner(targetRecord, pageId, senderId, imageUrl, a
   }
   if (!receiverOk && !looseHit) {
     console.log(`❌ [Page: ${pageId}] เลขบัญชีผู้รับไม่ตรงกับร้านค้า`, slip.receiverAccounts, slip.receiverNameTh);
-    logSlipAttempt(pageData, { senderId, provider, result: 'invalid', code: slip.matchResult || 'account', ref: slip.transRef, amount: slip.amount,
+    logSlipAttempt(pageData, { senderId, provider, result: 'invalid', code: slip.matchResult || 'account', ref: slip.transRef, amount: slip.amount, dateText: slip.dateText || '',
       note: (clearWrong ? '👁️ อ่านจากรูป: ' : '') + 'ปลายทางในสลิป: ' + (slip.receiverBank ? 'ธนาคาร ' + bankNameFromCode(slip.receiverBank) + ' ' : '') + (slip.receiverAccounts.join(', ') || '-') + (slip.receiverNameTh ? ' (' + slip.receiverNameTh + ')' : '')
         + ' · ที่ตั้งไว้: ' + (configStore.merchantBank || '-') + ' ' + (configStore.merchantAccount || '-') });
     labelSlipResult(targetRecord.pageData, senderId, 'invalid');
