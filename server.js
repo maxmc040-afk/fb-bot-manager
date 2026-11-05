@@ -1601,6 +1601,7 @@ async function verifySlipWithOcrServer(imageUrl, cfg) {
   // (สลิปปลอม/ตัดต่อ มักไม่มี QR หรือก๊อป QR จากสลิปใบอื่นมาแปะ)
   const qrOk = !!(o.qr && o.qr.transRef && o.qr.crcOk !== false);
   let qrIssue = '';
+  let refMismatch = false; // มี QR ถูกต้อง แต่ตัวหนังสือเลขที่รายการอ่านไม่ตรง (มักเป็น OCR อ่านเพี้ยน)
   if (!qrOk) qrIssue = o.qr ? 'QR บนสลิปไม่สมบูรณ์ (ข้อมูลเสีย)' : 'ไม่พบ QR บนสลิป (สลิปจริงต้องมี QR)';
   else {
     const qref = String(o.qr.transRef).toUpperCase();
@@ -1613,6 +1614,7 @@ async function verifySlipWithOcrServer(imageUrl, cfg) {
       const sims = toks.map(x => similarity(x, qref));
       const best = Math.max(...sims);
       const skelOk = !partOk && best < 0.6 ? slipRefFoundInText(qref, [o.text, o.textEng]) : true;
+      if (!partOk && best < 0.6 && !skelOk) refMismatch = true;
       if (!partOk && best < 0.6 && !skelOk) qrIssue = 'เลขที่รายการในสลิปไม่ตรงกับ QR (QR ' + o.qr.transRef + ' · ในสลิป ' + toks[sims.indexOf(best)] + ')';
     }
   }
@@ -1639,7 +1641,7 @@ async function verifySlipWithOcrServer(imageUrl, cfg) {
       transRef, amount: p.amount, dateText: p.dateText,
       receiverAccounts: p.receiverAccounts, receiverNameTh: p.receiverNameTh, receiverBank: '',
       isDuplicate: false, matchResult: 'skipped', provider: 'ocr', unverified: true, ocrText: (o.text + '\n' + (o.textEng || '')).slice(0, 6000),
-      qrRef: qrOk, qrIssue, senderBank: o.qr ? o.qr.bank : ''
+      qrRef: qrOk, qrIssue, refMismatch, senderBank: o.qr ? o.qr.bank : ''
     }, errCode: ''
   };
 }
@@ -3218,7 +3220,7 @@ app.get('/', (req, res) => {
                                 <label class="flex flex-wrap items-center gap-2 text-xs font-semibold text-slate-600">📷 สลิปที่ไม่มี QR / QR ไม่ตรงกับเลขที่รายการ:
                                     <select id="ocr-noqr-mode" class="p-1.5 text-xs border border-slate-200 rounded-lg bg-white font-normal">
                                         <option value="review">รอแอดมินตรวจ (ตอบลูกค้าว่าได้รับสลิปแล้ว) · แนะนำ</option>
-                                        <option value="invalid">ตอบว่าสลิปไม่ถูกต้องทันที</option>
+                                        <option value="invalid">ตอบว่าสลิปไม่ถูกต้องทันที (เฉพาะไม่มี QR · เลขไม่ตรง QR ยังให้แอดมินตรวจ)</option>
                                         <option value="allow">ไม่ตรวจ QR</option>
                                     </select></label>
                                 <p class="text-[11px] text-slate-500">สลิปจริงทุกธนาคารมี QR · สลิปปลอม/ตัดต่อมักไม่มี QR หรือก๊อป QR จากสลิปใบอื่นมาแปะ (เลขที่รายการจะไม่ตรงกัน)</p>
@@ -4642,14 +4644,17 @@ app.get('/', (req, res) => {
         }
 
         // 👤 ปุ่มตัดสินสลิป (รอแอดมินตรวจ / ตรวจไม่ได้ / ปัญหาระบบ)
+        // แถว "สลิปไม่ถูกต้อง" -> มีปุ่มแก้ผลแบบเล็ก (อนุมัติ / ตรวจใหม่) เผื่อระบบตัดสินผิด
         function slipActionButtons(a) {
-            if (['review', 'unreadable', 'system'].indexOf(a.result) < 0) return '';
+            const inv = a.result === 'invalid';
+            if (['review', 'unreadable', 'system'].indexOf(a.result) < 0 && !inv) return '';
             const id = escapeHtml(a.id || '');
             const cls = 'px-2 py-0.5 rounded-lg text-[11px] font-bold border mr-1 mt-1 ';
+            const soft = 'border-slate-300 text-slate-600 bg-white hover:bg-slate-50';
             let h = '<div class="mt-1" id="slip-act-' + id + '">';
-            h += '<button type="button" data-id="' + id + '" data-amount="' + (a.amount ? a.amount : '') + '" onclick="slipDecide(this, ' + "'approve'" + ')" class="' + cls + 'border-emerald-500 text-emerald-700 bg-emerald-50 hover:bg-emerald-100">✅ อนุมัติ</button>';
-            h += '<button type="button" data-id="' + id + '" onclick="slipDecide(this, ' + "'reject'" + ')" class="' + cls + 'border-rose-400 text-rose-700 bg-rose-50 hover:bg-rose-100">❌ ปฏิเสธ</button>';
-            if (a.hasImage) h += '<button type="button" data-id="' + id + '" onclick="slipRecheck(this)" class="' + cls + 'border-sky-400 text-sky-700 bg-sky-50 hover:bg-sky-100">🔁 ตรวจใหม่</button>';
+            h += '<button type="button" data-id="' + id + '" data-amount="' + (a.amount ? a.amount : '') + '" onclick="slipDecide(this, ' + "'approve'" + ')" title="' + (inv ? 'ระบบตัดสินผิด สลิปถูกต้อง' : '') + '" class="' + cls + (inv ? soft : 'border-emerald-500 text-emerald-700 bg-emerald-50 hover:bg-emerald-100') + '">✅ อนุมัติ</button>';
+            if (!inv) h += '<button type="button" data-id="' + id + '" onclick="slipDecide(this, ' + "'reject'" + ')" class="' + cls + 'border-rose-400 text-rose-700 bg-rose-50 hover:bg-rose-100">❌ ปฏิเสธ</button>';
+            if (a.hasImage) h += '<button type="button" data-id="' + id + '" onclick="slipRecheck(this)" class="' + cls + (inv ? soft : 'border-sky-400 text-sky-700 bg-sky-50 hover:bg-sky-100') + '">🔁 ตรวจใหม่</button>';
             return h + '<span class="text-[11px] text-slate-500" data-msg="1"></span></div>';
         }
         function slipActMsg(btn, t, bad) {
@@ -7618,7 +7623,9 @@ app.post('/api/slip/decide', checkAuth, async (req, res) => {
   if (!pageData) return res.json({ success: false, error: 'ไม่พบเพจ' });
   const a = (pageData.slipAttempts || []).find(x => x.id === String(req.body.id || ''));
   if (!a || !a.senderId) return res.json({ success: false, error: 'ไม่พบรายการนี้ (อาจหลุดจากประวัติ 50 รายการล่าสุดแล้ว)' });
-  if (!['review', 'unreadable', 'system'].includes(a.result)) return res.json({ success: false, error: a.result === 'retry' ? 'รายการนี้ระบบกำลังลองใหม่อัตโนมัติ รอผลสักครู่' : 'รายการนี้ตัดสินไปแล้ว (' + a.result + ')' });
+  // แถว "สลิปไม่ถูกต้อง" อนุมัติทับได้ (ระบบอาจตัดสินผิด เช่น อ่านตัวอักษรในรูปเพี้ยน) · ปฏิเสธซ้ำไม่ได้
+  const fixInvalid = a.result === 'invalid' && req.body.action === 'approve';
+  if (!['review', 'unreadable', 'system'].includes(a.result) && !fixInvalid) return res.json({ success: false, error: a.result === 'retry' ? 'รายการนี้ระบบกำลังลองใหม่อัตโนมัติ รอผลสักครู่' : 'รายการนี้ตัดสินไปแล้ว (' + a.result + ')' });
   const cfg = pageData.config || {};
   const by = '👤 แอดมิน' + (req.userId ? ' ' + req.userId : '');
   if (req.body.action === 'reject') {
@@ -7633,7 +7640,11 @@ app.post('/api/slip/decide', checkAuth, async (req, res) => {
   const amount = Math.round((parseFloat(String(req.body.amount ?? a.amount ?? '').replace(/[^0-9.]/g, '')) || 0) * 100) / 100;
   if (!(amount > 0)) return res.json({ success: false, error: 'กรุณาใส่ยอดเงิน' });
   const usedSlips = pageData.usedSlips || (pageData.usedSlips = new Set());
-  const ref = a.code && !SLIP_ERR_CODES.test(String(a.code)) ? String(a.code) : 'MANUAL-' + a.id;
+  // แถวไม่ถูกต้อง: code เป็นเหตุผล (QR / account) ไม่ใช่เลขที่รายการ -> ใช้เลขที่รายการจริงที่เก็บไว้ / จาก QR ในหมายเหตุ (กันลูกค้าส่งสลิปเดิมซ้ำ)
+  const qrInNote = a.result === 'invalid' ? String(a.note || '').match(/[(]QR ([A-Za-z0-9][A-Za-z0-9\-]{7,44}) ·/) : null;
+  const ref = a.result === 'invalid'
+    ? String(a.ref || (qrInNote && qrInNote[1]) || 'MANUAL-' + a.id)
+    : (a.code && !SLIP_ERR_CODES.test(String(a.code)) ? String(a.code) : 'MANUAL-' + a.id);
   if (usedSlips.has(ref) && !req.body.force) return res.json({ success: false, dup: true, error: 'เลขที่รายการ ' + ref + ' ถูกใช้ไปแล้ว (อาจเป็นสลิปซ้ำ)' });
   usedSlips.add(ref);
   if (!pageData.slipLog) pageData.slipLog = [];
@@ -7658,7 +7669,7 @@ app.post('/api/slip/recheck', checkAuth, async (req, res) => {
   const a = (pageData.slipAttempts || []).find(x => x.id === String(req.body.id || ''));
   if (!a || !a.senderId) return res.json({ success: false, error: 'ไม่พบรายการนี้' });
   if (!a.imageUrl) return res.json({ success: false, error: 'รายการนี้ไม่มีรูปสลิป' });
-  if (!['review', 'unreadable', 'system'].includes(a.result)) return res.json({ success: false, error: a.result === 'retry' ? 'รายการนี้ระบบกำลังลองใหม่อัตโนมัติ รอผลสักครู่' : 'รายการนี้ตัดสินไปแล้ว (' + a.result + ')' });
+  if (!['review', 'unreadable', 'system', 'invalid'].includes(a.result)) return res.json({ success: false, error: a.result === 'retry' ? 'รายการนี้ระบบกำลังลองใหม่อัตโนมัติ รอผลสักครู่' : 'รายการนี้ตัดสินไปแล้ว (' + a.result + ')' });
   if (slipRechecking.has(a.id)) return res.json({ success: false, error: 'กำลังตรวจใหม่อยู่' });
   slipRechecking.add(a.id);
   const before = new Set((pageData.slipAttempts || []).map(x => x.id));
@@ -9870,12 +9881,14 @@ async function processSlipImageInner(targetRecord, pageId, senderId, imageUrl, a
   const qrMode = configStore.ocrNoQrMode || 'review';
   if (slip.provider === 'ocr' && slip.qrIssue && qrMode !== 'allow') {
     console.log(`📷 [Page: ${pageId}] ${slip.qrIssue}`);
-    if (qrMode === 'invalid') {
-      logSlipAttempt(pageData, { senderId, provider, result: 'invalid', code: 'QR', amount: slip.amount, note: '📷 ' + slip.qrIssue });
+    // QR ถูกต้อง แต่ "ตัวหนังสือ" เลขที่รายการอ่านไม่ตรง -> ส่วนใหญ่เป็นเพราะรูปเล็ก/ถูกบีบอัด ตัวอ่านอ่านตัวอักษรเพี้ยน
+    // ไม่ตอบลูกค้าว่าสลิปไม่ถูกต้องทันที (กันลูกค้าที่โอนจริงโดนปฏิเสธ) -> ให้แอดมินตรวจเสมอ
+    if (qrMode === 'invalid' && !slip.refMismatch) {
+      logSlipAttempt(pageData, { senderId, provider, result: 'invalid', code: 'QR', ref: slip.transRef, amount: slip.amount, note: '📷 ' + slip.qrIssue });
       labelSlipResult(targetRecord.pageData, senderId, 'invalid');
       await sendSlipReply(configStore.msgSlipInvalid);
     } else {
-      logSlipAttempt(pageData, { senderId, provider, result: 'review', code: slip.transRef, amount: slip.amount, dateText: slip.dateText || '', note: '📷 ' + slip.qrIssue + ' · รอแอดมินตรวจ' });
+      logSlipAttempt(pageData, { senderId, provider, result: 'review', code: slip.transRef, amount: slip.amount, dateText: slip.dateText || '', note: '📷 ' + slip.qrIssue + (slip.refMismatch ? ' · อาจเป็นเพราะอ่านตัวอักษรในรูปเพี้ยน' : '') + ' · รอแอดมินตรวจ' });
       await sendSlipReply(configStore.msgSlipReview || '✅ ได้รับสลิปแล้วค่ะ แอดมินกำลังตรวจสอบยอด จะแจ้งให้ทราบอีกครั้งนะคะ 🙏');
     }
     return;
@@ -9893,7 +9906,7 @@ async function processSlipImageInner(targetRecord, pageId, senderId, imageUrl, a
   }
   if (!receiverOk && !looseHit) {
     console.log(`❌ [Page: ${pageId}] เลขบัญชีผู้รับไม่ตรงกับร้านค้า`, slip.receiverAccounts, slip.receiverNameTh);
-    logSlipAttempt(pageData, { senderId, provider, result: 'invalid', code: slip.matchResult || 'account', amount: slip.amount,
+    logSlipAttempt(pageData, { senderId, provider, result: 'invalid', code: slip.matchResult || 'account', ref: slip.transRef, amount: slip.amount,
       note: (clearWrong ? '👁️ อ่านจากรูป: ' : '') + 'ปลายทางในสลิป: ' + (slip.receiverBank ? 'ธนาคาร ' + bankNameFromCode(slip.receiverBank) + ' ' : '') + (slip.receiverAccounts.join(', ') || '-') + (slip.receiverNameTh ? ' (' + slip.receiverNameTh + ')' : '')
         + ' · ที่ตั้งไว้: ' + (configStore.merchantBank || '-') + ' ' + (configStore.merchantAccount || '-') });
     labelSlipResult(targetRecord.pageData, senderId, 'invalid');
