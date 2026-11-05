@@ -2309,6 +2309,28 @@ async function beemoveRequest(bm, method, path, opts = {}) {
   return send(null);
 }
 
+// ❌ สร้างพัสดุไม่สำเร็จ -> ข้อความที่เข้าใจง่าย · Bee Move ตอบ [500] Internal server error เมื่อเงินในกระเป๋าไม่พอ
+// เช็กยอดเงินคงเหลือจริงก่อน (ครั้งเดียวต่อรอบสร้าง) แล้วค่อยแจ้งว่าเงินไม่พอ
+async function beemoveCreateErrorText(bm, e, walletRef) {
+  const raw = e.response ? beemoveError(e) : e.message;
+  const st = e.response?.status || 0;
+  const said = /insufficient|balance|wallet|credit|not enough|ไม่เพียงพอ|ยอดเงิน/i.test(raw);
+  if (!said && st < 500) return raw;
+  if (walletRef.amount === undefined) {
+    walletRef.amount = null;
+    try {
+      const r = await beemoveRequest(bm, 'GET', '/client/v1/init');
+      const w = (unwrapData(r.data) || {}).wallet?.wallet_amount;
+      if (w !== undefined && w !== null && !isNaN(Number(w))) walletRef.amount = Number(w);
+    } catch (err) { /* เช็กยอดเงินไม่ได้ */ }
+  }
+  const w = walletRef.amount, price = Number(e.bmPrice) || 0;
+  if (said || (w !== null && (w <= 0 || (price > 0 && w < price)))) {
+    return 'เงินใน Bee Move ไม่เพียงพอ' + (w !== null ? ' (คงเหลือ ฿' + w.toLocaleString('th-TH') + (price ? ' · ค่าส่ง ฿' + price.toLocaleString('th-TH') : '') + ')' : '') + ' · เติมเงินแล้วกดสร้างใหม่';
+  }
+  if (w === null) return 'เงินใน Bee Move อาจไม่เพียงพอ หรือระบบ Bee Move ขัดข้อง ' + (st ? '[' + st + ']' : '') + ' · เช็กยอดเงินแล้วกดสร้างใหม่';
+  return 'ระบบ Bee Move ขัดข้อง ' + (st ? '[' + st + ']' : '') + ' (เงินคงเหลือ ฿' + w.toLocaleString('th-TH') + ' พอ) · ลองกดสร้างใหม่อีกครั้ง';
+}
 function beemoveError(err) {
   const d = err.response?.data;
   if (d && typeof d === 'object' && !Buffer.isBuffer(d)) {
@@ -2952,7 +2974,9 @@ async function beemoveCreateShipment(bm, buyer, remark, prebuilt) {
     },
     label_remark: String(remark || '').slice(0, 100)
   };
-  const res = await beemoveRequest(bm, 'POST', '/client/v1/shipment-orders', { data: body });
+  let res;
+  try { res = await beemoveRequest(bm, 'POST', '/client/v1/shipment-orders', { data: body }); }
+  catch (e) { e.bmPrice = (body.estimate_price.sell_price || 0) + (body.estimate_price.service_area_fee || 0) + (body.estimate_price.cod_fee || 0); throw e; }
   const d = unwrapData(res.data) || {};
   const id = d.id || d.shipment_order_id || d.order_id;
   const trackingNo = d.partner_awb_no || d.awb_no || d.tracking_no || '';
@@ -9243,7 +9267,7 @@ async function runShipJob(pageData, s, userIds, labelUserIds) {
       if (token) runTask(() => autoNotifyTracking(pageData, bm, item), 'notify-tracking');
     } catch (e) {
       item.shipStatus = 'error';
-      item.shipNote = e.response ? beemoveError(e) : e.message;
+      item.shipNote = await beemoveCreateErrorText(bm, e, walletRef);
       job.failed++;
     }
     item.shipBusy = false;
@@ -9252,6 +9276,7 @@ async function runShipJob(pageData, s, userIds, labelUserIds) {
 
   // ⚡ เตรียมข้อมูลพัสดุทุกรายการ แล้วขอราคาขนส่งจาก Bee Move รวดเดียว (แทนทีละรายการ)
   const prebuilt = new Map();
+  const walletRef = {}; // ยอดเงินคงเหลือ Bee Move (เช็กครั้งเดียวเมื่อสร้างพัสดุไม่สำเร็จ)
   job.message = 'กำลังตรวจข้อมูลและขอราคาขนส่ง...';
   for (const uid of userIds) {
     const item = s.buyers.get(uid);
