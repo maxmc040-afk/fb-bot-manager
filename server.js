@@ -5036,8 +5036,11 @@ app.get('/', (req, res) => {
             }
             return pagers[key];
         }
+        // 📋 แสดงรายชื่อทั้งหมด (ไม่แบ่งหน้า) · เปลี่ยนเป็น true เพื่อกลับไปใช้แบ่งหน้า
+        const PAGER_ENABLED = false;
         // ตัดรายการเฉพาะหน้าปัจจุบัน + วาดแถบเลือกหน้า
         function pageSlice(key, list) {
+            if (!PAGER_ENABLED) { renderPagerBar(key, list.length, 1); return list; }
             const st = pagerState(key);
             const total = list.length;
             const pages = Math.max(1, Math.ceil(total / st.size));
@@ -5049,6 +5052,7 @@ app.get('/', (req, res) => {
         function renderPagerBar(key, total, pages) {
             const box = document.getElementById('pager-' + key);
             if (!box) return;
+            if (!PAGER_ENABLED) { box.innerHTML = ''; box.classList.add('hidden'); return; }
             const st = pagerState(key);
             const from = total ? (st.page - 1) * st.size + 1 : 0;
             const to = Math.min(total, st.page * st.size);
