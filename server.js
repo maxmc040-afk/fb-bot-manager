@@ -5181,6 +5181,32 @@ app.get('/', (req, res) => {
             } catch (e) { msg.innerText = '❌ ' + e.message; }
             finally { btn.disabled = false; }
         }
+        // ⌨️ กด Enter = กดปุ่มบันทึก/เข้าสู่ระบบ ของส่วนนั้น (ช่องกรอกข้อความบรรทัดเดียวเท่านั้น)
+        // ไม่ทำงานใน: กล่องข้อความหลายบรรทัด, ช่องค้นหา/กรอง, ช่องในตาราง, ตัวเลือก (select/checkbox), ตอนกำลังพิมพ์ภาษาไทย (IME)
+        document.addEventListener('keydown', function(e) {
+            if (e.key !== 'Enter' || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || e.isComposing || e.keyCode === 229) return;
+            const t = e.target;
+            if (!t || t.tagName !== 'INPUT') return;
+            const ty = String(t.type || 'text').toLowerCase();
+            if (['checkbox', 'radio', 'button', 'submit', 'file', 'range', 'color'].indexOf(ty) >= 0) return;
+            if (t.id === 'slip-amt-input') return; // มีปุ่มลัดของตัวเองแล้ว
+            const hint = (t.id || '') + ' ' + (t.placeholder || '') + ' ' + (t.className || '');
+            if (ty === 'search' || /search|filter|ค้นหา|กรอง/i.test(hint)) return;
+            if (t.closest('table')) return;
+            const SAVE_RE = /^ *(save[A-Za-z]*|handleAuth|submit[A-Za-z]*)[(]/;
+            let el = t.parentElement, btn = null;
+            for (let i = 0; el && el !== document.body && i < 12 && !btn; i++, el = el.parentElement) {
+                const cands = el.querySelectorAll('button[onclick]');
+                for (let j = 0; j < cands.length; j++) {
+                    const b = cands[j];
+                    if (!SAVE_RE.test(b.getAttribute('onclick') || '') || b.disabled || b.offsetParent === null) continue;
+                    btn = b; break;
+                }
+            }
+            if (!btn) return;
+            e.preventDefault();
+            btn.click();
+        });
         document.addEventListener('keydown', function(e) {
             if (!slipAmtEdit) return;
             if (e.key === 'Escape') closeSlipAmtEditor();
