@@ -1518,7 +1518,7 @@ async function callOcrServerNow(base, key, buf, noWait) {
         headers: { 'x-ocr-key': key }, timeout: 120000, maxBodyLength: Infinity, maxContentLength: 5 * 1024 * 1024
       });
       if (!r.data || !r.data.success) return { errCode: 'OCR_SERVER_ERROR', detail: String(r.data && r.data.error || '') };
-      return { text: String(r.data.text || ''), textEng: String(r.data.textEng || ''), qr: r.data.qr && r.data.qr.transRef ? r.data.qr : null, ms: r.data.ms, confidence: r.data.confidence, notSlip: !!r.data.notSlip };
+      return { text: String(r.data.text || ''), textEng: String(r.data.textEng || ''), qr: r.data.qr && r.data.qr.transRef ? r.data.qr : null, ms: r.data.ms, confidence: r.data.confidence, notSlip: !!r.data.notSlip, amounts: Array.isArray(r.data.amounts) ? r.data.amounts : undefined };
     } catch (e) {
       const st = e.response && e.response.status;
       const code = e.response && e.response.data && e.response.data.error;
@@ -1683,6 +1683,16 @@ async function verifySlipWithOcrServer(imageUrl, cfg) {
       if (!partOk && best < 0.6 && !skelOk) qrIssue = 'เลขที่รายการในสลิปไม่ตรงกับ QR (QR ' + o.qr.transRef + ' · ในสลิป ' + toks[sims.indexOf(best)] + ')';
     }
   }
+  // 💰 เซิร์ฟเวอร์ OCR อ่านยอดเงินซ้ำเฉพาะกรอบยอด (ตัวอ่านไทย) -> ไม่ตรงกับยอดที่ได้ = อาจอ่านยอดผิด (เช่น 2,100 -> 27,100) -> ให้แอดมินตรวจ
+  let amountIssue = '';
+  if (Array.isArray(o.amounts) && p.amount > 0) {
+    const same = (a, b) => a != null && isFinite(a) && Math.abs(Number(a) - b) < 0.005;
+    const tok = o.amounts.find(x => same(x && x.v, p.amount));
+    if (tok && !same(tok.th, p.amount)) {
+      const fm = (v) => Number(v).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+      amountIssue = 'ยอดเงินอ่านซ้ำได้ไม่ตรงกัน (' + [p.amount, tok.th, tok.en].filter(v => v != null && isFinite(v)).map(fm).join(' / ') + ' บาท)';
+    }
+  }
   // 📷 เลขที่รายการจาก QR บนสลิป แม่น 100% (กันสลิปซ้ำได้แน่นอน) · ไม่มี QR ค่อยใช้ที่อ่านจากตัวหนังสือ
   // อ่านวันที่/เวลาบนสลิปไม่ออก -> ใช้จากเลขที่รายการใน QR · ไม่ได้อีก -> เวลาที่ได้รับสลิป
   const hasDate = new RegExp(TH_MON_RE, 'i').test(p.dateText || '');
@@ -1706,7 +1716,7 @@ async function verifySlipWithOcrServer(imageUrl, cfg) {
       transRef, amount: p.amount, dateText: p.dateText,
       receiverAccounts: p.receiverAccounts, receiverNameTh: p.receiverNameTh, receiverBank: '',
       isDuplicate: false, matchResult: 'skipped', provider: 'ocr', unverified: true, ocrText: (o.text + '\n' + (o.textEng || '')).slice(0, 6000),
-      qrRef: qrOk, qrIssue, refMismatch, senderBank: o.qr ? o.qr.bank : ''
+      qrRef: qrOk, qrIssue, refMismatch, amountIssue, senderBank: o.qr ? o.qr.bank : ''
     }, errCode: ''
   };
 }
@@ -10052,6 +10062,13 @@ async function processSlipImageInner(targetRecord, pageId, senderId, imageUrl, a
   // 👁️ อ่านจากรูป (OCR): ไม่ผ่านแบบเข้ม -> ลองแบบยืดหยุ่น (ตัวอักษรอาจอ่านเพี้ยน)
   // 📷 เซิร์ฟเวอร์ OCR: สลิปไม่มี QR / QR ไม่ตรงกับเลขที่รายการ -> ตามที่ตั้งไว้ (รอแอดมินตรวจ / ตอบสลิปไม่ถูกต้อง / ไม่ตรวจ)
   const qrMode = configStore.ocrNoQrMode || 'review';
+  // 💰 ยอดเงินอ่านซ้ำไม่ตรงกัน -> ห้ามตอบว่าผ่าน ให้แอดมินตรวจยอดจากรูปเสมอ
+  if (slip.provider === 'ocr' && slip.amountIssue) {
+    console.log(`🔎 [Page: ${pageId}] ${slip.amountIssue} -> รอแอดมินตรวจ`);
+    logSlipAttempt(pageData, { senderId, provider, result: 'review', code: slip.transRef, amount: slip.amount, dateText: slip.dateText || '', note: '💰 ' + slip.amountIssue + ' · รอแอดมินตรวจยอดจากรูป' });
+    await sendSlipReply(configStore.msgSlipReview || '✅ ได้รับสลิปแล้วค่ะ แอดมินกำลังตรวจสอบยอด จะแจ้งให้ทราบอีกครั้งนะคะ 🙏');
+    return;
+  }
   if (slip.provider === 'ocr' && slip.qrIssue && qrMode !== 'allow') {
     console.log(`📷 [Page: ${pageId}] ${slip.qrIssue}`);
     // QR ถูกต้อง แต่ "ตัวหนังสือ" เลขที่รายการอ่านไม่ตรง -> ส่วนใหญ่เป็นเพราะรูปเล็ก/ถูกบีบอัด ตัวอ่านอ่านตัวอักษรเพี้ยน
