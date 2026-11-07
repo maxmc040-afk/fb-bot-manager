@@ -1056,6 +1056,7 @@ const defaultPageConfig = {
   gvisionApiKey: '',       // Google Cloud Vision API Key (อ่านสลิปจากรูป · ไม่ได้ยืนยันกับธนาคาร)
   ocrServerUrl: '',        // 🆓 เซิร์ฟเวอร์ OCR ของเราเอง (Render อีกตัว) เช่น https://slip-ocr.onrender.com
   ocrServerKey: '',        // รหัสลับ (OCR_SECRET) ของเซิร์ฟเวอร์ OCR
+  slipNameOnly: false,     // ✅ ตรวจสลิปด้วยชื่อบัญชีผู้รับอย่างเดียว (ไม่ตรวจเลขบัญชี/ธนาคาร)
   ocrNoQrMode: 'review',   // สลิปที่ไม่พบ QR / QR ไม่ตรงกับเลขที่รายการ: 'review' = รอแอดมินตรวจ · 'invalid' = ตอบสลิปไม่ถูกต้อง · 'allow' = ไม่ตรวจ
   enableCommentBot: true,  // สวิตช์หลัก เปิด/ปิด บอตตอบกลับคอมเมนต์ (โพสต์ทั่วไป)
   
@@ -1808,6 +1809,84 @@ function accountMatches(merchantAcc, slipAccounts) {
   }
   return false;
 }
+
+// ✅ โหมด "ตรวจด้วยชื่อบัญชีผู้รับเท่านั้น"
+// สลิปมักย่อนามสกุล เช่น "น.ส. วราภรณ์ แ" / "นาย ณัฐวุฒิ อ." -> ชื่อต้องตรง + นามสกุลที่เห็นต้องเป็นตัวต้นของนามสกุลจริง
+// คืน 'match' | 'mismatch' (อ่านชื่อได้ชัดว่าเป็นคนอื่น) | 'unclear' (อ่านไม่ชัด/มีแค่ชื่อ -> ให้แอดมินตรวจ)
+function nameOnlyTokens(v) {
+  return String(v || '').replace(/ํา/g, 'ำ')
+    .replace(/^[^฀-๿a-zA-Z]+/, '')
+    .replace(/^(นางสาว|น\.\s*ส\.?|นาย|นาง|ด\.\s*ช\.?|ด\.\s*ญ\.?|MISS|MRS|MR|MS)\.?\s*/i, '')
+    .split(/\s+/).map(x => x.replace(/[^฀-๿a-zA-Z]/g, '').toLowerCase()).filter(Boolean);
+}
+// โครงตัวอักษร: ตัวที่ OCR อ่านสลับกันบ่อยถือเป็นตัวเดียวกัน (ฐ/จ/ช/ซ · ภ/ก · ร/ธ · น/บ/ป · ิ/ี ...) และไม่สนวรรณยุกต์
+// ใช้เทียบ "ทั้งชื่อและนามสกุล" เท่านั้น -> คนอื่นที่ชื่อ+นามสกุลตรงกันแบบนี้แทบไม่มี
+function nameSkel(v) {
+  return String(v || '').toLowerCase().replace(/ํา/g, 'ำ')
+    .replace(/[่้๊๋์็ํ]/g, '').replace(/ี/g, 'ิ').replace(/ู/g, 'ุ').replace(/ื/g, 'ึ')
+    .replace(/[ฐจซชฆฑ]/g, 'ช').replace(/[ภกถ]/g, 'ก').replace(/[รธ]/g, 'ร').replace(/[นบป]/g, 'น')
+    .replace(/[ศสษ]/g, 'ส').replace(/[ผฝพฟ]/g, 'พ').replace(/[ดค]/g, 'ด')
+    .replace(/^[ัิึุ]+/, '').replace(/[^฀-๿a-z]/g, '');
+}
+// คืน 'match' | 'mismatch' (ชื่อคนอื่นชัด ๆ) | 'unclear' (อ่านไม่ชัด / มีแค่ชื่อ -> ให้แอดมินตรวจ)
+function nameOnlyCompare(want, got, fuzzy) {
+  const w = nameOnlyTokens(want), g = nameOnlyTokens(got);
+  if (!w.length || !g.length) return 'unclear';
+  const th = (x) => /[฀-๿]/.test(x);
+  if (th(w[0]) !== th(g[0])) return 'unclear';                       // ชื่อไทยเทียบอังกฤษไม่ได้ (ใส่ชื่ออังกฤษเพิ่มได้)
+  const eq = (a, b) => a === b || (fuzzy && nameSkel(a) === nameSkel(b));
+  const pre = (whole, part) => whole.startsWith(part) || (fuzzy && nameSkel(whole).startsWith(nameSkel(part)) && nameSkel(part).length > 0);
+  const wj = w.join(''), gj = g.join('');
+  if (g.length === 1 && w.length >= 2 && g[0].length >= w[0].length + 1 && pre(wj, g[0])) return 'match'; // อ่านติดกัน "วราภรณ์แ"
+  if (!eq(g[0], w[0])) {
+    const best = Math.max(similarity(g[0], w[0]), similarity(gj, wj));
+    return best < 0.5 ? 'mismatch' : 'unclear';
+  }
+  if (w.length < 2) return g.length < 2 ? 'match' : 'unclear';
+  if (g.length < 2) return 'unclear';                                 // เห็นแค่ชื่อ ไม่เห็นนามสกุล
+  const gl = g.slice(1).join(''), wl = w.slice(1).join('');
+  if (eq(gl, wl) || pre(wl, gl)) return 'match';                      // นามสกุลเต็ม หรือย่อ "แ" / "แสน"
+  return similarity(gl, wl.slice(0, Math.max(gl.length, 1))) < 0.5 ? 'mismatch' : 'unclear';
+}
+const NAME_ONLY_TITLE_RE = /(นางสาว|น\.\s*ส|นาย|นาง|MISS|MRS|MR\b|MS\b)/i;
+function slipNameOnlyCheck(cfg, slip) {
+  const wants = String(cfg.merchantName || '').split(/[,/]/).map(x => x.trim()).filter(Boolean);
+  const fuzzy = !!slip.unverified; // อ่านจากรูป: ยอมตัวอักษรที่ OCR อ่านสลับกันบ่อย
+  if (slip.receiverNameTh) for (const w of wants) if (nameOnlyCompare(w, slip.receiverNameTh, fuzzy) === 'match') return { result: 'match', name: slip.receiverNameTh };
+  if (fuzzy) {
+    // หาชื่อร้านทั้งชื่อ+นามสกุลในข้อความ (รวมกรณีขึ้นบรรทัดใหม่) · ถ้าเจอแค่ในบรรทัดชื่อแรก (ผู้โอน) ไม่นับ
+    const lines = String(slip.ocrText || '').split('\n').map(l => l.trim()).filter(Boolean);
+    const titled = lines.map((l, i) => NAME_ONLY_TITLE_RE.test(l) ? i : -1).filter(i => i >= 0);
+    for (let i = 0; i < lines.length; i++) {
+      const isSender = titled.length >= 2 && i === titled[0];
+      if (isSender) continue;
+      const one = lines[i].replace(/^[^฀-๿a-zA-Z]+/, '');
+      const nextIsSender = titled.length >= 2 && i + 1 === titled[0];
+      const two = one + ' ' + (nextIsSender ? '' : (lines[i + 1] || ''));
+      // บรรทัดชื่อผู้รับที่ย่อนามสกุล เช่น "น.ส. วราภรณ์ แ"
+      if (titled.includes(i)) for (const w of wants) if (nameOnlyCompare(w, one.replace(/^.*?(?=นางสาว|น\.\s*ส|นาย|นาง|MISS|MRS|MR|MS)/i, ''), true) === 'match') return { result: 'match', name: one };
+      for (const w of wants) {
+        const ws = nameSkel(nameOnlyTokens(w).join(''));
+        if (nameOnlyTokens(w).length < 2 || ws.length < 6) continue;   // ต้องมีทั้งชื่อและนามสกุล
+        for (const t of [one, two]) {
+          const toks = t.split(/\s+/).map(x => x.replace(/^[^\s]{0,2}?(นางสาว|น\.\s*ส\.?|นาย|นาง|MISS|MRS|MR|MS)\.?/i, '')).filter(Boolean);
+          // ต้องเริ่มที่ต้นคำ และจบที่ท้ายคำ (กัน "แสนทวีศักดิ์" / "...วราภรณ์" ติดคำอื่น)
+          for (let a = 0; a < toks.length; a++) {
+            let acc = '';
+            for (let b = a; b < toks.length && acc.length <= ws.length; b++) {
+              acc += nameSkel(toks[b]);
+              if (acc === ws) return { result: 'match', name: toks.slice(a, b + 1).join(' ') };
+            }
+          }
+        }
+      }
+    }
+  }
+  let res = 'unclear';
+  if (slip.receiverNameTh && wants.length && wants.every(w => nameOnlyCompare(w, slip.receiverNameTh, fuzzy) === 'mismatch')) res = 'mismatch';
+  return { result: res, name: slip.receiverNameTh || '' };
+}
+
 
 // 🔧 เทียบชื่อผู้รับ (ใช้เมื่อสลิปไม่ส่งเลขบัญชีมาให้)
 function nameMatches(merchantName, slipName) {
@@ -3309,6 +3388,10 @@ app.get('/', (req, res) => {
 
                         <div class="bg-rose-50/50 border border-rose-200 rounded-2xl p-5 space-y-4">
                             <h4 class="text-xs font-bold text-rose-700 uppercase tracking-wider">บัญชีผู้รับเงินที่ต้องตรวจสอบ</h4>
+                            <label class="flex items-start gap-2 text-sm text-slate-700 cursor-pointer select-none">
+                                <input type="checkbox" id="slip-name-only" class="mt-0.5 w-4 h-4 accent-rose-500">
+                                <span><b>ตรวจด้วยชื่อบัญชีผู้รับเท่านั้น</b> <span class="text-xs text-slate-500">(ไม่ตรวจเลขบัญชีและธนาคาร · ใช้ชื่อในช่อง "ชื่อบัญชีผู้รับเงิน" · ถ้ามีชื่อภาษาอังกฤษด้วย ใส่ต่อท้ายคั่นด้วย , เช่น วราภรณ์ แสนทวี, WARAPORN SAENTHAWEE)</span></span>
+                            </label>
                             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                                 <div>
                                     <label class="text-xs font-semibold text-slate-600 block mb-1">ธนาคารผู้รับ:</label>
@@ -4362,6 +4445,7 @@ app.get('/', (req, res) => {
             document.getElementById('merchant-bank').value = currentConfig.merchantBank || '';
             document.getElementById('merchant-account').value = currentConfig.merchantAccount || '';
             document.getElementById('merchant-name').value = currentConfig.merchantName || '';
+            document.getElementById('slip-name-only').checked = !!currentConfig.slipNameOnly;
             document.getElementById('msg-slip-success').value = currentConfig.msgSlipSuccess || '';
             document.getElementById('msg-slip-invalid').value = currentConfig.msgSlipInvalid || '';
             document.getElementById('msg-slip-unreadable').value = currentConfig.msgSlipUnreadable || '';
@@ -4553,6 +4637,7 @@ app.get('/', (req, res) => {
             currentConfig.merchantBank = document.getElementById('merchant-bank').value;
             currentConfig.merchantAccount = document.getElementById('merchant-account').value;
             currentConfig.merchantName = document.getElementById('merchant-name').value;
+            currentConfig.slipNameOnly = document.getElementById('slip-name-only').checked;
             currentConfig.msgSlipSuccess = document.getElementById('msg-slip-success').value;
             currentConfig.msgSlipInvalid = document.getElementById('msg-slip-invalid').value;
             currentConfig.msgSlipUnreadable = document.getElementById('msg-slip-unreadable').value;
@@ -9954,7 +10039,11 @@ async function processSlipImageInner(targetRecord, pageId, senderId, imageUrl, a
   }
 
   // ZWIZ ตรวจบัญชีปลายทางให้แล้ว (matched / not_matched) ถ้าไม่ได้ตรวจ (skipped) ใช้การเทียบของระบบเอง
-  const receiverOk = slip.matchResult === 'matched' ? true
+  // ✅ ตั้ง "ตรวจด้วยชื่อบัญชีผู้รับเท่านั้น" -> ไม่ดูเลขบัญชี/ธนาคาร (รวมผลเทียบบัญชีของ API)
+  const nameOnly = !!configStore.slipNameOnly && !!String(configStore.merchantName || '').trim();
+  const nameRes = nameOnly ? slipNameOnlyCheck(configStore, slip) : null;
+  const receiverOk = nameOnly ? nameRes.result === 'match'
+    : slip.matchResult === 'matched' ? true
     : slip.matchResult === 'not_matched' ? false
     : slip.receiverAccounts.length > 0
       ? accountMatches(configStore.merchantAccount, slip.receiverAccounts)
@@ -9973,6 +10062,20 @@ async function processSlipImageInner(targetRecord, pageId, senderId, imageUrl, a
       await sendSlipReply(configStore.msgSlipInvalid);
     } else {
       logSlipAttempt(pageData, { senderId, provider, result: 'review', code: slip.transRef, amount: slip.amount, dateText: slip.dateText || '', note: '📷 ' + slip.qrIssue + (slip.refMismatch ? ' · อาจเป็นเพราะอ่านตัวอักษรในรูปเพี้ยน' : '') + ' · รอแอดมินตรวจ' });
+      await sendSlipReply(configStore.msgSlipReview || '✅ ได้รับสลิปแล้วค่ะ แอดมินกำลังตรวจสอบยอด จะแจ้งให้ทราบอีกครั้งนะคะ 🙏');
+    }
+    return;
+  }
+  if (nameOnly && !receiverOk) {
+    const rd = 'ชื่อผู้รับในสลิป: ' + (nameRes.name || '-') + ' · ที่ตั้งไว้: ' + configStore.merchantName + ' (ตรวจชื่ออย่างเดียว)';
+    if (nameRes.result === 'mismatch') {
+      console.log(`❌ [Page: ${pageId}] ชื่อผู้รับไม่ตรง (ตรวจชื่ออย่างเดียว)`, nameRes.name);
+      logSlipAttempt(pageData, { senderId, provider, result: 'invalid', code: 'name', ref: slip.transRef, amount: slip.amount, dateText: slip.dateText || '', note: rd });
+      labelSlipResult(targetRecord.pageData, senderId, 'invalid');
+      await sendSlipReply(configStore.msgSlipInvalid);
+    } else {
+      console.log(`🔎 [Page: ${pageId}] อ่านชื่อผู้รับไม่ชัด รอแอดมินตรวจ (ตรวจชื่ออย่างเดียว)`, nameRes.name);
+      logSlipAttempt(pageData, { senderId, provider, result: 'review', code: slip.transRef, amount: slip.amount, dateText: slip.dateText || '', note: 'อ่านชื่อผู้รับไม่ชัด รอแอดมินตรวจ · ' + rd });
       await sendSlipReply(configStore.msgSlipReview || '✅ ได้รับสลิปแล้วค่ะ แอดมินกำลังตรวจสอบยอด จะแจ้งให้ทราบอีกครั้งนะคะ 🙏');
     }
     return;
